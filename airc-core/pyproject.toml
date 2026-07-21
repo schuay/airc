@@ -1,0 +1,29 @@
+[project]
+name = "airc-core"
+version = "0.1.0"
+description = "Shared substrate for the airc daemon suite: agent runner, model, artifacts, MCP toolset, token ledger"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain[google-genai]>=1.2.10",
+    "langgraph>=1.0.10",
+    "langchain-mcp-adapters>=0.2.1",
+    "langchain-google-vertexai>=3.0.0",
+    "langchain-deepseek>=1.0.1",
+    "langchain-anthropic>=1.0",
+    "langchain-openai>=1.0",
+    "platformdirs>=4.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/airc_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

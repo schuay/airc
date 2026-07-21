@@ -1,0 +1,45 @@
+# Virtual workspace root for the airc CORE: no package of its own. The five
+# members here are the domain-neutral substrate -- the chat room and
+# everything under it, carrying no application specifics. An app
+# lives in a separate repo that consumes this one as a git submodule; see that
+# repo's README.
+#
+# Every package is identically shaped (pyproject.toml, src/<name>/, tests/); one
+# uv.lock here gives the core a single consistent resolution. Naming convention:
+# unprefixed members (bus, deepagent) are app-agnostic primitives, airc-* members
+# are core components.
+#
+#   uv sync --all-packages     # install everything into the shared .venv
+#   uv run --package X pytest  # one member's suite from anywhere
+#   cd <member> && uv run pytest  # equivalent, from the member dir
+[tool.uv.workspace]
+members = [
+    "bus",
+    "airc-core",
+    "airc-tools",
+    "deepagent",
+    "airc-room",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.15",
+]
+
+# `uv run pytest` from the root spans every member. Test basenames repeat
+# across members (each has a tests/test_config.py, ...), which the default
+# prepend import mode rejects as module collisions; importlib gives each file
+# its own module identity. tests/__init__.py would NOT fix this: every tests/
+# dir would become the same package name. consider_namespace_packages stops
+# importlib mode from deriving module names from the member directories --
+# without it, loading a member's tests/conftest.py under the member's own name
+# shadows the installed package with a namespace module for the member dir
+# (dir name == package name). asyncio_mode must be repeated here because pytest
+# reads exactly one config file -- for a root run the member settings do not apply.
+[tool.pytest.ini_options]
+testpaths = ["*/tests"]
+addopts = "--import-mode=importlib"
+consider_namespace_packages = true
+asyncio_mode = "auto"

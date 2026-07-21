@@ -1,0 +1,377 @@
+"""_GrowingPrefixCache: per-conversation boundary growth, isolation, recovery.
+
+Cache create/delete are mocked; these exercise the per-call logic (what to cache,
+what tail to send, run-scoping, the window guard, LRU eviction, cooldown) plus a
+real create_agent graph end to end. tools_tokens is set above the 4096 floor so
+caching engages without padding the message content.
+"""
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+from airc_core.agent import _GrowingPrefixCache, _is_cache_gone, _last_step_boundary
+
+
+async def _noop(r):
+    return "ok"
+
+
+SYS = SystemMessage("system prompt")
+
+
+class _Req:
+    """ModelRequest stand-in: messages, state, runtime.execution_info.thread_id,
+    and override(model=, messages=)."""
+
+    def __init__(self, messages, thread="t1", model="BASE"):
+        self.messages = messages
+        self.model = model
+        self.state = {}
+        self.runtime = type(
+            "RT", (), {"execution_info": type("EI", (), {"thread_id": thread})()}
+        )()
+
+    def override(self, *, model=None, messages=None):
+        return _Req(
+            messages if messages is not None else self.messages,
+            thread=self.runtime.execution_info.thread_id,
+            model=model if model is not None else self.model,
+        )
+
+
+def _step(i):
+    cid = f"c{i}"
+    return [
+        AIMessage(content="", tool_calls=[{"name": "look", "args": {}, "id": cid}]),
+        ToolMessage(content=f"result {i}", tool_call_id=cid),
+    ]
+
+
+def _history(n_steps):
+    msgs = [HumanMessage("hello")]
+    for i in range(n_steps):
+        msgs += _step(i)
+    return msgs
+
+
+def _mw(tools_tokens=5000, growth=8):
+    state = {"created": [], "deleted": []}
+
+    async def create(prefix):
+        name = f"c{len(state['created']) + 1}"
+        state["created"].append((name, len(prefix)))
+        return name
+
+    async def delete(name):
+        state["deleted"].append(name)
+
+    def model_for(name):
+        return f"M:{name}"
+
+    mw = _GrowingPrefixCache(
+        create, delete, model_for, SYS, tools_tokens, growth=growth
+    )
+    return mw, state
+
+
+async def _run(mw, req):
+    seen = {}
+
+    async def handler(r):
+        seen["model"], seen["messages"] = r.model, r.messages
+        return "ok"
+
+    await mw.awrap_model_call(req, handler)
+    return seen
+
+
+# ── _is_cache_gone ───────────────────────────────────────────────────────────
+
+
+def test_is_cache_gone_matches_deleted_and_expired():
+    assert _is_cache_gone(RuntimeError("404 CachedContent not found"))
+    assert _is_cache_gone(Exception("400 Cache content 7808 is expired."))
+    assert not _is_cache_gone(RuntimeError("429 rate limit exceeded"))
+
+
+def test_is_cache_gone_matches_known_id_regardless_of_wording():
+    assert _is_cache_gone(Exception("780 has been evicted, sorry"), name="780")
+    assert not _is_cache_gone(Exception("400 malformed request"), name="780")
+    assert not _is_cache_gone(Exception("400 missing a thought signature"))
+
+
+def test_last_step_boundary():
+    assert _last_step_boundary([HumanMessage("x")]) == 0
+    h = _history(3)
+    assert _last_step_boundary(h) == 5
+    assert isinstance(h[5], AIMessage) and isinstance(h[4], ToolMessage)
+
+
+# ── boundary growth ──────────────────────────────────────────────────────────
+
+
+async def test_first_call_caches_system_only_and_sends_full_history():
+    # boundary 0 == the system+tools cache: full history is the tail.
+    mw, state = _mw()
+    seen = await _run(mw, _Req(_history(0)))
+    assert state["created"] == [("c1", 1)]  # cached [system] only
+    assert seen["model"] == "M:c1"
+    assert seen["messages"] == _history(0)  # full history sent
+
+
+async def test_grows_to_a_step_boundary_and_sends_only_the_tail():
+    mw, state = _mw(growth=8)
+    await mw.awrap_model_call(_Req(_history(0)), _noop)  # cache gen c1 (boundary 0)
+    msgs = _history(4)  # len 9 -> grows the cache
+    seen = await _run(mw, _Req(msgs))
+    boundary = _last_step_boundary(msgs)  # 7
+    assert state["created"][-1] == ("c2", boundary + 1)  # [system]+prefix
+    assert state["deleted"] == ["c1"]  # superseded gen deleted
+    assert seen["model"] == "M:c2"
+    assert seen["messages"] == msgs[boundary:]
+    assert isinstance(seen["messages"][0], AIMessage)  # tail starts on a model turn
+
+
+# ── per-conversation isolation ───────────────────────────────────────────────
+
+
+async def test_threads_get_independent_caches():
+    mw, state = _mw()
+    await _run(mw, _Req(_history(0), thread="A"))
+    await _run(mw, _Req(_history(0), thread="B"))
+    assert {k for k in mw._states} == {"A", "B"}
+    assert mw._states["A"].name != mw._states["B"].name
+    assert len(state["created"]) == 2  # one cache per conversation
+
+
+async def test_new_run_shrink_resets_and_drops_prior_cache():
+    # Review keys all runs to one (None) state; a shorter list = a fresh run.
+    mw, state = _mw()
+    await _run(mw, _Req(_history(5), thread=None))
+    first = mw._states[None].name
+    await _run(mw, _Req(_history(0), thread=None))
+    assert first in state["deleted"]
+
+
+# ── recovery / failure ───────────────────────────────────────────────────────
+
+
+async def test_mid_run_cache_gone_degrades_and_rebuilds():
+    mw, state = _mw()
+    await _run(mw, _Req(_history(0)))  # cache c1
+    calls = []
+
+    async def handler(r):
+        calls.append(r.model)
+        if r.model == "M:c1" and len(calls) == 1:
+            raise RuntimeError("400 Cache content c1 is expired.")
+        return "ok"
+
+    out = await mw.awrap_model_call(_Req(_history(0)), handler)
+    assert out == "ok"
+    assert calls[0] == "M:c1" and calls[1] == "BASE"  # tried cache, then uncached
+    assert mw._states["t1"].name is None  # reset for rebuild next call
+
+
+async def test_permanent_create_failure_cools_down_instance_wide():
+    state = {"attempts": 0}
+
+    async def create(prefix):
+        state["attempts"] += 1
+        raise RuntimeError("permission denied")
+
+    async def delete(name):
+        pass
+
+    mw = _GrowingPrefixCache(create, delete, lambda n: n, SYS, 5000, growth=4)
+    # Two conversations both try to create; a permanent failure holds the long
+    # cooldown, capping the storm at one attempt regardless of thread.
+    for thread in ("A", "B", "A", "B"):
+        await _run(mw, _Req(_history(2), thread=thread))
+    assert state["attempts"] == 1
+
+
+async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatch):
+    import airc_core.agent as agent
+
+    # Collapse the transient cooldown to zero so the next turn is immediately
+    # eligible to retry -- the regression this guards: a prefill overload used to
+    # trip the 15m permanent blackout and run uncached for many minutes.
+    monkeypatch.setattr(agent, "_CACHE_TRANSIENT_COOLDOWN_S", 0)
+    state = {"attempts": 0}
+
+    async def create(prefix):
+        state["attempts"] += 1
+        if state["attempts"] == 1:
+            raise RuntimeError("429 resource_exhausted: overloaded prefill queue")
+        return f"c{state['attempts']}"
+
+    async def delete(name):
+        pass
+
+    mw = _GrowingPrefixCache(create, delete, lambda n: f"M:{n}", SYS, 5000, growth=4)
+    # First turn's create fails transiently; the short cooldown lets the next
+    # turn rebuild instead of staying uncached.
+    first = await _run(mw, _Req(_history(2), thread="A"))
+    assert first["model"] == "BASE"  # uncached this turn
+    second = await _run(mw, _Req(_history(2), thread="A"))
+    assert state["attempts"] == 2  # retried, not blacked out
+    assert second["model"] == "M:c2"  # served from the rebuilt cache
+
+
+# ── window guard ─────────────────────────────────────────────────────────────
+
+
+async def test_window_guard_serves_uncached_when_prefix_plus_tail_too_big():
+    # A prefix near the cap plus a large tail would exceed the window: the cache
+    # must step aside and send the full request uncached for that call.
+    mw, _ = _mw(tools_tokens=500_000)  # prefix ~500k, under the 0.6*1M cap
+    await _run(mw, _Req(_history(0)))  # creates cache (prefix_tokens ~500k)
+    big_tail = _history(0) + [HumanMessage("x" * 1_600_000)]  # ~400k-token tail
+    seen = await _run(mw, _Req(big_tail))
+    assert seen["model"] == "BASE"  # served uncached, not via the cache
+    assert seen["messages"] == big_tail
+
+
+async def test_window_guard_does_not_double_count_the_prefix():
+    # A large prefix plus a SMALL tail whose recent AIMessage reports the last
+    # call's FULL prompt (prefix + tail) must NOT trip the guard. The old code
+    # added prefix_tokens to a tail estimate that already floored on that full
+    # prompt, ~doubling the prefix and disabling the cache on exactly the large
+    # contexts it exists for.
+    mw, _ = _mw(tools_tokens=500_000)  # prefix_tokens ~500k
+    await _run(mw, _Req(_history(0)))  # create the cache
+    tail_msg = AIMessage(
+        content="ok",  # tiny in chars...
+        usage_metadata={
+            "input_tokens": 550_000,  # ...but reports the full prefix+tail prompt
+            "output_tokens": 1,
+            "total_tokens": 550_001,
+        },
+    )
+    seen = await _run(mw, _Req(_history(0) + [tail_msg]))
+    # ~550k total is under the 0.9M window, so the cache must serve it -- not step
+    # aside to BASE as the double-counted 500k+550k would have forced.
+    assert seen["model"] != "BASE"
+
+
+async def test_prefix_size_corrected_from_reported_cache_read():
+    # The serve guard's char estimate is replaced by the provider's exact
+    # cache_read after a cached call, so a token-dense prefix the estimate
+    # under-counted is bounded accurately on later, larger tails.
+    from langchain.agents.middleware.types import ModelResponse
+
+    mw, _ = _mw(tools_tokens=10_000)  # estimate ~10k
+    st = mw._states  # populated on first call below
+
+    async def handler(r):
+        msg = AIMessage(
+            content="ok",
+            usage_metadata={
+                "input_tokens": 700_000,
+                "output_tokens": 1,
+                "total_tokens": 700_001,
+                "input_token_details": {"cache_read": 700_000},  # true prefix size
+            },
+        )
+        return ModelResponse(result=[msg])
+
+    await mw.awrap_model_call(_Req(_history(0)), handler)
+    assert st["t1"].prefix_tokens == 700_000  # corrected from the estimate
+
+
+# ── LRU eviction ─────────────────────────────────────────────────────────────
+
+
+async def test_lru_eviction_deletes_the_evicted_cache(monkeypatch):
+    import airc_core.agent as agent
+
+    monkeypatch.setattr(agent, "_GROWING_MAX_STATES", 2)
+    mw, state = _mw()
+    for thread in ("A", "B", "C"):  # third insertion evicts the LRU (A)
+        await _run(mw, _Req(_history(0), thread=thread))
+    assert "A" not in mw._states
+    assert state["created"][0][0] in state["deleted"]  # A's cache was deleted
+
+
+# ── end-to-end through a real create_agent graph ─────────────────────────────
+
+
+class _ScriptModel(BaseChatModel):
+    shared: dict
+    label: str
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    @property
+    def _llm_type(self) -> str:
+        return "script"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        self.shared["received"].append((self.label, list(messages)))
+        i = self.shared["i"]
+        msg = self.shared["script"][i]
+        self.shared["i"] = min(i + 1, len(self.shared["script"]) - 1)
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
+async def test_end_to_end_graph_grows_cache_and_sends_tail():
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import ModelCallLimitMiddleware
+    from langchain_core.tools import tool
+
+    from airc_core.agent import CallBudgetMiddleware, base_middleware
+
+    @tool
+    def look(x: str) -> str:
+        """Look something up."""
+        return f"result for {x}"
+
+    script = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "look", "args": {"x": str(k)}, "id": f"c{k}"}],
+        )
+        for k in range(6)
+    ] + [AIMessage(content="NO_MAJOR_ISSUES")]
+    shared = {"script": script, "i": 0, "received": []}
+    base = _ScriptModel(shared=shared, label="base")
+    cached = _ScriptModel(shared=shared, label="cached")
+
+    state = {"created": [], "deleted": []}
+
+    async def create(prefix):
+        name = f"cache{len(state['created']) + 1}"
+        state["created"].append(name)
+        return name
+
+    async def delete(name):
+        state["deleted"].append(name)
+
+    gc = _GrowingPrefixCache(
+        create, delete, lambda n: cached, SystemMessage("SYS"), 5000, growth=4
+    )
+    mw = base_middleware("google_genai:fake", "SYS", [look])
+    mw.append(gc)
+    mw += [
+        CallBudgetMiddleware([(100, "soft"), (200, "hard")]),
+        ModelCallLimitMiddleware(run_limit=50, exit_behavior="end"),
+    ]
+    agent = create_agent(
+        base, tools=[look], system_prompt="SYS", middleware=mw
+    ).with_config({"recursion_limit": 500})
+
+    result = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
+
+    assert result["messages"][-1].text == "NO_MAJOR_ISSUES"
+    assert state["created"]  # caching engaged in the live graph
+    # Once the boundary grows past 0, the cached model receives only the tail
+    # (no original HumanMessage). create_agent prepends system_message, so the
+    # tail begins at index 1.
+    cached_calls = [m for label, m in shared["received"] if label == "cached"]
+    assert cached_calls
+    grown = [m for m in cached_calls if not any(isinstance(x, HumanMessage) for x in m)]
+    assert grown, "expected at least one sub-tail call once the cache grew"
+    assert all(isinstance(m[0], SystemMessage) for m in cached_calls)

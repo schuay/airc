@@ -1,0 +1,59 @@
+[project]
+name = "airc-room"
+version = "0.1.0"
+description = "Domain-neutral chat room core: room, orchestrator, personas, turn loop, transports"
+requires-python = ">=3.12"
+
+dependencies = [
+    "bus",
+    "airc-core",
+    # Reused verbatim by the memory tools (airc_room.memory): the jailed store
+    # write/read/edit primitives are airc-tools' file bodies behind a jail, not a
+    # copy. airc-tools is a leaf lib (no airc deps), so this stays acyclic.
+    "airc-tools",
+    "langchain[google-genai]>=1.2.10",
+    "langchain-google-vertexai>=3.0.0",
+    "langchain-deepseek>=1.0.1",
+    "langchain-anthropic>=1.0",
+    "langchain-openai>=1.0",
+    "langgraph>=1.0.10",
+    "langgraph-checkpoint-sqlite>=3.0.3",
+    "aiosqlite>=0.20",
+    "regex>=2024.0",  # per-search timeout for the chat_search grep tool
+    # Persona markdown -> the Matrix HTML subset in the matrix transport's
+    # _render. Pure-Python, no C deps; escape=True keeps raw HTML inert.
+    "mistune>=3.0",
+    "platformdirs>=4.0",
+    "prompt-toolkit>=3.0.52",
+    # Matrix transport (in-core). Plain nio for the unencrypted v1; the
+    # E2E device-key path is a later [e2e] extra (olm), which the transport is
+    # shaped to accept without an interface change (see D4).
+    "matrix-nio>=0.25",
+]
+
+# The command stays `airc` (prod + muscle memory); only the module path moved.
+[project.scripts]
+airc = "airc_room.cli:main"
+
+[tool.uv.sources]
+bus = { workspace = true }
+airc-core = { workspace = true }
+airc-tools = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.15",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/airc_room"]

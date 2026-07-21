@@ -1,0 +1,27 @@
+[project]
+name = "deepagent"
+version = "0.1.0"
+description = "Reusable runtime for driving an in-process coding agent through a bounded, resumable turn loop"
+requires-python = ">=3.12"
+# airc-core brings the model stack (langchain/langgraph/vertex) + middleware,
+# ledger, and MCPToolset; airc-tools is the worktree shell/read/edit. The turn
+# engine is all this package adds on top.
+dependencies = ["airc-core", "airc-tools", "pydantic>=2"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
+
+[tool.uv.sources]
+airc-core = { workspace = true }
+airc-tools = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
