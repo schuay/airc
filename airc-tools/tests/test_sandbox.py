@@ -1,4 +1,5 @@
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +93,52 @@ def test_missing_optional_binds_skipped(profile):
     s = " ".join(profile.wrapper())
     assert str(profile.ro_paths[0]) not in s
     assert str(profile.opaque_ro_paths[0]) not in s
+
+
+def test_unreachable_optional_binds_skipped(profile, monkeypatch):
+    # An optional bind source we cannot stat for a reason OTHER than absence --
+    # the real case is a corp path on a credential-gated mount raising ENOKEY --
+    # is skipped like a missing one. Path.exists() re-raises anything that is not
+    # ENOENT/ENOTDIR/EBADF/ELOOP, so testing "missing" alone does not cover this:
+    # the error propagated out of wrapper() and failed the whole job.
+    import errno
+
+    gated = profile.ro_paths[0]
+    real_stat = Path.stat
+
+    def fake_stat(self, *a, **kw):
+        if self == gated:
+            raise OSError(errno.ENOKEY, "Required key not available", str(self))
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    s = " ".join(profile.wrapper())
+    assert str(gated) not in s
+    # The rest of the profile is unaffected: one unreachable bind is not fatal.
+    assert f"--bind {profile.root} {profile.root}" in s
+    assert f"--ro-bind {profile.opaque_ro_paths[0]}" in s
+
+
+def test_unreachable_ro_over_bind_still_raises(profile, monkeypatch):
+    # The inverse of the above, and deliberate: a ro-over source is a guard, not
+    # a convenience. Skipping an unstattable one would leave the path creatable
+    # under its rw parent -- exactly the hole the field closes -- so it must fail
+    # loudly rather than degrade.
+    import errno
+
+    guard = profile.root / "guarded"
+    guard.touch()
+    boxed = Sandbox(root=profile.root, ro_over_rw_paths=(guard,), use_cgroup=False)
+    real_stat = Path.stat
+
+    def fake_stat(self, *a, **kw):
+        if self == guard:
+            raise OSError(errno.ENOKEY, "Required key not available", str(self))
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    with pytest.raises(OSError):
+        boxed.wrapper()
 
 
 def test_missing_root_raises(profile):

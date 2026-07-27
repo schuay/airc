@@ -63,6 +63,29 @@ _ISOLATION_ARGS = (
 )
 
 
+def _bindable(p: Path) -> bool:
+    """Whether an OPTIONAL bind source can be mounted, i.e. whether we can stat
+    it at all -- not merely whether it exists.
+
+    `Path.exists()` is not enough: it swallows ENOENT/ENOTDIR/EBADF/ELOOP and
+    re-raises everything else, so a path we cannot reach for any other reason
+    propagates an OSError out of wrapper() instead of being skipped. The case
+    that bit us is a credential-gated network mount (a corp /google path with an
+    expired ticket) raising ENOKEY: the caller had already decided that bind was
+    optional, but sandbox assembly blew up and took the whole job with it.
+    Unreachable and absent are the same thing for an optional bind -- bwrap
+    cannot mount either -- so treat any stat failure as "skip".
+
+    Only for optional sources. `ro_over_rw_paths` must keep raising: skipping one
+    silently drops a guard while its rw parent stays writable.
+    """
+    try:
+        p.stat()
+    except OSError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class Sandbox:
     """One job's confinement profile; `wrapper()` yields the argv prefix that
@@ -108,7 +131,7 @@ class Sandbox:
 
     def wrapper(self) -> list[str]:
         """The argv prefix: [systemd-run ...] bwrap ... -- ready to have the
-        actual command appended. Missing optional bind sources are skipped
+        actual command appended. Unreachable optional bind sources are skipped
         (bwrap errors out on a nonexistent source); a missing root or ro-over
         source raises -- skipping a ro-over guard would silently leave the
         path creatable under its rw parent."""
@@ -129,11 +152,11 @@ class Sandbox:
         # an ro bind INSIDE the worktree is shadowed by the root bind --
         # nothing uses that.
         for p in (*self.ro_paths, *self.opaque_ro_paths):
-            if p.exists():
+            if _bindable(p):
                 argv += ["--ro-bind", str(p), str(p)]
         argv += ["--bind", str(self.root), str(self.root)]
         for p in self.rw_paths:
-            if p.exists():
+            if _bindable(p):
                 argv += ["--bind", str(p), str(p)]
         # ro-over binds land last so they shadow an overlapping rw parent (see
         # the field doc): the main .git is rw for packed-refs.lock, config and
