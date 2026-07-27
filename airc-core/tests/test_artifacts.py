@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The shared run-artifact log primitive."""
 
 from airc_core import ArtifactLog, slug

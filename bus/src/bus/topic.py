@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Directory-backed publish/subscribe topics: an append-only log per topic plus
 independent per-subscriber cursors.
 

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """An exhausted empty candidate must surface as a NAMED harness failure.
 
 _EmptyCandidateRetry (airc-core) retries a zero-part Gemini candidate through

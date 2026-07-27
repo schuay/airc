@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_room.room import Room
 
 

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """LangGraphHarness: the in-process coding agent, one bounded turn per call.
 
 Kept out of harness.py so that module (the Protocol, AgentResult, MockHarness)

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Shared configuration substrate for the daemon suite.
 
 The suite runs as several processes (airc, airc-watchers, airc-processors) that

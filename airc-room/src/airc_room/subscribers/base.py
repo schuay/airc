@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Shared supervised poll loop for bus subscribers.
 
 One loop per subscription: poll new messages, handle each, then ack -- so the

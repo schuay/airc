@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Bus subscribers: airc's read side of the suite's pub/sub topics.
 
 Where watchers/ once polled the world directly, airc now consumes what the

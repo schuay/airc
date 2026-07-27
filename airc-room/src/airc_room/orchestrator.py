@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Routing: who speaks next.
 
 The orchestrator consumes every message posted to the room and decides which

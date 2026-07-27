@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The reentry loop: re-invoke the harness until it signals termination.
 
 This is the heart of the control structure. The caller runs the harness, reads

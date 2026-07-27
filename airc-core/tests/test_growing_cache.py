@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """_GrowingPrefixCache: per-conversation boundary growth, isolation, recovery.
 
 Cache create/delete are mocked; these exercise the per-call logic (what to cache,

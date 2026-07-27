@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_room import orchestrator as orch_mod
 from airc_room.config import Config, OrchestratorConfig
 from airc_room.orchestrator import Orchestrator, parse_mentions

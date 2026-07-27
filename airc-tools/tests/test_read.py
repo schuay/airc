@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_tools.limits import MAX_READ_BYTES
 from airc_tools.read import read_file
 

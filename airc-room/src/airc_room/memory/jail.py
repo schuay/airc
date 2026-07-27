@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Path confinement for the memory tools -- the security boundary.
 
 The memory tools give an LLM read/write over a git repo of markdown entries (the

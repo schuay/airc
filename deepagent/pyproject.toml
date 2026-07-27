@@ -1,8 +1,12 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "deepagent"
 version = "0.1.0"
 description = "Reusable runtime for driving an in-process coding agent through a bounded, resumable turn loop"
 requires-python = ">=3.12"
+license = "MIT"
 # airc-core brings the model stack (langchain/langgraph/vertex) + middleware,
 # ledger, and MCPToolset; airc-tools is the worktree shell/read/edit. The turn
 # engine is all this package adds on top.

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_room.personas import Persona
 from airc_room.runner import build_system_prompt, voice_body
 

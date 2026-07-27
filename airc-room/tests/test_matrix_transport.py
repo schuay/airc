@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """MatrixTransport against a faked matrix-nio AsyncClient.
 
 The transport is exercised with a real in-memory Store (its thread-mapping is

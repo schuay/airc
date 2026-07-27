@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Summarize token_usage from the suite's token ledger (tokens.db).
 
 Groupings answer "where do tokens go": by kind (chat turn vs coordinator vs

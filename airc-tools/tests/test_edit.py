@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_tools.edit import apply_edits, write_file
 from airc_tools.limits import MAX_EDIT_FILE_BYTES
 

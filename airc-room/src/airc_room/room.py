@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The room: shared message bus connecting transports, orchestrator, watchers.
 
 Every message — human input from a transport, agent replies, watcher

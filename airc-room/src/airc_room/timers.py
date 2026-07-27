@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Agent-set timers: "wake me in X minutes" for real-world events.
 
 An agent (typically in a DM) can schedule its own follow-up -- "check the

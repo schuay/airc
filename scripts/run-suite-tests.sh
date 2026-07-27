@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 # Run pytest + ruff (lint and format-check) across every workspace member, so a
 # prod checkout can be validated in one command.
 #

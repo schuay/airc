@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The event journal: one append-only stream per job, everything consumes it.
 
 A job's whole trace -- agent thinking and tool calls, step transitions,

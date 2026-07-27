@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """airc-tools: local action primitives for airc coding agents.
 
 Three tools, deliberately small: a stateless `shell` (which doubles as the

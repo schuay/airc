@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Matrix transport (matrix-nio; in-core).
 
 A single bot user backs the whole room: one fixed identity carries every

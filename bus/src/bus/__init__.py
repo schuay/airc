@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Directory-backed message bus: the domain-neutral transport primitives.
 
 `bus` is pure transport -- an Envelope (type + opaque JSON payload), append-only

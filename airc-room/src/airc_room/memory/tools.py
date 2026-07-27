@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Memory tools: the personas' hands on the store.
 
 Local (non-MCP) langchain tools, granted to a persona via the reserved "memory"

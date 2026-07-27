@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """search_chat: grep the room's own chat history (airc's SQLite store).
 
 A local (non-MCP) langchain tool. Unlike the old airc-tools MCP version it reuses

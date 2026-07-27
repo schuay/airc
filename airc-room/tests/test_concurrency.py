@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Concurrent orchestrator: parallel rounds, watermarks, recovery, ordering."""
 
 import asyncio

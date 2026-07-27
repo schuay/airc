@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Byte-limit helpers shared by all three tools.
 
 Every tool result crosses back into an LLM context window, so each is capped

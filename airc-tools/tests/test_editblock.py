@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_tools.editblock import (
     find_similar_lines,
     replace_most_similar_chunk,

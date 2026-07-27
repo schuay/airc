@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from dataclasses import dataclass, field
 
 from deepagent import (

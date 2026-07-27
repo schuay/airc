@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The turn contract: Protocol, verdict types, and the test double.
 
 Kept langchain-free so it is cheap to import for the loop and for application

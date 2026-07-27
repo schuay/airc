@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """airc entry point: wire config, agents, room, transports, watchers.
 
 Logs go to ~/.local/state/airc/airc.log so the console stays clean; -v

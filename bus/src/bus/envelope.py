@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The transport envelope: the common wrapper every message on the bus shares.
 
 The envelope is type-agnostic (payload is an opaque dict); a plugin's payload

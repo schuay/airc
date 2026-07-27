@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """IRC-style console transport.
 
 A prompt_toolkit REPL: the prompt stays at the bottom while room traffic

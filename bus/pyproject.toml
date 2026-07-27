@@ -1,8 +1,12 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "bus"
 version = "0.1.0"
 description = "Directory-backed message bus: domain-neutral transport primitives (envelope, topics, channel, blobs)"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = ["pydantic>=2"]
 
 [dependency-groups]

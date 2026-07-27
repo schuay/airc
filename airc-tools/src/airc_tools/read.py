@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """read_file: a verbatim, range-limited, byte-capped read.
 
 Verbatim and gutter-free by design. edit_file matches SEARCH text against the

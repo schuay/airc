@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Derive the memory index for per-turn injection.
 
 There is deliberately NO stored index file (no MEMORY.md to drift). The index is

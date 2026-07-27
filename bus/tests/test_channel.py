@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Channel publish/claim semantics and the blob store.
 
 Transport-only: these exercise claim/complete/fail/release and the blob store

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Tool-result caps and old-turn pruning (token blowup defenses)."""
 
 import asyncio

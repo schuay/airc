@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """edit_file: apply structured SEARCH/REPLACE edits to a single file.
 
 One file per call, N chunks in `edits`, all-or-nothing. Edits apply to an

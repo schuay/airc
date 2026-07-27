@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The event journal appends, follows, and survives partial writes."""
 
 import threading

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Shared agent-execution substrate: middleware stack, context budgeting, caching.
 
 The model-call middleware every agent graph in the suite composes -- context-window

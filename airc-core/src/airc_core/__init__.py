@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Shared substrate for the airc daemon suite."""
 
 from .agent import (

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The SEARCH/REPLACE apply engine, lifted from aider's editblock_coder.py.
 
 Only the apply cascade and the failure-hint helper are ported -- the reliability

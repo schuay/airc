@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Content-addressed blob store for fat payloads (patch diffs, build logs).
 
 Keeps the channel messages small and greppable: a message references a blob by

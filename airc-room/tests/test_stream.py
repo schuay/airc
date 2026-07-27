@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """_stream aggregation: only the final answer is posted, not tool-step preamble."""
 
 from types import SimpleNamespace

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """_CallTrace accumulates turn totals and derives the cache signals."""
 
 from types import SimpleNamespace

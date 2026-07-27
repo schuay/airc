@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The turn-report tool has one fixed name, and every prompt names that tool.
 
 The failure this guards against: ToolStrategy names the structured-output tool

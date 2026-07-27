@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The plugin contract validation: a loaded plugin must supply the three
 factories and (if it declares one) a compatible API version, else load fails
 loudly at startup rather than mysteriously at first use."""

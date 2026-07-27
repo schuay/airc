@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 # Virtual workspace root for the airc CORE: no package of its own. The five
 # members here are the domain-neutral substrate -- the chat room and
 # everything under it, carrying no application specifics. An app

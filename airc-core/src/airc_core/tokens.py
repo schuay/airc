@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Shared token-usage ledger for the daemon suite.
 
 One SQLite file every component writes to (persona turns, triage, commit

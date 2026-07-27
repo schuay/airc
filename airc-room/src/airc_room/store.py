@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """SQLite persistence for threads, messages, and watcher state.
 
 A single database file holds the chat history; LangGraph checkpoints live in

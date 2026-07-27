@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """TokenLog: the shared token-usage ledger (aggregates, windowing, migration)."""
 
 import sqlite3

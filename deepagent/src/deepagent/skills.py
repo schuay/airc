@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Skill index rendering for progressive disclosure.
 
 A skill is a markdown file with `name`/`description` frontmatter. Only the index

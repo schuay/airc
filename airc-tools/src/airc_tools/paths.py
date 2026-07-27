@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Path resolution shared by read_file and edit_file.
 
 The server is long-lived and shared across worktrees, so no fixed root is baked

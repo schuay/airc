@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """shell: a stateless `bash -lc` runner.
 
 Stateless on purpose. Each call is a fresh process, so there is no session state

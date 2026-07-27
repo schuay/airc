@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """ULID generation: a 128-bit id whose 48-bit millisecond prefix makes the
 Crockford-base32 string sort by creation time. The 80-bit random tail breaks
 ties within a millisecond, so ordering between two ids minted in the same

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """base_middleware (shared cost/robustness stack) and the growing-cache overlay.
 
 The drift guard: every agent graph gets context-window sizing, empty-response

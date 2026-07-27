@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Chat model construction.
 
 Models are referenced by init_chat_model id strings ("provider:model"), so

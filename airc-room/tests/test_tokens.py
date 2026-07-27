@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Token report formatting (cli helpers)."""
 
 from airc_core import TokenLog

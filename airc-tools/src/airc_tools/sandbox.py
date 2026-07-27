@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Sandbox: per-call confinement for the shell tool, plus the matching path
 policy for read/edit.
 

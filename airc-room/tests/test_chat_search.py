@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 from airc_room.chat_search import make_search_chat_tool
 from airc_room.store import Store
 

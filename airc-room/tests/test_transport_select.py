@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Transport-kind resolution: flags, config, and the TTY/plugin default.
 
 _resolve_transport_kind is the load-bearing prod-path branch that decides which

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Pure-seam coverage that needs no live model: the worktree-bound tools, the
 Report -> AgentResult flattening, and the skill-index renderer."""
 

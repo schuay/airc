@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Global configuration.
 
 Loaded from ~/.config/airc/airc.toml (override with --config), the single config

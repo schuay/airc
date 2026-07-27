@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Plugin local-tool groups: a persona gets a group's local tools iff it lists
 the group -- the same gate MCP tools use.
 

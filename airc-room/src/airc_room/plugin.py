@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The plugin contract: what a module must expose to be loaded as an airc app.
 
 The room (airc-room) is domain-neutral. It becomes a concrete app -- the V8

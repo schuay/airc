@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """MCP tool loading and pattern-based filtering.
 
 Sessions are opened once at daemon startup and stay alive for the daemon's

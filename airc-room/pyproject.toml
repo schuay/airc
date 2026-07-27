@@ -1,8 +1,12 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "airc-room"
 version = "0.1.0"
 description = "Domain-neutral chat room core: room, orchestrator, personas, turn loop, transports"
 requires-python = ">=3.12"
+license = "MIT"
 
 dependencies = [
     "bus",

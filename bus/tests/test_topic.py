@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Pub/sub topics: append-only log, contiguous seq, independent cursors."""
 
 import pytest

@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Run-artifact logging: write human-readable markdown/text records to disk.
 
 A shared seam for any component -- a processor, a watcher, anything -- that wants

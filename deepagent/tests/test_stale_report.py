@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """A resumed turn must not inherit the prior turn's structured report.
 
 structured_response is a checkpointed channel with no reducer that clears it

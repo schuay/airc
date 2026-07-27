@@ -1,8 +1,12 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "airc-core"
 version = "0.1.0"
 description = "Shared substrate for the airc daemon suite: agent runner, model, artifacts, MCP toolset, token ledger"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "langchain[google-genai]>=1.2.10",
     "langgraph>=1.0.10",

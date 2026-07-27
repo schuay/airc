@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """The worker core: run a goal loop from a LoopSpec, write outcome.json.
 
 Uses MockHarness so no model/langchain is touched -- this exercises the file

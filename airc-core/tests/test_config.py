@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Tests for the shared config substrate."""
 
 from __future__ import annotations

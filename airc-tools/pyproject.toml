@@ -1,8 +1,12 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "airc-tools"
 version = "0.1.0"
 description = "Stateless shell + verbatim read + SEARCH/REPLACE edit for airc coding agents"
 requires-python = ">=3.12"
+license = "MIT"
 # A leaf library (no airc dependency): shell/read/edit primitives that deepagent
 # binds into per-job worktree tools and airc-room's memory tools reuse. No MCP
 # server -- the room and harness call these functions directly.

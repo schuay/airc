@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """compact_for_budget only sheds at the hard threshold; below it, intact (so the
 prefix cache is never poisoned by a preemptive strip)."""
 

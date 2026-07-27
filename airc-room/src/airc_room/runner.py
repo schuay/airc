@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Per-persona LangGraph agents and turn execution.
 
 Each persona gets one create_agent() graph, built at startup with its

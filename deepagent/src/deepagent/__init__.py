@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """deepagent: a reusable runtime for an in-process coding agent.
 
 Import the turn engine, the tools, the caching/accounting, and the robustness;

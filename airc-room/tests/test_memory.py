@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Core long-term memory: jail, auto-committing tools, derived index, injection."""
 
 import os

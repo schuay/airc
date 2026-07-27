@@ -1,3 +1,6 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
 """Run one goal loop to completion, driven entirely by a file contract.
 
 This is the in-box half of the whole-process sandbox: the orchestrator spawns a
