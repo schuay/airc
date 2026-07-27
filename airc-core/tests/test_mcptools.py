@@ -168,3 +168,59 @@ def test_clean_schema():
     assert "additionalProperties" not in schema
     assert schema["properties"]["xs"]["items"] == {}
     assert "$schema" not in schema["properties"]["nested"]
+
+
+class _FakeSession:
+    """A session that either initializes and serves tools, or fails on start."""
+
+    def __init__(self, tools, fail: bool):
+        self._tools = tools
+        self._fail = fail
+
+    async def __aenter__(self):
+        if self._fail:
+            raise RuntimeError("spawn failed: no such file")
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def initialize(self):
+        @dataclass
+        class _Init:
+            instructions: str
+
+        return _Init(instructions="")
+
+
+async def test_one_dead_server_does_not_sink_the_others(monkeypatch):
+    # A stdio MCP server is an arbitrary external binary: absent, crashing, or
+    # behind an expired corp credential. Losing every other server's tools (and
+    # with them the room, or a job that never wanted the dead server) because one
+    # would not start is a fault-isolation failure, so a bad server is dropped
+    # and the toolset opens with what did come up.
+    from langchain_mcp_adapters import client as adapters_client
+    from langchain_mcp_adapters import tools as adapters_tools
+
+    servers = {"good": {"command": "good-mcp"}, "dead": {"command": "missing-mcp"}}
+    sessions = {
+        "good": _FakeSession([FakeTool("run_d8")], fail=False),
+        "dead": _FakeSession([], fail=True),
+    }
+
+    class _FakeClient:
+        def __init__(self, _servers):
+            pass
+
+        def session(self, name, auto_initialize=True):
+            return sessions[name]
+
+    async def fake_load(sess, server_name=""):
+        return list(sess._tools)
+
+    monkeypatch.setattr(adapters_client, "MultiServerMCPClient", _FakeClient)
+    monkeypatch.setattr(adapters_tools, "load_mcp_tools", fake_load)
+    monkeypatch.setattr(mcptools, "_fix_tool", lambda t: t)
+
+    async with MCPToolset(servers, TOOL_GROUPS) as ts:
+        assert [t.name for t in ts.tools] == ["good__run_d8"]

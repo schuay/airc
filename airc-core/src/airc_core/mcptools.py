@@ -209,14 +209,29 @@ class MCPToolset:
         client = MultiServerMCPClient(self._mcp_servers)
         instructions: list[str] = []
         seen: dict[str, str] = {}
+        failed: list[str] = []
         for srv in self._mcp_servers:
-            sess = await self._stack.enter_async_context(
-                client.session(srv, auto_initialize=False)
-            )
-            init_result = await sess.initialize()
+            # One unreachable server must not cost us every other server's tools.
+            # A stdio server is an arbitrary external binary -- not installed,
+            # behind an expired corp credential, crashing on startup -- and
+            # aborting the whole toolset there takes down the room (or a job that
+            # never wanted that server's tools) over a dependency it does not
+            # use. Drop it and carry on; a consumer that needs a specific tool
+            # already handles its absence (it resolves tools by pattern and
+            # self-disables when the pattern matches nothing).
+            try:
+                sess = await self._stack.enter_async_context(
+                    client.session(srv, auto_initialize=False)
+                )
+                init_result = await sess.initialize()
+                srv_tools = await load_mcp_tools(sess, server_name=srv)
+            except Exception:
+                log.exception("mcp: %s: failed to start; continuing without it", srv)
+                failed.append(srv)
+                continue
             if init_result.instructions:
                 instructions.append(f"### {srv}\n{init_result.instructions}")
-            for tool in await load_mcp_tools(sess, server_name=srv):
+            for tool in srv_tools:
                 # Prefix tool name with server name to avoid collisions across servers.
                 # e.g., v8-utils__run_d8, gdb-mcp__backtrace
                 tool.name = f"{srv}__{tool.name}"
@@ -231,11 +246,13 @@ class MCPToolset:
                 seen[tool.name] = srv
                 self.tools.append(_fix_tool(tool))
         self.instructions = "\n\n".join(instructions)
-        log.info(
-            "loaded %d MCP tools from %s",
-            len(self.tools),
-            ", ".join(self._mcp_servers),
-        )
+        loaded = [s for s in self._mcp_servers if s not in failed]
+        log.info("loaded %d MCP tools from %s", len(self.tools), ", ".join(loaded))
+        if failed:
+            # Loud and separate from the success line: every tool from these
+            # servers is silently missing for the rest of the process, and that
+            # otherwise reads downstream as a tool_groups misconfiguration.
+            log.error("mcp: unavailable server(s): %s", ", ".join(failed))
         return self
 
     async def __aexit__(self, *exc) -> None:
