@@ -203,9 +203,10 @@ def _worktree_tools(
             name="shell",
             description=(
                 "Run a command in a fresh `bash -lc` in the worktree (stateless:"
-                " no cd/env persists). Also your list/grep primitive. Pass a large"
-                " timeout for a build; pass a small one for a command that may"
-                " hang (e.g. a repro)."
+                " no cd/env persists). Also your list/grep primitive. The default"
+                f" timeout is {shell_timeout_s:g}s: raise it for work that is"
+                " honestly long (a build, a test suite, a benchmark), and lower it"
+                " for a command that may hang (e.g. a repro)."
             ),
         ),
         StructuredTool.from_function(
@@ -374,7 +375,7 @@ class LangGraphHarness:
         coding_model_key: str = "default",
         coding_tool_groups: tuple[str, ...] = ("read", "active"),
         sandboxed_tool_groups: tuple[str, ...] = ("read",),
-        shell_timeout_s: float = 1800.0,
+        shell_timeout_s: float = 300.0,
     ) -> None:
         self._common = common
         self._model_id = common.models.get(coding_model_key) or common.models.get(

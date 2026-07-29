@@ -71,6 +71,20 @@ async def test_timeout_kills_fast():
     assert "timeout" in out
 
 
+async def test_timeout_carries_the_hint_either_way():
+    # The hint is the whole point of the short default: a timeout the agent
+    # cannot classify just gets retried longer. It has to ride along even when
+    # the command died silent (the hang case), where there is no partial output
+    # to append it to.
+    noisy = await run_shell("echo working; sleep 10", timeout=0.5)
+    assert "SLOW" in noisy and "HUNG" in noisy
+    assert "partial output:" in noisy and "working" in noisy
+
+    silent = await run_shell("sleep 10", timeout=0.5)
+    assert "SLOW" in silent and "HUNG" in silent
+    assert "(no output before the kill)" in silent
+
+
 async def test_output_ceiling():
     # Emit ~1MB, over the capture ceiling: killed, head kept, flagged.
     out = await run_shell("head -c 1000000 /dev/zero | tr '\\0' a")

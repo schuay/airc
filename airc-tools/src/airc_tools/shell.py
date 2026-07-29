@@ -58,6 +58,34 @@ _DEFANG_ENV = {
 }
 
 
+# A timeout is bounded but not free: it costs the caller whatever budget it was
+# given, so the default is deliberately short and the agent raises it per call
+# for work that is honestly long. That only works if the agent can tell the two
+# cases apart, so the hint turns on the one thing it can read off the output it
+# already has -- was the command still talking when we killed it -- rather than
+# on a rule about hangs it has no way to evaluate. SLOW/HUNG are literal labels
+# to give that decision something to match on.
+#
+# No fix-it flags are spelled out on purpose: named remedies get pasted at the
+# next hang whether or not they address it. The cure depends on what is
+# blocking, which only the caller can see.
+#
+# The last line closes the escalation loop -- without it, a hang that already
+# survived one raise invites the next one.
+_TIMEOUT_HINT = (
+    "Which case is this? Look at the output below.\n\n"
+    "SLOW -- output was still arriving when it was killed. The budget was just"
+    " too short. Retry the same command with timeout=<seconds> (600 covers an"
+    " incremental build).\n\n"
+    "HUNG -- no output, or it stopped long before the kill. Something is"
+    " waiting forever: a prompt, a pager, a lock, a network call. A longer"
+    " timeout waits longer and burns the turn. Do not raise it -- change the"
+    " command so it cannot block, or run a smaller piece to find where it"
+    " stalls.\n\n"
+    "Already raised it once and hit this again? Treat it as HUNG."
+)
+
+
 def _killpg(proc):
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -151,7 +179,11 @@ async def run_shell(
         MAX_SHELL_OUTPUT,
     )
     if timed_out:
-        status = f"timeout after {timeout:g}s (killed); partial output:"
+        status = (
+            f"timeout after {timeout:g}s; the command and its process group"
+            f" were killed.\n\n{_TIMEOUT_HINT}\n\n"
+        )
+        status += "partial output:" if output else "(no output before the kill)"
     elif hit_ceiling:
         status = (
             f"output exceeded {MAX_SHELL_CAPTURE} bytes (killed, head kept);"
