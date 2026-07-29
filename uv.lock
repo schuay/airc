@@ -194,6 +194,7 @@ dependencies = [
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
     { name = "langgraph" },
+    { name = "mcp" },
     { name = "platformdirs" },
 ]
 
@@ -213,6 +214,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.2.1" },
     { name = "langchain-openai", specifier = ">=1.0" },
     { name = "langgraph", specifier = ">=1.0.10" },
+    { name = "mcp", specifier = "<2" },
     { name = "platformdirs", specifier = ">=4.0" },
 ]
 
