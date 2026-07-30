@@ -1,0 +1,487 @@
+# Copyright 2026 The airc developers
+# SPDX-License-Identifier: MIT
+
+"""airc-prune: age out the content of old threads, then reclaim the bytes.
+
+What a retention policy is about is message content, and this room stores it
+twice: verbatim in `messages.text` (airc.db) and again, per persona, inside the
+LangGraph checkpoint blobs (airc.ckpt.db, which is the bulk of the volume). A
+sweep that skips the checkpoints has not scrubbed anything.
+
+The shape is REDACT, not delete. Blanking text keeps the rows, and with them the
+four dedup keys that stop a real-world event being announced twice
+(`commit_threads`, `chat_threads`, `chat_seen_messages`, `handover_jobs`). That
+matters concretely: an icompleteu CL job polls CQ for hours and can sit awaiting
+review for days, so its result can arrive for a thread this sweep already
+scrubbed. With the keys intact that result routes into the existing thread; with
+the rows deleted it would create a new thread and post about a commit whose
+discussion was just purged -- the opposite of the intent. `--hard` is available
+for a policy that demands the stronger "the row is gone" story, and is not the
+default for that reason.
+
+SYSTEM messages survive: the commit digest and the perf summary. They are
+rendered from public git data, and keeping them is what makes a scrubbed thread
+intelligible in an audit. The line is drawn on kind alone because that is a rule
+an operator can state and a reviewer can check -- notably it also catches review
+findings, which post under kind AGENT (so a "keep the automated posts" rule would
+have had to discriminate on sender to find them).
+
+Not run in-process. A coroutine inside the room cannot vacuum files its own
+connections hold open, nor delete checkpoints from under a live saver mid-turn;
+it is a oneshot unit that stops the room, sweeps, and starts it again.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sqlite3
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from .config import CONFIG_DIR, load_config
+
+# Every kind except this one is redacted. A str, not MessageKind, because the
+# column stores the bare value and the pruner deliberately does not import the
+# store (see _connect).
+_RETAINED_KIND = "system"
+
+# Thread-keyed tables with no content worth an audit trail and no dedup role:
+# a persona's context generation, the Chat headline annotations and their
+# per-finding dedup rows, an unresolved "thinking..." placeholder, a pending
+# timer. All are live-thread working state, meaningless once a thread is aged
+# out, and all are safe to lose (the headline's Chat message is not edited again
+# once nothing posts to the thread; a timer for a month-old thread has no one to
+# wake). Ordered parent-last so a future FK cannot trip.
+_DROP_TABLES = (
+    "context_generation",
+    "chat_headline_findings",
+    "chat_headlines",
+    "chat_pending",
+    "timers",
+)
+
+_DURATION_RE = re.compile(r"^(\d+)([dwh])$")
+_UNIT_SECONDS = {"h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_duration(text: str) -> float:
+    """A retention window ("30d", "6w", "48h") in seconds.
+
+    Deliberately a small closed set of units: a bare number would be ambiguous
+    between seconds and days, and getting that wrong silently purges everything.
+    """
+    m = _DURATION_RE.match(text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {text!r}: want <n>h, <n>d or <n>w (e.g. 30d)"
+        )
+    return int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+
+
+@dataclass
+class Counts:
+    """What one sweep touched, for the report and the audit note."""
+
+    threads: int = 0
+    messages_redacted: int = 0
+    messages_deleted: int = 0
+    titles_blanked: int = 0
+    checkpoints: int = 0
+    writes: int = 0
+    rows_dropped: int = 0
+    bugs_unlinked: int = 0
+
+    def summary(self) -> str:
+        verb = "deleted" if self.messages_deleted else "redacted"
+        n = self.messages_deleted or self.messages_redacted
+        return (
+            f"{self.threads} thread(s), {n} message(s) {verb},"
+            f" {self.titles_blanked} title(s) blanked,"
+            f" {self.checkpoints} checkpoint(s) + {self.writes} write(s) dropped,"
+            f" {self.rows_dropped} side row(s), {self.bugs_unlinked} bug(s) unlinked"
+        )
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    """Open a database directly, NOT through Store.
+
+    Store.__init__ runs the schema script plus _migrate() on connect, so opening
+    through it would migrate a file this tool is about to vacuum, and it exposes
+    no bulk-redaction API anyway. The one thing we do need from the schema (the
+    thread_seen_floor table) is created here if absent, so the pruner works
+    against a database written by a room that predates it.
+    """
+    db = sqlite3.connect(str(path))
+    db.execute("PRAGMA busy_timeout=5000")
+    return db
+
+
+def aged_threads(db: sqlite3.Connection, cutoff: float) -> list[int]:
+    """Thread ids created before the cutoff and not already fully scrubbed.
+
+    The second half is what keeps a weekly timer cheap and its report honest: a
+    thread whose non-SYSTEM messages are all blank has nothing left to redact, so
+    re-reporting it every week would make the counts meaningless. The floor row is
+    not the marker -- a thread can have one and still hold new messages posted
+    since -- so the check is on the content itself.
+    """
+    rows = db.execute(
+        "SELECT t.id FROM threads t WHERE t.created < ?"
+        " AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id"
+        "   AND m.kind != ? AND (m.text != '' OR m.sender != ''))"
+        " ORDER BY t.id",
+        (cutoff, _RETAINED_KIND),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def live_threads(db: sqlite3.Connection, control_root: Path | None) -> set[int]:
+    """Threads with work still in flight, which the sweep skips.
+
+    Age alone is not enough: a thread can be old and still be actively worked.
+    Three signals, in increasing order of coupling:
+
+    - a queued `pending_bugs` row (a bug awaiting a tracker retry, whose "filed"
+      follow-up posts back into the thread),
+    - a pending `timers` row (an agent asked to be woken there),
+    - an unterminated icompleteu job, read from `control_root/<job>/state.json`.
+
+    The third reaches into another component's on-disk layout, which is why it is
+    best-effort and gated on control_root being passed: a missing or unreadable
+    file skips the check rather than failing the sweep. That is acceptable because
+    the exclusion is not what makes a late result safe -- redaction is, by keeping
+    commit_threads resolving so the result still routes to its thread. This only
+    avoids gutting the context of a thread someone is mid-way through.
+    """
+    live = {
+        r[0]
+        for r in db.execute(
+            "SELECT thread_id FROM pending_bugs WHERE thread_id IS NOT NULL"
+            " UNION SELECT thread_id FROM timers"
+        ).fetchall()
+    }
+    if control_root is None:
+        return live
+    live |= _icompleteu_live(control_root)
+    return live
+
+
+def _icompleteu_live(control_root: Path) -> set[int]:
+    """Thread ids of unterminated icompleteu jobs, best-effort.
+
+    Reads the job state files directly rather than importing icompleteu: core
+    must not depend on a plugin's component, and this tool has to run on a deploy
+    where icompleteu is not installed at all. The cost is that the two terminal
+    step names below duplicate icompleteu's `TERMINAL`; being wrong here only
+    over- or under-skips a thread, never corrupts one.
+    """
+    import json
+
+    terminal = {"ready-to-land", "blocked", "done", "abandoned", "error"}
+    live: set[int] = set()
+    try:
+        state_files = sorted(control_root.glob("*/state.json"))
+    except OSError as e:
+        print(f"warning: cannot scan {control_root}: {e}", file=sys.stderr)
+        return live
+    for path in state_files:
+        try:
+            data = json.loads(path.read_bytes())
+        except (OSError, ValueError) as e:
+            # A half-written or corrupt state file must not decide retention
+            # either way; say so and move on.
+            print(f"warning: skipping {path}: {e}", file=sys.stderr)
+            continue
+        if not isinstance(data, dict) or data.get("step") in terminal:
+            continue
+        tid = (data.get("job") or {}).get("thread_id")
+        if isinstance(tid, int):
+            live.add(tid)
+    return live
+
+
+def delete_checkpoints(
+    ckpt: sqlite3.Connection, thread_ids: list[int]
+) -> tuple[int, int]:
+    """Drop every persona checkpoint for these threads.
+
+    The LangGraph key is "<thread>:<persona>:g<gen>", so a prefix match covers
+    every persona and every context generation of the thread. The blobs are
+    msgpack under a custom serializer and cannot be surgically rewritten -- a
+    wholesale delete per thread is the only safe operation, and it needs no
+    finer grain: every announcement worth keeping lives in airc.db and is
+    untouched by this.
+
+    A persona then resumes the thread with empty context rather than a cold
+    cache -- it never re-reads that history in any form, because the seen offset
+    (in airc.db, floored by the sweep) keeps it from being re-injected. What is
+    actually lost is the persona's own tool results, all re-derivable.
+    """
+    n_ckpt = n_writes = 0
+    for tid in thread_ids:
+        like = f"{tid}:%"
+        n_ckpt += ckpt.execute(
+            "DELETE FROM checkpoints WHERE thread_id LIKE ?", (like,)
+        ).rowcount
+        n_writes += ckpt.execute(
+            "DELETE FROM writes WHERE thread_id LIKE ?", (like,)
+        ).rowcount
+    ckpt.commit()
+    return n_ckpt, n_writes
+
+
+def redact_threads(
+    db: sqlite3.Connection, thread_ids: list[int], *, hard: bool = False
+) -> Counts:
+    """Scrub the content of these threads in airc.db, in one transaction.
+
+    Atomicity matters for one specific pairing: the seen floor must land with the
+    redaction. A committed redaction with no floor leaves personas pointed at
+    history that is now blank, which surfaces later as a wall of empty transcript
+    lines in a turn -- long after this reported success.
+    """
+    c = Counts(threads=len(thread_ids))
+    with db:  # one transaction; rolls back on any exception
+        for tid in thread_ids:
+            tip = db.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE thread_id = ?", (tid,)
+            ).fetchone()[0]
+            if hard:
+                c.messages_deleted += db.execute(
+                    "DELETE FROM messages WHERE thread_id = ? AND kind != ?",
+                    (tid, _RETAINED_KIND),
+                ).rowcount
+            else:
+                c.messages_redacted += db.execute(
+                    "UPDATE messages SET text = '', sender = ''"
+                    " WHERE thread_id = ? AND kind != ?"
+                    "   AND (text != '' OR sender != '')",
+                    (tid, _RETAINED_KIND),
+                ).rowcount
+            # A commit thread's title is the commit subject: public git data, and
+            # what keeps a scrubbed row intelligible. Only a human-started
+            # thread's title may be user-authored, so blank just those.
+            c.titles_blanked += db.execute(
+                "UPDATE threads SET title = '' WHERE id = ? AND title != ''"
+                " AND NOT EXISTS (SELECT 1 FROM commit_threads WHERE thread_id = ?)",
+                (tid, tid),
+            ).rowcount
+            # Pin both offsets to the thread's own tip, in this transaction.
+            # The floor covers every persona including those with no agent_seen
+            # row (which would read 0 and replay everything); `orchestrated`
+            # is pinned for the same one-line cost rather than relying on a
+            # restart's _recover to repair it, which a running daemon never does.
+            db.execute(
+                "INSERT INTO thread_seen_floor (thread_id, last_msg_id) VALUES (?, ?)"
+                " ON CONFLICT(thread_id) DO UPDATE SET"
+                " last_msg_id = MAX(last_msg_id, excluded.last_msg_id)",
+                (tid, tip),
+            )
+            db.execute(
+                "INSERT INTO orchestrated (thread_id, last_msg_id) VALUES (?, ?)"
+                " ON CONFLICT(thread_id) DO UPDATE SET"
+                " last_msg_id = MAX(last_msg_id, excluded.last_msg_id)",
+                (tid, tip),
+            )
+            for table in _DROP_TABLES:
+                c.rows_dropped += db.execute(
+                    f"DELETE FROM {table} WHERE thread_id = ?", (tid,)
+                ).rowcount
+            # The bug still wants filing; it just loses its follow-up
+            # destination. Null the link rather than dropping the row.
+            c.bugs_unlinked += db.execute(
+                "UPDATE pending_bugs SET thread_id = NULL WHERE thread_id = ?", (tid,)
+            ).rowcount
+    return c
+
+
+def vacuum(db: sqlite3.Connection) -> None:
+    """Reclaim the freed pages. Without this the content is still on disk in the
+    freelist, and "the bytes are still there" is the wrong answer to a policy
+    question -- which is why a failure here fails the whole run rather than being
+    reported as a partial success. Truncates the WAL first so its frames are not
+    left holding the old pages either.
+    """
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.execute("VACUUM")
+
+
+def _ensure_floor_table(db: sqlite3.Connection) -> None:
+    """Create thread_seen_floor if the room that wrote this DB predates it. The
+    sweep writes the floor, so it cannot wait for the room's own migration to run
+    -- that happens on the next start, after this tool has already redacted."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS thread_seen_floor ("
+        " thread_id INTEGER PRIMARY KEY, last_msg_id INTEGER NOT NULL)"
+    )
+    db.commit()
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="airc-prune",
+        description="Age out the content of old threads and reclaim the bytes.",
+    )
+    p.add_argument("-c", "--config", type=Path, help="suite config (airc.toml)")
+    p.add_argument("--db", type=Path, help="override the store path")
+    p.add_argument(
+        "--older-than",
+        type=parse_duration,
+        default=parse_duration("30d"),
+        metavar="DURATION",
+        # The floor is set by icompleteu, not policy: a CL job polls CQ for hours
+        # and can await review for days, so a window under a week would purge
+        # threads with work still live in them.
+        help="retention window: <n>h, <n>d or <n>w (default 30d)",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be swept, change nothing",
+    )
+    p.add_argument(
+        "--hard",
+        action="store_true",
+        help="delete message rows instead of blanking them (loses replay safety)",
+    )
+    p.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt (for the systemd timer, which has no stdin)",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    cfg = load_config(args.config)
+    db_path = args.db or cfg.db_path
+    # Derived, not configured: the room derives the checkpoint path from db_path
+    # the same way (runner.py), and there is no ckpt_path config key. Deriving it
+    # identically is what keeps `--db` from vacuuming the wrong second file.
+    ckpt_path = db_path.with_suffix(".ckpt.db")
+    if not db_path.exists():
+        print(f"no store at {db_path}", file=sys.stderr)
+        return 1
+
+    cutoff = time.time() - args.older_than
+    db = _connect(db_path)
+    try:
+        aged = aged_threads(db, cutoff)
+        live = live_threads(db, _control_root(args.config))
+        targets = [t for t in aged if t not in live]
+        skipped = len(aged) - len(targets)
+
+        days = args.older_than / 86400
+        print(f"store:      {db_path}")
+        print(f"checkpoints:{ckpt_path}")
+        print(f"window:     {days:.1f} day(s) (threads created before this age)")
+        print(
+            f"threads:    {len(targets)} to sweep, {skipped} skipped (work in flight)"
+        )
+        if not targets:
+            print("nothing to do")
+            return 0
+        print(_preview(db, targets))
+        if args.dry_run:
+            print("dry run: nothing changed")
+            return 0
+        if not args.yes and not _confirm():
+            print("aborted")
+            return 1
+
+        # Checkpoints FIRST, deliberately. A crash between the two files leaves
+        # orphaned checkpoints, which are harmless (nothing reads a checkpoint
+        # without a live thread row) and a re-run clears them. The reverse order
+        # would leave live threads with amputated persona state.
+        n_ckpt = n_writes = 0
+        if ckpt_path.exists():
+            ckpt = _connect(ckpt_path)
+            try:
+                n_ckpt, n_writes = delete_checkpoints(ckpt, targets)
+                vacuum(ckpt)
+            finally:
+                ckpt.close()
+        else:
+            print(f"warning: no checkpoint db at {ckpt_path}", file=sys.stderr)
+
+        _ensure_floor_table(db)
+        counts = redact_threads(db, targets, hard=args.hard)
+        counts.checkpoints, counts.writes = n_ckpt, n_writes
+        # Audit trail: thread ids and counts, never content.
+        db.execute(
+            "INSERT INTO source_notes (source, ts, note) VALUES (?, ?, ?)",
+            (
+                "prune",
+                time.time(),
+                f"swept {counts.summary()} (window {days:.0f}d,"
+                f" threads {_compact_ids(targets)})",
+            ),
+        )
+        db.commit()
+        vacuum(db)
+        print(f"swept: {counts.summary()}")
+        return 0
+    finally:
+        db.close()
+
+
+def _control_root(config_path: Path | None) -> Path | None:
+    """icompleteu's control root from the shared suite config, or None.
+
+    Read straight out of the TOML rather than via Config or icompleteu's own
+    parser: `[icompleteu]` is a top-level suite section that core does not
+    interpret (Config keeps only the `[airc]` leftovers in plugin_config), and
+    core must not import a plugin's component -- this tool has to run on a deploy
+    where icompleteu is not installed at all. Any read failure yields None, which
+    only downgrades the best-effort live-job check.
+    """
+    import tomllib
+
+    path = config_path or CONFIG_DIR / "airc.toml"
+    try:
+        raw = tomllib.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    section = raw.get("icompleteu")
+    root = section.get("control_root") if isinstance(section, dict) else None
+    return Path(str(root)).expanduser() if root else None
+
+
+def _preview(db: sqlite3.Connection, thread_ids: list[int]) -> str:
+    """Per-kind message counts across the target threads, so an operator sees
+    what is about to go and what survives before confirming."""
+    marks = ",".join("?" * len(thread_ids))
+    rows = db.execute(
+        f"SELECT kind, COUNT(*) FROM messages WHERE thread_id IN ({marks})"
+        " GROUP BY kind ORDER BY kind",
+        thread_ids,
+    ).fetchall()
+    lines = ["messages by kind:"]
+    for kind, n in rows:
+        fate = "RETAINED" if kind == _RETAINED_KIND else "scrubbed"
+        lines.append(f"  {kind:<8} {n:>6}  {fate}")
+    return "\n".join(lines)
+
+
+def _compact_ids(ids: list[int], limit: int = 20) -> str:
+    """Thread ids for the audit note, truncated so one huge first sweep does not
+    write a multi-KB row."""
+    head = ",".join(str(i) for i in ids[:limit])
+    return head if len(ids) <= limit else f"{head},... (+{len(ids) - limit})"
+
+
+def _confirm() -> bool:
+    """Interactive gate. This is irreversible and the room is stopped around it,
+    so the default is to ask; the timer passes --yes because it has no stdin."""
+    try:
+        return input("proceed? this cannot be undone [y/N] ").strip().lower() == "y"
+    except EOFError:
+        return False
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

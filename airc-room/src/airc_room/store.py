@@ -23,11 +23,12 @@ from uuid import uuid4
 # agnostic beyond this set; grading/rendering stays with the plugin.
 BADGE_BUCKETS = ("blocker", "high", "medium", "low", "unknown", "info")
 
-# Retention: only chat_pending is pruned (remove_pending_card). messages,
-# source_notes, chat_seen_messages, and chat_users grow for the
-# life of the DB -- fine at current volume, but a long-lived deployment wants a
-# periodic prune (chat_seen_messages has a `ts` column for a time-based sweep)
-# or DB rotation. TODO(jgruber): add retention if the file grows unbounded.
+# Retention: `airc-prune` (airc_room.prune) ages out old threads -- it redacts
+# message text/sender for every kind but SYSTEM, drops the thread's persona
+# checkpoints, and vacuums both files. It deliberately keeps the dedup keys
+# (commit_threads, chat_threads, chat_seen_messages, handover_jobs) so a late
+# event cannot re-announce a thread whose discussion was just purged. Run it
+# from its systemd timer; the room must be stopped for the vacuum.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +59,18 @@ CREATE TABLE IF NOT EXISTS agent_seen (
     agent TEXT NOT NULL,
     last_msg_id INTEGER NOT NULL,
     PRIMARY KEY (thread_id, agent)
+);
+-- Per-thread floor on every persona's seen offset, set by the retention sweep to
+-- the thread's tip. A scrubbed thread's messages are redacted to empty text, so
+-- injecting them would feed a persona a wall of blank transcript lines; the floor
+-- makes get_agent_seen report at least this id and the turn sees only genuinely
+-- new messages. A floor rather than an UPDATE of agent_seen because a persona
+-- that never took a turn on the thread has NO row -- it would read 0 and replay
+-- the whole redacted history, which is exactly the failure this prevents. A
+-- missing row is floor 0 (never scrubbed).
+CREATE TABLE IF NOT EXISTS thread_seen_floor (
+    thread_id INTEGER PRIMARY KEY,
+    last_msg_id INTEGER NOT NULL
 );
 -- Per-thread context generation. The persona checkpoint id folds this in, so
 -- bumping it starts every persona on the thread from a fresh (empty) checkpoint
@@ -401,11 +414,41 @@ class Store:
     # including last_msg_id; only later room messages are injected next turn.
 
     def get_agent_seen(self, thread_id: int, agent: str) -> int:
+        """This agent's seen offset, never below the thread's scrub floor.
+
+        The floor is what makes a retention sweep safe: the sweep redacts old
+        messages to empty text, and a persona whose offset predates that (or which
+        has no row at all, reading 0) would otherwise be handed the whole scrubbed
+        history as blank transcript lines. MAX of the two covers both cases in one
+        read, so no caller has to know the floor exists.
+        """
         row = self._db.execute(
-            "SELECT last_msg_id FROM agent_seen WHERE thread_id = ? AND agent = ?",
-            (thread_id, agent),
+            "SELECT MAX(COALESCE(a.last_msg_id, 0), COALESCE(f.last_msg_id, 0))"
+            " FROM (SELECT 1) AS one"
+            " LEFT JOIN agent_seen a ON a.thread_id = ? AND a.agent = ?"
+            " LEFT JOIN thread_seen_floor f ON f.thread_id = ?",
+            (thread_id, agent, thread_id),
         ).fetchone()
         return row[0] if row else 0
+
+    def set_thread_seen_floor(self, thread_id: int, last_msg_id: int) -> None:
+        """Raise the thread's floor on every persona's seen offset, pinning it to
+        the thread tip. Monotonic: a later write can only move it forward, so a
+        stale value can never re-expose scrubbed history.
+
+        The retention sweep is the real writer and does this same upsert inline,
+        because it must land in the same transaction as the redaction -- a
+        committed redaction with no floor is precisely the failure the floor
+        exists to prevent. This method is the store-level entry point for any
+        other caller (and what the tests drive the semantics through).
+        """
+        self._db.execute(
+            "INSERT INTO thread_seen_floor (thread_id, last_msg_id) VALUES (?, ?)"
+            " ON CONFLICT(thread_id) DO UPDATE SET"
+            " last_msg_id = MAX(last_msg_id, excluded.last_msg_id)",
+            (thread_id, last_msg_id),
+        )
+        self._db.commit()
 
     def set_agent_seen(self, thread_id: int, agent: str, last_msg_id: int) -> None:
         self._db.execute(

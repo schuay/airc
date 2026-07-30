@@ -38,6 +38,13 @@ dependencies = [
 # The command stays `airc` (prod + muscle memory); only the module path moved.
 [project.scripts]
 airc = "airc_room.cli:main"
+# The retention sweep. Core, not the coding plugin: it touches only core tables
+# (messages/threads/agent_seen/...), and its one judgement call -- "keep SYSTEM"
+# -- is a statement about a core MessageKind whose semantics core owns. In the
+# plugin it would mean reaching into core's schema to redact it, inverting the
+# dependency. A separate console script because it must run with the room
+# stopped (it vacuums both database files).
+airc-prune = "airc_room.prune:main"
 
 [tool.uv.sources]
 bus = { workspace = true }
