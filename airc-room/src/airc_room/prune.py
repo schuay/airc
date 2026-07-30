@@ -119,6 +119,22 @@ def _connect(path: Path) -> sqlite3.Connection:
     return db
 
 
+def existing_tables(db: sqlite3.Connection) -> set[str]:
+    """The tables this database actually has.
+
+    Not a paranoia check: NOT opening through Store means the schema is never
+    created or migrated, so a store written by an older room genuinely lacks
+    tables this code names. The live store at the time of writing had no
+    `timers`, `pending_bugs`, `chat_headline_findings`, or `thread_seen_floor` --
+    and an unguarded query against one aborts the sweep (or, mid-transaction,
+    rolls back a redaction that already reported its counts). Every table below
+    threads/messages is therefore consulted through this set.
+    """
+    return {
+        r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+
+
 def aged_threads(db: sqlite3.Connection, cutoff: float) -> list[int]:
     """Thread ids created before the cutoff and not already fully scrubbed.
 
@@ -156,13 +172,20 @@ def live_threads(db: sqlite3.Connection, control_root: Path | None) -> set[int]:
     commit_threads resolving so the result still routes to its thread. This only
     avoids gutting the context of a thread someone is mid-way through.
     """
-    live = {
-        r[0]
-        for r in db.execute(
-            "SELECT thread_id FROM pending_bugs WHERE thread_id IS NOT NULL"
-            " UNION SELECT thread_id FROM timers"
-        ).fetchall()
-    }
+    # Queried separately and only when present: an older store lacks these
+    # tables entirely (see existing_tables), and a single UNION would abort on
+    # the first missing one -- taking the whole sweep with it.
+    have = existing_tables(db)
+    live: set[int] = set()
+    if "pending_bugs" in have:
+        live |= {
+            r[0]
+            for r in db.execute(
+                "SELECT thread_id FROM pending_bugs WHERE thread_id IS NOT NULL"
+            )
+        }
+    if "timers" in have:
+        live |= {r[0] for r in db.execute("SELECT thread_id FROM timers")}
     if control_root is None:
         return live
     live |= _icompleteu_live(control_root)
@@ -220,15 +243,24 @@ def delete_checkpoints(
     (in airc.db, floored by the sweep) keeps it from being re-injected. What is
     actually lost is the persona's own tool results, all re-derivable.
     """
+    # Both tables are created by the saver on first use, so a checkpoint file
+    # from a room that never completed a turn can be missing one. Skipping an
+    # absent table is right; aborting here would take the redaction with it.
+    have = existing_tables(ckpt)
     n_ckpt = n_writes = 0
     for tid in thread_ids:
+        # No LIKE-escaping needed: the key is "<int>:<persona>[:g<gen>]", so the
+        # prefix is digits and a colon -- no `_` or `%` can appear in it. The
+        # colon is what makes this exact: '1:%' cannot reach thread 12.
         like = f"{tid}:%"
-        n_ckpt += ckpt.execute(
-            "DELETE FROM checkpoints WHERE thread_id LIKE ?", (like,)
-        ).rowcount
-        n_writes += ckpt.execute(
-            "DELETE FROM writes WHERE thread_id LIKE ?", (like,)
-        ).rowcount
+        if "checkpoints" in have:
+            n_ckpt += ckpt.execute(
+                "DELETE FROM checkpoints WHERE thread_id LIKE ?", (like,)
+            ).rowcount
+        if "writes" in have:
+            n_writes += ckpt.execute(
+                "DELETE FROM writes WHERE thread_id LIKE ?", (like,)
+            ).rowcount
     ckpt.commit()
     return n_ckpt, n_writes
 
@@ -244,6 +276,27 @@ def redact_threads(
     lines in a turn -- long after this reported success.
     """
     c = Counts(threads=len(thread_ids))
+    # An older store lacks some of these tables outright, and inside a
+    # transaction a "no such table" is the worst case: it rolls the redaction
+    # back after the run has already printed its counts. Resolve what exists
+    # once, before opening the transaction.
+    have = existing_tables(db)
+    orchestrated = "orchestrated" in have
+    # "Is this thread a watcher announcement rather than a human's?" -- OR'd over
+    # whichever signals this store actually has (see the title UPDATE below).
+    # A SYSTEM message needs no table check: messages is always present.
+    tests = [
+        f"EXISTS (SELECT 1 FROM messages WHERE thread_id = ? AND kind = '{_RETAINED_KIND}')"
+    ]
+    tests += [
+        f"EXISTS (SELECT 1 FROM {t} WHERE thread_id = ?)"
+        for t in ("commit_threads", "announcement_meta")
+        if t in have
+    ]
+    announced_sql = " OR ".join(tests)
+    # One binding per EXISTS test, plus the UPDATE's own `WHERE id = ?`. Every
+    # placeholder in that statement takes the same thread id.
+    announced_params = len(tests) + 1
     with db:  # one transaction; rolls back on any exception
         for tid in thread_ids:
             tip = db.execute(
@@ -261,13 +314,21 @@ def redact_threads(
                     "   AND (text != '' OR sender != '')",
                     (tid, _RETAINED_KIND),
                 ).rowcount
-            # A commit thread's title is the commit subject: public git data, and
-            # what keeps a scrubbed row intelligible. Only a human-started
+            # An announced thread's title is the commit subject: public git data,
+            # and what keeps a scrubbed row intelligible. Only a human-started
             # thread's title may be user-authored, so blank just those.
+            #
+            # "Announced" is tested three ways because no single one is reliable
+            # across the store's history. commit_threads is the intended signal
+            # but was added late -- it is EMPTY on a store whose 342 threads are
+            # almost all commit threads, which would have blanked every subject.
+            # announcement_meta covers more of them, and a SYSTEM message is the
+            # announcement itself, so it covers any thread a watcher posted to.
+            # A human thread has none of the three.
             c.titles_blanked += db.execute(
                 "UPDATE threads SET title = '' WHERE id = ? AND title != ''"
-                " AND NOT EXISTS (SELECT 1 FROM commit_threads WHERE thread_id = ?)",
-                (tid, tid),
+                f" AND NOT ({announced_sql})",
+                (tid,) * announced_params,
             ).rowcount
             # Pin both offsets to the thread's own tip, in this transaction.
             # The floor covers every persona including those with no agent_seen
@@ -280,21 +341,26 @@ def redact_threads(
                 " last_msg_id = MAX(last_msg_id, excluded.last_msg_id)",
                 (tid, tip),
             )
-            db.execute(
-                "INSERT INTO orchestrated (thread_id, last_msg_id) VALUES (?, ?)"
-                " ON CONFLICT(thread_id) DO UPDATE SET"
-                " last_msg_id = MAX(last_msg_id, excluded.last_msg_id)",
-                (tid, tip),
-            )
+            if orchestrated:
+                db.execute(
+                    "INSERT INTO orchestrated (thread_id, last_msg_id) VALUES (?, ?)"
+                    " ON CONFLICT(thread_id) DO UPDATE SET"
+                    " last_msg_id = MAX(last_msg_id, excluded.last_msg_id)",
+                    (tid, tip),
+                )
             for table in _DROP_TABLES:
+                if table not in have:
+                    continue
                 c.rows_dropped += db.execute(
                     f"DELETE FROM {table} WHERE thread_id = ?", (tid,)
                 ).rowcount
             # The bug still wants filing; it just loses its follow-up
             # destination. Null the link rather than dropping the row.
-            c.bugs_unlinked += db.execute(
-                "UPDATE pending_bugs SET thread_id = NULL WHERE thread_id = ?", (tid,)
-            ).rowcount
+            if "pending_bugs" in have:
+                c.bugs_unlinked += db.execute(
+                    "UPDATE pending_bugs SET thread_id = NULL WHERE thread_id = ?",
+                    (tid,),
+                ).rowcount
     return c
 
 
@@ -411,17 +477,19 @@ def main(argv: list[str] | None = None) -> int:
         _ensure_floor_table(db)
         counts = redact_threads(db, targets, hard=args.hard)
         counts.checkpoints, counts.writes = n_ckpt, n_writes
-        # Audit trail: thread ids and counts, never content.
-        db.execute(
-            "INSERT INTO source_notes (source, ts, note) VALUES (?, ?, ?)",
-            (
-                "prune",
-                time.time(),
-                f"swept {counts.summary()} (window {days:.0f}d,"
-                f" threads {_compact_ids(targets)})",
-            ),
-        )
-        db.commit()
+        # Audit trail: thread ids and counts, never content. After the redaction,
+        # so a failed sweep leaves no note claiming it happened.
+        if "source_notes" in existing_tables(db):
+            db.execute(
+                "INSERT INTO source_notes (source, ts, note) VALUES (?, ?, ?)",
+                (
+                    "prune",
+                    time.time(),
+                    f"swept {counts.summary()} (window {days:.0f}d,"
+                    f" threads {_compact_ids(targets)})",
+                ),
+            )
+            db.commit()
         vacuum(db)
         print(f"swept: {counts.summary()}")
         return 0

@@ -195,19 +195,68 @@ async def test_dedup_keys_survive_so_a_late_result_still_routes(store):
     assert store.get_thread(t.id) is not None
 
 
-async def test_commit_thread_title_kept_human_thread_blanked(store):
-    """A commit thread's title is the commit subject (public git data, and what
-    makes a scrubbed row auditable); a human-started thread's may be authored."""
+async def test_announced_thread_title_kept_human_thread_blanked(store):
+    """An announced thread's title is the commit subject (public git data, and
+    what makes a scrubbed row auditable); a human-started thread's may be
+    authored. A human thread here has NO system message -- that is what
+    distinguishes it, and _populate posts one, so it is not used."""
     commit = store.create_thread("[v8] Fix a thing")
     human = store.create_thread("my private topic")
     await _populate(store, commit.id)
-    await _populate(store, human.id)
+    room = Room(store)
+    await room.post(human.id, "alice", MessageKind.HUMAN, "just chatting")
     store.set_commit_thread("cafe", commit.id)
 
     redact_threads(store._db, [commit.id, human.id])
 
     assert store.get_thread(commit.id).title == "[v8] Fix a thing"
     assert store.get_thread(human.id).title == ""
+
+
+@pytest.mark.parametrize("signal", ["commit_threads", "announcement_meta", "system"])
+async def test_any_announcement_signal_keeps_the_title(store, signal):
+    """The three signals are OR'd because none is reliable alone across the
+    store's history: commit_threads was added late and is EMPTY on the live store
+    whose threads are almost all commit threads -- keying on it alone blanked all
+    234 subjects in a real dry run. announcement_meta covers more, and a SYSTEM
+    message is the announcement itself."""
+    t = store.create_thread("[v8] Fix a thing")
+    room = Room(store)
+    await room.post(t.id, "alice", MessageKind.HUMAN, "a reply")
+    if signal == "commit_threads":
+        store.set_commit_thread("cafe", t.id)
+    elif signal == "announcement_meta":
+        store.set_announcement_meta(t.id, "v8", "/src/v8", "cafe")
+    else:
+        await room.post(t.id, "watcher", MessageKind.SYSTEM, "[v8] Fix a thing")
+
+    redact_threads(store._db, [t.id])
+
+    assert store.get_thread(t.id).title == "[v8] Fix a thing"
+
+
+async def test_title_blanked_when_no_signal_at_all(store):
+    """The other direction: with none of the three, the title is user-authored as
+    far as anything can tell, so it goes."""
+    t = store.create_thread("my private topic")
+    room = Room(store)
+    await room.post(t.id, "alice", MessageKind.HUMAN, "just chatting")
+    redact_threads(store._db, [t.id])
+    assert store.get_thread(t.id).title == ""
+
+
+async def test_titles_survive_a_store_missing_commit_threads(store):
+    """The live-store shape that motivated this: an older schema with no
+    commit_threads table at all must still keep announced titles (via the SYSTEM
+    message), not fall back to blanking everything."""
+    t = store.create_thread("[v8] Fix a thing")
+    await _populate(store, t.id)
+    store._db.execute("DROP TABLE commit_threads")
+    store._db.commit()
+
+    redact_threads(store._db, [t.id])
+
+    assert store.get_thread(t.id).title == "[v8] Fix a thing"
 
 
 async def test_pending_bug_is_unlinked_not_dropped(store):
@@ -402,6 +451,85 @@ def test_vacuum_reclaims_freed_pages(tmp_path):
     assert path.stat().st_size >= before  # freelist, not reclaimed
     vacuum(db)
     assert path.stat().st_size < before
+    db.close()
+
+
+# ── an older store: tables this code names that do not exist yet ──────────────
+#
+# The sweep does NOT open through Store, so nothing creates or migrates the
+# schema -- a store written by an earlier room genuinely lacks tables. The live
+# store had no timers, pending_bugs, chat_headline_findings, or
+# thread_seen_floor, and the first real dry run against a copy of it crashed with
+# "no such table: timers" before touching anything. Fixtures built through a
+# current Store always have every table, so only a test that drops them can
+# reach this.
+
+_LATE_TABLES = (
+    "timers",
+    "pending_bugs",
+    "chat_headline_findings",
+    "chat_headlines",
+    "chat_pending",
+    "context_generation",
+    "commit_threads",
+    "announcement_meta",
+    "orchestrated",
+    "source_notes",
+)
+
+
+def _drop(store: Store, *tables: str) -> None:
+    for t in tables:
+        store._db.execute(f"DROP TABLE IF EXISTS {t}")
+    store._db.commit()
+
+
+@pytest.mark.parametrize("table", _LATE_TABLES)
+async def test_sweep_survives_one_missing_table(store, table):
+    """Each one individually: an unguarded query against a missing table aborts
+    the run, and inside redact_threads' transaction it rolls the redaction back
+    AFTER the counts were computed -- reporting a sweep that did not happen."""
+    t = store.create_thread("old")
+    await _populate(store, t.id)
+    _age(store, t.id, OLD)
+    _drop(store, table)
+
+    assert aged_threads(store._db, time.time() - 30 * 86400) == [t.id]
+    live_threads(store._db, None)  # must not raise
+    redact_threads(store._db, [t.id])
+
+    msgs = store.thread_messages(t.id)
+    assert [m.text for m in msgs if m.kind != MessageKind.SYSTEM] == [""] * 6
+    assert store.get_agent_seen(t.id, "compiler") == msgs[-1].id
+
+
+async def test_sweep_survives_every_late_table_missing(store):
+    """All of them at once -- the oldest plausible store."""
+    t = store.create_thread("old")
+    await _populate(store, t.id)
+    _age(store, t.id, OLD)
+    _drop(store, *_LATE_TABLES)
+
+    live_threads(store._db, None)
+    c = redact_threads(store._db, [t.id])
+
+    assert c.messages_redacted == 6
+    assert all(
+        m.text == ""
+        for m in store.thread_messages(t.id)
+        if m.kind != MessageKind.SYSTEM
+    )
+    assert store.get_agent_seen(t.id, "compiler") > 0
+
+
+def test_checkpoint_delete_survives_a_missing_table(tmp_path):
+    """The saver creates its tables on first use, so a checkpoint file from a room
+    that never completed a turn can have one and not the other."""
+    db = sqlite3.connect(str(tmp_path / "c.db"))
+    db.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint BLOB)")
+    db.execute("INSERT INTO checkpoints VALUES ('1:compiler:g0', x'00')")
+    db.commit()
+    assert delete_checkpoints(db, [1]) == (1, 0)  # no `writes` table; no crash
     db.close()
 
 
