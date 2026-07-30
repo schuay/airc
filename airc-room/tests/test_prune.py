@@ -148,6 +148,19 @@ async def test_findings_are_scrubbed_despite_being_automated(store):
     )
 
 
+async def test_ping_gaia_id_is_scrubbed(store):
+    """A PING carries a bare numeric Gaia id as its TEXT (it is the @mention key,
+    so unlike an inbound sender id it cannot be hashed -- a hash notifies nobody).
+    The sweep is therefore the only thing that removes it, which works because
+    PING is not a retained kind. Guards that: were PING ever added to the retained
+    set, corporate ids would start outliving the retention window."""
+    t = store.create_thread("t")
+    await _populate(store, t.id)
+    redact_threads(store._db, [t.id])
+    pings = [m for m in store.thread_messages(t.id) if m.kind == MessageKind.PING]
+    assert pings and all(m.text == "" for m in pings)
+
+
 async def test_hard_mode_deletes_rows_but_keeps_system(store):
     t = store.create_thread("t")
     await _populate(store, t.id)
