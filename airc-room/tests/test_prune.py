@@ -23,6 +23,7 @@ import pytest
 from airc_room.prune import (
     Counts,
     aged_threads,
+    check_writable,
     delete_checkpoints,
     live_threads,
     parse_duration,
@@ -531,6 +532,40 @@ def test_checkpoint_delete_survives_a_missing_table(tmp_path):
     db.commit()
     assert delete_checkpoints(db, [1]) == (1, 0)  # no `writes` table; no crash
     db.close()
+
+
+# ── the room must be stopped, and the tool must prove it before acting ─────────
+
+
+def test_check_writable_passes_on_an_idle_store(store, tmp_path):
+    assert check_writable(store._db, tmp_path / "airc.db") is None
+    # And leaves no transaction open, so the caller can proceed normally.
+    store._db.execute("UPDATE threads SET title = title")
+
+
+def test_check_writable_detects_a_live_writer(tmp_path):
+    """The failure this prevents, observed for real: with the room still running,
+    the sweep deleted and vacuumed the checkpoints, THEN hit "database is locked"
+    on airc.db -- personas lost their context and not one byte was scrubbed. The
+    preflight runs on both files before either is touched, so a locked airc.db is
+    found while the checkpoints are still intact."""
+    path = tmp_path / "airc.db"
+    holder = sqlite3.connect(str(path))
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("CREATE TABLE t (x)")
+    holder.commit()
+    other = sqlite3.connect(str(path))
+    other.execute("PRAGMA busy_timeout=100")  # keep the test fast
+    try:
+        holder.execute("BEGIN IMMEDIATE")  # a turn mid-write
+        holder.execute("INSERT INTO t VALUES (1)")
+        assert check_writable(other, path) is not None
+        holder.execute("ROLLBACK")
+        # Released: the same probe now succeeds, so this is not a false positive.
+        assert check_writable(other, path) is None
+    finally:
+        other.close()
+        holder.close()
 
 
 def test_counts_summary_reports_the_right_verb():

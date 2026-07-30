@@ -119,6 +119,29 @@ def _connect(path: Path) -> sqlite3.Connection:
     return db
 
 
+def check_writable(db: sqlite3.Connection, path: Path) -> str | None:
+    """None if this database can be written exclusively, else why not.
+
+    The sweep's whole premise is that the room is stopped: it deletes
+    checkpoints, then redacts, then vacuums. Without this check a still-running
+    room fails the run HALFWAY -- observed: the checkpoint delete and vacuum
+    succeeded, then airc.db raised "database is locked", so the personas lost
+    their context and not one byte of content was scrubbed. Loud, but the worst
+    possible split.
+
+    BEGIN IMMEDIATE takes the write lock without writing anything, which is
+    exactly the question being asked, and the rollback leaves no trace. Checked
+    on BOTH files before either is touched, so a locked airc.db is discovered
+    while the checkpoints are still intact.
+    """
+    try:
+        db.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as e:
+        return f"{path} is locked by another process ({e})"
+    db.execute("ROLLBACK")
+    return None
+
+
 def existing_tables(db: sqlite3.Connection) -> set[str]:
     """The tables this database actually has.
 
@@ -455,6 +478,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             print("dry run: nothing changed")
             return 0
+
+        # Preflight BOTH files before touching either. The sweep assumes the room
+        # is stopped; if it is not, failing here costs nothing, whereas failing
+        # partway leaves the checkpoints deleted and the content unscrubbed --
+        # the one outcome worse than not running at all.
+        problems = [p for p in (check_writable(db, db_path),) if p]
+        if ckpt_path.exists():
+            probe = _connect(ckpt_path)
+            try:
+                if p := check_writable(probe, ckpt_path):
+                    problems.append(p)
+            finally:
+                probe.close()
+        if problems:
+            for p in problems:
+                print(f"error: {p}", file=sys.stderr)
+            print(
+                "refusing to sweep: stop airc.service first"
+                " (the unit's ExecStartPre does this)",
+                file=sys.stderr,
+            )
+            return 1
+
         if not args.yes and not _confirm():
             print("aborted")
             return 1
