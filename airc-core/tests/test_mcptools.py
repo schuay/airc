@@ -4,6 +4,8 @@
 import asyncio
 from dataclasses import dataclass
 
+from langchain_core.tools import ToolException
+
 from airc_core import mcptools
 from airc_core.mcptools import MCPToolset, _clean_schema, _fix_tool
 
@@ -151,6 +153,83 @@ async def test_tool_timeout_surfaces_as_error_tool_message(monkeypatch):
     monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.01)
     msg = await tool.ainvoke(
         {"type": "tool_call", "name": "hang", "args": {}, "id": "tc1"}
+    )
+    assert msg.status == "error"
+    assert "timed out" in str(msg.content)
+
+
+async def test_dead_transport_surfaces_as_error_tool_message():
+    # A stdio server that died mid-life raises anyio's ClosedResourceError, which
+    # is neither ToolException nor ToolInvocationError -- so langgraph's ToolNode
+    # default handler re-raises it and the whole agent turn dies. This affects
+    # every persona using a crashed server, not just the one that needs it.
+    import anyio
+    from langchain_core.tools import StructuredTool
+
+    async def dead() -> str:
+        raise anyio.ClosedResourceError
+
+    tool = _fix_tool(
+        StructuredTool.from_function(coroutine=dead, name="dead", description="dead")
+    )
+    msg = await tool.ainvoke(
+        {"type": "tool_call", "name": "dead", "args": {}, "id": "tc1"}
+    )
+    assert msg.status == "error"
+    assert "unreachable" in str(msg.content)
+
+
+async def test_adapter_error_handler_is_preserved():
+    # The MCP adapter installs a handle_tool_error callback that preserves
+    # non-text content blocks in an isError result (it calls this load-bearing
+    # and locks it with its own test). _fix_tool used to clobber it with a bare
+    # True, collapsing those blocks to str(); it must now compose instead.
+    from langchain_core.tools import StructuredTool
+
+    seen: list[Exception] = []
+
+    def adapter_handler(e):
+        seen.append(e)
+        return [{"type": "text", "text": "from the adapter"}]
+
+    async def boom() -> str:
+        raise ToolException("server said no")
+
+    tool = StructuredTool.from_function(coroutine=boom, name="boom", description="boom")
+    tool.handle_tool_error = adapter_handler
+    _fix_tool(tool)
+
+    msg = await tool.ainvoke(
+        {"type": "tool_call", "name": "boom", "args": {}, "id": "tc1"}
+    )
+    assert msg.status == "error"
+    assert len(seen) == 1  # the adapter's handler still ran
+    assert "from the adapter" in str(msg.content)
+
+
+async def test_local_errors_do_not_reach_the_adapter_handler(monkeypatch):
+    # The adapter's callback RE-RAISES any ToolException that is not its own
+    # internal type. Delegating our timeout/transport errors to it would send
+    # them straight back out of the turn -- the exact failure capped() exists to
+    # prevent -- so the composed handler must answer for those itself.
+    from langchain_core.tools import StructuredTool
+
+    def strict_adapter_handler(e):
+        raise e  # what the real adapter does for a foreign ToolException
+
+    async def hang() -> str:
+        await asyncio.sleep(30)
+        return "never"
+
+    tool = StructuredTool.from_function(
+        coroutine=hang, name="hang2", description="hangs"
+    )
+    tool.handle_tool_error = strict_adapter_handler
+    _fix_tool(tool)
+
+    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.01)
+    msg = await tool.ainvoke(
+        {"type": "tool_call", "name": "hang2", "args": {}, "id": "tc1"}
     )
     assert msg.status == "error"
     assert "timed out" in str(msg.content)

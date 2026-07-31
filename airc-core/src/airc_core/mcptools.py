@@ -5,9 +5,12 @@
 
 Sessions are opened once at daemon startup and stay alive for the daemon's
 lifetime (the room is a long-running process; stateful servers like v8-utils
-benefit from a persistent subprocess). Tool execution errors are converted to
-tool-result text via handle_tool_error so a dead server degrades to visible
-errors instead of crashing a turn.
+benefit from a persistent subprocess). Nothing reopens one: a server that dies
+mid-life, or never started, stays gone until the daemon restarts. What that
+costs is bounded deliberately -- every failure mode (server-reported error,
+timeout, dead transport) is converted to tool-result text via
+handle_tool_error, so an unusable server degrades to per-call errors the agent
+can read and work around, never a traceback out of the turn.
 
 Tool names are exposed unprefixed; if two servers ever export the same name
 the second one wins and a warning is logged.
@@ -50,6 +53,39 @@ _MAX_TOOL_RESULT_CHARS = 200_000
 # expiry the agent sees a clean error tool result and continues -- see the
 # ToolException conversion in capped().
 _TOOL_CALL_TIMEOUT_S = 120
+
+
+class _LocalToolError(ToolException):
+    """An error raised by this wrapper (timeout, dead transport), as opposed to
+    one the MCP adapter raised for a server-reported isError result. The
+    distinction is what lets _install_error_handler answer for ours and delegate
+    the adapter's back to it."""
+
+
+def _transport_errors() -> tuple[type[BaseException], ...]:
+    """Exception types signalling the server connection is gone, not that the
+    tool rejected the call. anyio raises these when the stdio child's streams
+    close; McpError covers the CONNECTION_CLOSED the session synthesises for
+    requests already in flight when that happens."""
+    types: list[type[BaseException]] = []
+    try:
+        import anyio
+
+        types += [anyio.ClosedResourceError, anyio.BrokenResourceError]
+    except ImportError:  # pragma: no cover -- anyio ships with the mcp sdk
+        pass
+    try:
+        from mcp.shared.exceptions import McpError
+
+        types.append(McpError)
+    except ImportError:  # pragma: no cover -- no mcp: no transport to lose
+        pass
+    return tuple(types)
+
+
+# Resolved once at import: the tuple is fixed for the process, and an except
+# clause is hot enough not to want an import behind it.
+_TRANSPORT_ERRORS = _transport_errors()
 
 
 def _truncate_text(text: str, limit: int = _MAX_TOOL_RESULT_CHARS) -> str:
@@ -129,26 +165,65 @@ def _result_chars(value) -> int:
     return 0
 
 
+def _install_error_handler(tool: BaseTool) -> None:
+    """Route _LocalToolError to text, leaving any existing handler intact.
+
+    The MCP adapter installs its own handle_tool_error callback whose job is to
+    preserve non-text content blocks (image/file) in an isError result; it
+    documents that as load-bearing and locks it with a test. Overwriting it with
+    a bare True -- which this used to do -- collapses those blocks to str().
+
+    But it cannot simply be kept either: that callback RE-RAISES every
+    ToolException that is not its own internal type, so the timeout and
+    transport errors raised below would escape again, which is the whole thing
+    capped() exists to prevent. Hence a composed handler: ours answers for the
+    errors we raise, anything else falls through to the adapter's.
+    """
+    prev = getattr(tool, "handle_tool_error", None)
+
+    def handle(e: ToolException):
+        if isinstance(e, _LocalToolError):
+            return str(e)
+        if callable(prev):
+            return prev(e)
+        if prev:  # True/str: langchain's own default rendering
+            return str(e)
+        raise e
+
+    tool.handle_tool_error = handle
+
+
 def _fix_tool(tool: BaseTool) -> BaseTool:
-    tool.handle_tool_error = True
+    _install_error_handler(tool)
     if (orig := getattr(tool, "coroutine", None)) is not None:
         name = tool.name
 
         async def capped(*args, **kwargs):
-            # A bare TimeoutError would bypass handle_tool_error (only
-            # ToolException routes there), escape the tool boundary, and kill
-            # the whole agent turn -- in the review graph it would even be
-            # misread as the review-level wall-clock. Convert it to the same
-            # ToolException channel the MCP adapter uses for isError results,
-            # so the agent sees a clean "tool timed out" error message and
-            # continues the turn.
+            # A bare TimeoutError or transport failure would bypass
+            # handle_tool_error (only ToolException routes there), escape the
+            # tool boundary, and kill the whole agent turn -- in the review graph
+            # a timeout would even be misread as the review-level wall-clock.
+            # Convert both to the ToolException channel so the agent sees a clean
+            # error message and continues the turn.
             try:
                 async with asyncio.timeout(_TOOL_CALL_TIMEOUT_S):
                     out = await orig(*args, **kwargs)
             except TimeoutError:
                 log.warning("tool %s: timed out after %ds", name, _TOOL_CALL_TIMEOUT_S)
-                raise ToolException(
+                raise _LocalToolError(
                     f"tool {name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
+                ) from None
+            except _TRANSPORT_ERRORS as e:
+                # The server process died (stdio child crashed, was OOM-killed,
+                # or lost its credentials and exited). Sessions are opened once
+                # at startup and never reopened, so every later call to this
+                # server fails the same way until the daemon restarts -- but that
+                # must degrade to a visible per-call error, not take down an
+                # unrelated agent turn with a traceback.
+                log.warning("tool %s: transport failed: %s", name, e)
+                raise _LocalToolError(
+                    f"tool {name} failed: its MCP server is unreachable"
+                    f" ({type(e).__name__}); it stays unavailable until restart"
                 ) from None
             # Log the raw size and which tool produced it: this is the per-tool
             # evidence for what inflates a turn's context, since every result
