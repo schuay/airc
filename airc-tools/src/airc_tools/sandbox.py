@@ -89,6 +89,28 @@ def _bindable(p: Path) -> bool:
     return True
 
 
+# The ro roots _SYSTEM_ARGS already binds (/usr, /etc). A ro/opaque path that
+# resolves to one of these is already mounted (and mounted early, in the safe
+# order), so emitting it again is pure waste -- and, when it lands after a tmpfs
+# it covers (the prod bug: a launcher-resolved interpreter root of /usr re-emitted
+# after the $HOME tmpfs), a leak. Parsed from _SYSTEM_ARGS so it cannot drift.
+_SYSTEM_RO_ROOTS = frozenset(
+    Path(_SYSTEM_ARGS[i + 2])
+    for i in range(len(_SYSTEM_ARGS) - 2)
+    if _SYSTEM_ARGS[i] == "--ro-bind"
+)
+
+
+def _strict_ancestor(a: Path, b: Path) -> bool:
+    """Is `a` a strict ancestor of `b` (a covers b, a != b)? Both resolved, so a
+    symlinked home still compares against its real target."""
+    try:
+        ra, rb = a.resolve(), b.resolve()
+    except OSError:
+        return False
+    return ra != rb and rb.is_relative_to(ra)
+
+
 @dataclass(frozen=True)
 class Sandbox:
     """One job's confinement profile; `wrapper()` yields the argv prefix that
@@ -143,6 +165,19 @@ class Sandbox:
         argv = list(self._cgroup_args())
         argv += ["bwrap", *_SYSTEM_ARGS, *self._resolv_conf_args()]
         argv += self._journal_socket_args()
+        # ro/opaque binds split into two phases around the tmpfs. bwrap mounts in
+        # argv order and a later mount shadows an earlier one on overlap, so a ro
+        # bind that is an ANCESTOR of a tmpfs mount -- the prod bug, where a
+        # launcher-resolved interpreter root of /usr was re-emitted after the
+        # $HOME tmpfs -- shadows the tmpfs and turns its scratch ($HOME/.cache,
+        # where vpython takes its lock) read-only. Such ancestor binds go FIRST,
+        # before the tmpfs, so the tmpfs wins at its own path; the rest stay
+        # after the tmpfs so descendant binds (deps under $HOME) land on top of
+        # the blanked home and stay visible. Paths already bound by _SYSTEM_ARGS
+        # (/usr, /etc) are dropped: already bound, and bound early.
+        early, late = self._split_ro()
+        for p in early:
+            argv += ["--ro-bind", str(p), str(p)]
         for mnt, size in self.tmpfs:
             argv += ["--size", str(size), "--tmpfs", mnt]
         # Mount order is the precedence order (bwrap: later mounts shadow
@@ -154,9 +189,8 @@ class Sandbox:
         # top of the ro main-.git bind. The give-up is the inverse layering:
         # an ro bind INSIDE the worktree is shadowed by the root bind --
         # nothing uses that.
-        for p in (*self.ro_paths, *self.opaque_ro_paths):
-            if _bindable(p):
-                argv += ["--ro-bind", str(p), str(p)]
+        for p in late:
+            argv += ["--ro-bind", str(p), str(p)]
         argv += ["--bind", str(self.root), str(self.root)]
         for p in self.rw_paths:
             if _bindable(p):
@@ -171,12 +205,81 @@ class Sandbox:
             if not p.exists():
                 raise FileNotFoundError(f"ro-over bind source missing: {p}")
             argv += ["--ro-bind", str(p), str(p)]
+        # Guarantee: no later mount may cover (be an ancestor-or-equal of) an
+        # earlier tmpfs or the rw root. A violation is a silent sandbox leak --
+        # the home-tmpfs shadow above if the phasing ever regresses, or a
+        # worktree turned read-only (or replaced with real disk) by a later
+        # ancestor bind. Fail the profile at assembly rather than hand the agent
+        # a box that is not what it claims to be.
+        self._assert_no_leak(argv)
         argv += _ISOLATION_ARGS
         argv += ["--clearenv"]
         for k, v in (*_DEFANG_ENV.items(), *self.env):
             argv += ["--setenv", k, v]
         argv += ["--chdir", str(self.root)]
         return argv
+
+    def _split_ro(self) -> tuple[list[Path], list[Path]]:
+        """Partition ro+opaque binds into early (before the tmpfs) and late.
+
+        Early: a strict ancestor of any tmpfs mount -- it must precede that
+        tmpfs or shadow it read-only (the home-tmpfs leak). Late: the rest,
+        bound after the tmpfs so descendant binds (deps under $HOME) win on top
+        of the blanked home. Dedups by resolved destination and drops anything
+        already bound by _SYSTEM_ARGS (/usr, /etc): already mounted, and mounted
+        in the safe early order."""
+        tmpfs_mounts = [Path(mnt) for mnt, _ in self.tmpfs]
+        early: list[Path] = []
+        late: list[Path] = []
+        seen: set[Path] = set()
+        for p in (*self.ro_paths, *self.opaque_ro_paths):
+            if not _bindable(p):
+                continue
+            rp = p.resolve()
+            if rp in _SYSTEM_RO_ROOTS or rp in seen:
+                continue
+            seen.add(rp)
+            if any(_strict_ancestor(rp, t) for t in tmpfs_mounts):
+                early.append(p)
+            else:
+                late.append(p)
+        return early, late
+
+    def _assert_no_leak(self, argv: list[str]) -> None:
+        """No later mount may cover (be an ancestor-or-equal of) an earlier
+        tmpfs or the rw root. Parses the mount specs wrapper() just emitted and
+        raises naming the offending pair. A violation is a silent sandbox leak:
+        the home-tmpfs shadow if phasing regresses, or the worktree turned
+        read-only / swapped for real disk by a later ancestor bind."""
+        root = self.root.resolve()
+        mounts: list[tuple[int, Path]] = []
+        protected: list[tuple[int, Path]] = []
+        i = 0
+        while i < len(argv):
+            a = argv[i]
+            if a == "--tmpfs" and i + 1 < len(argv):
+                d = Path(argv[i + 1]).resolve()
+                mounts.append((i, d))
+                protected.append((i, d))
+                i += 2
+            elif a in ("--ro-bind", "--bind") and i + 2 < len(argv):
+                d = Path(argv[i + 2]).resolve()
+                mounts.append((i, d))
+                if a == "--bind" and d == root:
+                    protected.append((i, d))
+                i += 3
+            else:
+                i += 1
+        for pi, pp in protected:
+            for mi, mp in mounts:
+                # is_relative_to is True for equality too: a later bind that
+                # remounts the exact path is just as much a shadow.
+                if mi > pi and pp.is_relative_to(mp):
+                    raise ValueError(
+                        f"sandbox mount order leaks: {mp} (index {mi}) covers"
+                        f" protected {pp} (index {pi}) -- a later bind shadows"
+                        f" a tmpfs or the rw root"
+                    )
 
     def _cgroup_args(self) -> list[str]:
         # systemd-run needs the user manager; when it is absent (a bare chroot,

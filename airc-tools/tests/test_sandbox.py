@@ -323,3 +323,80 @@ def test_wrapper_refuses_missing_ro_over_source(tmp_path):
     (gitdir / "config").unlink()
     with pytest.raises(FileNotFoundError, match="config"):
         boxed.wrapper()
+
+
+def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
+    # The prod bug: a ro bind that is an ANCESTOR of a tmpfs mount must land
+    # BEFORE the tmpfs, or it shadows the tmpfs read-only ($HOME/.cache, where
+    # vpython takes its lock). /usr re-emitted by launcher interpreter-root
+    # resolution after the $HOME tmpfs was the original failure.
+    home = tmp_path / "home"  # stands in for $HOME, under the ro ancestor
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(
+        root=root,
+        ro_paths=(tmp_path,),  # ro ancestor of the home tmpfs
+        tmpfs=((str(home), 1 << 20),),
+        env=(("HOME", str(home)),),
+        use_cgroup=False,
+    )
+    argv = boxed.wrapper()
+    tmpfs_at = next(
+        i for i in range(len(argv)) if argv[i] == "--tmpfs" and argv[i + 1] == str(home)
+    )
+    ro_at = next(
+        i
+        for i in range(len(argv))
+        if argv[i] == "--ro-bind" and argv[i + 1] == str(tmp_path)
+    )
+    assert ro_at < tmpfs_at  # ancestor phased before the tmpfs -> tmpfs wins
+
+
+@needs_bwrap
+async def test_ro_ancestor_of_tmpfs_tmpfs_wins_end_to_end(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(
+        root=root,
+        ro_paths=(tmp_path,),  # ro ancestor of the home tmpfs
+        tmpfs=((str(home), 1 << 20),),
+        env=(("HOME", str(home)), ("PATH", "/usr/bin:/bin")),
+        use_cgroup=False,
+    )
+    out = await run_shell(
+        'mkdir -p "$HOME/.cache" && touch "$HOME/.cache/_p" && echo HOME_CACHE_WRITABLE;'
+        f"touch {tmp_path}/probe 2>&1",
+        sandbox=boxed,
+    )
+    assert "HOME_CACHE_WRITABLE" in out  # tmpfs won, not shadowed read-only
+    assert "Read-only file system" in out  # the ro ancestor itself stays ro
+
+
+def test_system_ro_root_is_dropped_not_reemitted(tmp_path):
+    # /usr is already bound by _SYSTEM_ARGS; re-emitting it (as launcher
+    # interpreter-root resolution did on prod) is waste, and after a tmpfs it
+    # covers it is the leak. wrapper() drops it -- exactly one /usr bind.
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(root=root, ro_paths=(Path("/usr"),), use_cgroup=False)
+    argv = boxed.wrapper()
+    usr_binds = sum(
+        1 for i in range(len(argv)) if argv[i] == "--ro-bind" and argv[i + 1] == "/usr"
+    )
+    assert usr_binds == 1
+
+
+def test_assert_no_leak_raises_on_a_later_ancestor(tmp_path):
+    # The guarantee: a hand-built argv where a ro ancestor lands AFTER a tmpfs it
+    # covers fails loud at assembly, rather than producing a silently-broken box.
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(root=root, tmpfs=((str(home), 1 << 20),), use_cgroup=False)
+    bad = ["bwrap", "--tmpfs", str(home), "--ro-bind", str(tmp_path), str(tmp_path)]
+    with pytest.raises(ValueError, match="leaks"):
+        boxed._assert_no_leak(bad)
