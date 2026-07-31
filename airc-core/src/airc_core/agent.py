@@ -15,6 +15,7 @@ two former Config couplings are now explicit parameters.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import math
 import os
@@ -302,6 +303,17 @@ _RETRY_MAX = 6
 _RETRY_INITIAL_DELAY = 5.0
 _RETRY_BACKOFF_FACTOR = 3.0
 _RETRY_MAX_DELAY = 60.0
+
+
+# Set by _EmptyCandidateRetry when it raises, read by _GrowingPrefixCache on the
+# retry that follows. A contextvar rather than an attribute on the exception
+# because the two middlewares do not see each other: the retry layer sits between
+# them and re-invokes the handler with the same request object, so the exception
+# never reaches the cache. Both run in one task chain per model call, so the value
+# set on the raise is visible to the cache when the retry re-enters it.
+_empty_retry: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "airc_empty_candidate_retries", default=0
+)
 
 
 class EmptyCandidateError(Exception):
@@ -617,12 +629,19 @@ class _EmptyCandidateRetry(AgentMiddleware):
     Placement: listed AFTER ModelRetryMiddleware in base_middleware, so the
     retry layer wraps this and catches its raise. The growing cache (appended
     by the harness after base_middleware) sits inside this middleware, so a
-    retry resends the same cached request -- cheap on a transient flake, but
-    a cache-fault empty (mismatched prefix) exhausts retries against the same
-    cache.
-    TODO: if wild logs show cache-shaped empties, force uncached on retry via
-    the growing cache's step-aside path. For now we accept the risk -- the
-    failure is at least named, not silent.
+    retry resends the same cached request. The first retry keeps it that way --
+    a transient flake re-rolls cheaply against a warm cache. From the second on,
+    _empty_retry tells the cache to step aside and send the request uncached:
+    a repeat empty on an unchanged request is deterministic, and re-reading the
+    same cached prefix can only reproduce it. Observed in the wild: two
+    consecutive turns on one thread, 7 calls with 0 output tokens, every call
+    reading an identical cached prefix.
+
+    That step-aside doubles as the diagnostic we otherwise lack. If the uncached
+    call produces output, the cached prefix was the fault; if it is still empty,
+    the cache is exonerated and the poison is in the message history. The log
+    line below names which, so the next occurrence is evidence rather than
+    another round of inference.
     """
 
     async def awrap_model_call(self, request, handler):
@@ -635,9 +654,22 @@ class _EmptyCandidateRetry(AgentMiddleware):
             if not tool_calls and not content:
                 meta = msg.response_metadata or {}
                 reason = meta.get("finish_reason", "")
+                n = _empty_retry.get() + 1
+                _empty_retry.set(n)
+                if n > 1:
+                    log.warning(
+                        "empty candidate x%d (finish_reason=%s); next retry goes"
+                        " uncached to test whether the cached prefix is the fault",
+                        n,
+                        reason or "unknown",
+                    )
                 raise EmptyCandidateError(
                     f"empty candidate (finish_reason={reason or 'unknown'})"
                 )
+        # A non-empty response ends the episode: reset so a later empty in the
+        # same turn starts its own retry ladder with a warm cache.
+        if _empty_retry.get():
+            _empty_retry.set(0)
         return resp
 
 
@@ -682,7 +714,13 @@ class CallBudgetMiddleware(AgentMiddleware):
         # state.model_calls is the count of calls already completed this turn.
         # Append the nudge to this request only (ephemeral), never to state.
         n = request.state.get("model_calls", 0)
-        nudge = self._stages.get(n)
+        # after_model increments model_calls, but an EmptyCandidateError raised
+        # innermore skips it -- the count freezes and this threshold re-fires on
+        # every retry of the same call (observed: the 45-call nudge appended to
+        # each of 7 empty-candidate retries, none of which the model answered).
+        # A retry is the same call, so skip the nudge: it was already on the
+        # request that failed, and re-appending stacks copies of it.
+        nudge = self._stages.get(n) if not _empty_retry.get() else None
         if nudge is not None:
             log.info("call budget: wrap-up nudge at %d model calls", n)
             request = request.override(
@@ -1388,6 +1426,20 @@ class _GrowingPrefixCache(AgentMiddleware):
         st.seen_len = len(messages)
 
         st.calls_since += 1
+        # A repeated empty candidate on an unchanged request: drop this thread's
+        # cache and serve uncached, so the retry cannot re-read the prefix that
+        # may have produced it. Dropping beats re-creating -- a new cache over
+        # the same messages would be the same bytes, testing nothing. The next
+        # call rebuilds normally from st.name is None.
+        if _empty_retry.get() > 1 and st.name is not None:
+            log.warning(
+                "growing cache: dropping %s after repeated empty candidates;"
+                " serving uncached",
+                st.name,
+            )
+            await self._delete_quietly(st.name)
+            self._states[key] = _PrefixState(seen_len=len(messages))
+            return await handler(request)
         target = _last_step_boundary(messages)
         if time.monotonic() >= self._cooldown_until:
             prefix = [self._system, *messages[:target]]

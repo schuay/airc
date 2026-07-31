@@ -114,7 +114,8 @@ class _ScriptedHarness:
     A liveness signal that keyed on raw journal length rather than work events
     would see every turn as alive here and never abandon (the P0)."""
 
-    # (AgentResult | None, advances_journal) or (..., ..., finish_reason).
+    # (AgentResult | None, advances_journal), optionally + finish_reason,
+    # optionally + empty_candidate.
     script: list[tuple]
     calls: int = 0
     invocations: list = field(default_factory=list)
@@ -125,6 +126,7 @@ class _ScriptedHarness:
         entry = self.script[min(self.calls, len(self.script) - 1)]
         result, advance = entry[0], entry[1]
         finish_reason = entry[2] if len(entry) > 2 else ""
+        empty_candidate = entry[3] if len(entry) > 3 else False
         self.calls += 1
         self.invocations.append(resume)
         if journal is not None:
@@ -142,6 +144,7 @@ class _ScriptedHarness:
             log_path=result_path,
             duration_s=0.0,
             finish_reason=finish_reason,
+            empty_candidate=empty_candidate,
         )
 
 
@@ -166,6 +169,28 @@ async def test_journal_growth_is_liveness_free_retry(tmp_path):
     )
     assert out.disposition is Disposition.COMPLETE
     assert h.calls == 3  # the two empty-but-alive turns did not abandon
+
+
+async def test_an_exhausted_empty_candidate_is_not_liveness(tmp_path):
+    # A turn that advanced the journal AND ended in an exhausted empty candidate
+    # is dead, not alive. progress is measured against the START of the turn, so
+    # a tool call minutes before the model went silent would otherwise score it
+    # alive and reset the streak -- observed in the wild as an unbounded grind
+    # (two turns, ~5.5 min each, the second empty from its first call).
+    journal = Journal(tmp_path / "events.jsonl")
+    h = _ScriptedHarness(script=[(None, True, "STOP", True)])
+    out = await run_agent_loop(
+        h,
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path / "wt",
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=10, no_result_cap=2),
+        journal=journal,
+    )
+    assert out.disposition is Disposition.ABANDON
+    assert "empty candidate" in out.reason
+    assert h.calls == 2  # bounded by no_result_cap, not grinding to max_iters
+    assert journal.progress > 0  # it DID advance -- and was still scored dead
 
 
 async def test_dead_turns_without_journal_growth_abandon(tmp_path):

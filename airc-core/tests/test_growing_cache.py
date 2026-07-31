@@ -322,6 +322,46 @@ async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatc
     assert second["model"] == "M:c2"  # served from the rebuilt cache
 
 
+# ── empty-candidate step-aside ───────────────────────────────────────────────
+
+
+async def test_repeated_empty_candidates_drop_the_cache_and_serve_uncached():
+    import airc_core.agent as agent
+
+    # _EmptyCandidateRetry sets this on each empty; past the first retry the
+    # cache must stop serving the prefix that may be producing it. Dropping
+    # beats re-creating: a new cache over the same messages is the same bytes.
+    mw, state = _mw()
+    first = await _run(mw, _Req(_history(2)))
+    assert first["model"] == "M:c1"  # cached normally
+    agent._empty_retry.set(2)  # a retry, not the first
+    try:
+        seen = await _run(mw, _Req(_history(2)))
+    finally:
+        agent._empty_retry.set(0)
+    assert seen["model"] == "BASE"  # uncached: the full request, no cached_content
+    assert state["deleted"] == ["c1"]  # and the suspect cache is gone
+    # The next call rebuilds, so one bad episode does not disable caching.
+    third = await _run(mw, _Req(_history(2)))
+    assert third["model"] == "M:c2"
+
+
+async def test_a_first_empty_candidate_still_serves_cached():
+    import airc_core.agent as agent
+
+    # The first re-roll is a cheap flake retry against a warm prefix; stepping
+    # aside there would pay an uncached prefill on every transient blip.
+    mw, state = _mw()
+    await _run(mw, _Req(_history(2)))
+    agent._empty_retry.set(1)
+    try:
+        seen = await _run(mw, _Req(_history(2)))
+    finally:
+        agent._empty_retry.set(0)
+    assert seen["model"] == "M:c1"
+    assert state["deleted"] == []
+
+
 # ── window guard ─────────────────────────────────────────────────────────────
 
 

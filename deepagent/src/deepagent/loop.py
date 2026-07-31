@@ -137,7 +137,18 @@ async def run_agent_loop(
             # the worktree's build resume; max_iters bounds it. Only a turn that
             # produced nothing at all -- no result, no journal growth -- counts
             # as a dead harness toward the cap.
-            alive = journal is not None and journal.progress > before
+            #
+            # An exhausted empty candidate is the exception: dead whatever the
+            # journal says. progress is measured against the START of the turn,
+            # so one tool call minutes before the model went silent scores it
+            # alive and resets the streak. Observed: a turn whose last tool call
+            # preceded the silence by ~7 minutes retried free, and the identical
+            # failure repeated. Excluding it lets no_result_cap bound the churn.
+            alive = (
+                journal is not None
+                and journal.progress > before
+                and not run.empty_candidate
+            )
             if alive:
                 log.info(
                     "%s turn %d: no result but journal advanced; retrying free",
@@ -157,6 +168,10 @@ async def run_agent_loop(
                 why += f", finish_reason={run.finish_reason}"
             if run.empty_candidate:
                 why += " (empty candidate)"
+            # Point at the journal, not run.log_path: the langgraph harness
+            # derives that name (result_path.with_suffix(".log")) but nothing
+            # ever writes it, so the old hint sent an operator to a file that
+            # does not exist. events.jsonl is written and flushed per event.
             log.warning(
                 "%s turn %d: no result and no progress (%s), retry %d/%d -- inspect %s",
                 agent or "agent",
@@ -164,7 +179,7 @@ async def run_agent_loop(
                 why,
                 consecutive_empty,
                 caps.no_result_cap,
-                run.log_path,
+                journal.path if journal is not None else run.log_path,
             )
             if consecutive_empty >= caps.no_result_cap:
                 return AgentResult(

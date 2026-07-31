@@ -8,7 +8,7 @@ stripping, retry, and Anthropic caching from base_middleware; the explicit
 context cache is the caller-appended growing-prefix overlay, gated to Vertex.
 """
 
-from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import ModelRetryMiddleware, SummarizationMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -264,6 +264,77 @@ async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypat
     state = await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert state["messages"][-1].content == "done"
     assert model.calls == 2
+
+
+async def _retry_over_empty(responses):
+    """Compose ModelRetryMiddleware over _EmptyCandidateRetry the way
+    base_middleware nests them, and return the _empty_retry count each inner
+    attempt observed. Exercised at the middleware level, not through a graph:
+    langgraph runs nodes in a copied context, so a contextvar set inside the
+    node is invisible to the caller. What matters is propagation to the
+    middleware NESTED inside the retry (the cache), which shares this context.
+    """
+    import airc_core.agent as agent
+
+    empty = agent._EmptyCandidateRetry()
+    retry = ModelRetryMiddleware(
+        retry_on=agent._is_retryable,
+        on_failure="error",
+        max_retries=2,
+        initial_delay=0,
+        backoff_factor=0,
+        max_delay=0,
+    )
+    seen, box = [], list(responses)
+
+    async def inner(_req):
+        # Stands in for the growing cache: records the count it would key its
+        # step-aside on at the moment it is asked to serve the call.
+        seen.append(agent._empty_retry.get())
+        return type("R", (), {"result": [AIMessage(**box.pop(0))]})()
+
+    agent._empty_retry.set(0)
+    try:
+        await retry.awrap_model_call(
+            object(), lambda r: empty.awrap_model_call(r, inner)
+        )
+    except EmptyCandidateError:
+        pass
+    return seen
+
+
+async def test_the_retry_counter_escalates_for_the_middleware_nested_inside():
+    # The count the cache keys its step-aside on. Attempt 1 sees 0 (serve cached
+    # -- a flake re-rolls cheaply against a warm prefix); attempt 2 sees 1 and
+    # attempt 3 sees 2, crossing the >1 threshold. Without escalation the cache
+    # would re-read the same prefix on every retry, which is exactly the wedge
+    # observed in the wild (7 calls, 0 output tokens, one identical cached read).
+    assert await _retry_over_empty([_EMPTY_STOP] * 3) == [0, 1, 2]
+
+
+async def test_a_non_empty_response_resets_the_retry_counter():
+    import airc_core.agent as agent
+
+    # One empty then a real reply: the episode is over, so a later empty in the
+    # same turn starts its own ladder against a warm cache rather than stepping
+    # aside immediately.
+    seen = await _retry_over_empty([_EMPTY_STOP, {"content": "the answer"}])
+    assert seen == [0, 1]
+    assert agent._empty_retry.get() == 0
+
+
+async def test_the_nudge_is_not_reappended_on_an_empty_candidate_retry():
+    import airc_core.agent as agent
+
+    # after_model never runs when _EmptyCandidateRetry raises, so model_calls
+    # freezes and the threshold would re-fire on every retry of the same call --
+    # stacking copies of the nudge onto a request the model already refused.
+    agent._empty_retry.set(0)
+    mw = CallBudgetMiddleware([(2, "converge now")])
+    assert any("converge now" in m for m in await _appended(mw, 2))
+    agent._empty_retry.set(1)  # now retrying that same call
+    assert not any("converge now" in m for m in await _appended(mw, 2))
+    agent._empty_retry.set(0)
 
 
 def test_summarization_added_only_with_a_summarizer_model():
