@@ -67,9 +67,16 @@ def _trunc(s: str, n: int = _JOURNAL_TRUNC) -> str:
 # Model-call budget for a coding turn: nudge toward wrapping up, then a hard cap
 # that ends the turn (no report -> the loop resumes the thread, continuing the
 # accumulated context). Generous: a coding turn legitimately runs many tool calls.
-_SOFT_NUDGE_CALLS = 45
-_HARD_NUDGE_CALLS = 60
-_MAX_MODEL_CALLS = 70
+#
+# The cap, not the context window, is what ends a long turn. A measured draft
+# turn grew ~3.3k tokens per call (174k peak input at call 52), so summarization
+# (_SUMMARY_TRIGGER_TOKENS, 80% of a 1M window) would not trigger until roughly
+# call 240 -- the cap binds ~3x earlier than the window can support. 100 buys
+# turns that end on their own work rather than mid-investigation; the nudges
+# keep their old distance from it (cap minus 30 / minus 10).
+_SOFT_NUDGE_CALLS = 70
+_HARD_NUDGE_CALLS = 90
+_MAX_MODEL_CALLS = 100
 _SOFT_NUDGE = (
     "You have done substantial work this turn. Wrap up THIS turn: finish the"
     f" current build/test, then call the `{REPORT_TOOL_NAME}` tool. If you are"
@@ -122,8 +129,10 @@ _REQUIRE_RESULT_REMINDER = (
 _MAX_REASKS = 5
 # Graph nodes per model call (middleware hooks), so keep the recursion limit well
 # above _MAX_MODEL_CALLS * nodes/call: the call cap should govern, not a
-# GraphRecursionError.
-_RECURSION_LIMIT = 800
+# GraphRecursionError. Scaled with the cap (the old 800 was ~11x a 70-call cap);
+# a GraphRecursionError is a strictly worse ending than the cap, since it ends
+# the turn with no report and lands in the loop's dead-turn path.
+_RECURSION_LIMIT = 1200
 # Bound on live per-thread graphs (each pins an InMemorySaver conversation and a
 # growing-cache state). Evicting frees the saver; the server-side Vertex caches
 # it created lapse on their TTL.
