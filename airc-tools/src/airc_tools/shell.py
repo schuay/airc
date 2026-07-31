@@ -38,6 +38,90 @@ _BUILD_TRAP_MSG = (
     " it forces a slow cold rebuild."
 )
 
+# Authoring a SOURCE file through the shell, refused so the model uses the
+# purpose-built tools. This is a repeat offender: the system prompt has forbidden
+# it in prose since the tools existed, and agents still fall back to a heredoc
+# after one failed edit_file match -- prose the model can rationalize past does
+# not hold, a refused call does.
+#
+# The discriminator is the TARGET, not the command. Capturing a command's output
+# into a log is legitimate and instructed elsewhere ("redirect a noisy build to a
+# file under the casefile dir"), so a redirect is judged by what it writes to: a
+# file with a source extension is authoring, anything else is capture. That keeps
+# every build/test/benchmark invocation -- the expensive things to break -- out of
+# the trap, because none of them redirect into a .cc or a .js.
+#
+# Deliberately conservative: a missed shell write costs one badly-authored file
+# (and the prose still says not to), while a false positive blocks a legitimate
+# command and burns a turn. Anything not clearly authoring is allowed through.
+_SOURCE_SUFFIXES = (
+    # Source and headers.
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".py",
+    ".rs",
+    ".java",
+    # V8/Chromium build and config files, which are code for our purposes.
+    ".gn",
+    ".gni",
+    ".gyp",
+    ".gypi",
+    ".star",
+    ".tq",
+)
+# Redirect targets, ignoring fd duplication (`2>&1`, `>&2`) and fd-prefixed
+# redirects (`2> x`). The lookbehind keeps `2>&1` out; `[^&]` on the target keeps
+# `>&2` out. Quotes are stripped by the caller.
+_REDIRECT = re.compile(r">>?\s*(?!&)(['\"]?)([^\s'\";|&<>]+)\1")
+# `tee` and `tee -a`, whose non-flag arguments are the files it writes.
+_TEE = re.compile(r"(?:^|[;&|]+)\s*tee\b([^;&|<>]*)")
+# In-place editors and patch appliers: these only ever rewrite an existing file,
+# so unlike a redirect there is no capture reading of them.
+_INPLACE = re.compile(
+    r"(?:^|[;&|]+)\s*(?:sed\s+(?:-[^\s]*\s+)*-i|perl\s+(?:-[^\s]*\s+)*-i"
+    r"|git\s+apply|patch\b)",
+    re.I,
+)
+# `git apply --check` / `--stat` / `--summary` only inspect a patch; they write
+# nothing, and refusing them would block a legitimate way to test whether a diff
+# applies. Same for `patch --dry-run`.
+_DRY_RUN = re.compile(r"--(?:check|stat|summary|dry-run)\b")
+_WRITE_TRAP_MSG = (
+    "error: authoring a source file through the shell is disabled. Use"
+    " write_file (whole file) or edit_file (part of one) -- they are the only"
+    " ways to write file content here, and a shell-written file counts as a"
+    " failed edit. If an edit_file SEARCH did not match, read_file that region"
+    " again and retry with the exact bytes; do not rewrite the file from the"
+    " shell. Redirecting a command's OUTPUT to a log is fine -- that is not"
+    " what this refused; send it to the casefile dir with a .log name."
+)
+
+
+def _authors_source(command: str) -> bool:
+    """Whether `command` writes CONTENT into a source file.
+
+    Not a shell parser -- it reads the agent's own one-liner, and errs toward
+    allowing: every branch here has to be a clear authoring shape, because the
+    cost of a wrong refusal (a dead build command, a burnt turn) is far above
+    the cost of a missed one (prose still forbids it).
+    """
+    if _INPLACE.search(command) and not _DRY_RUN.search(command):
+        return True
+    targets = [m.group(2) for m in _REDIRECT.finditer(command)]
+    for m in _TEE.finditer(command):
+        targets += [a for a in m.group(1).split() if not a.startswith("-")]
+    return any(t.lower().endswith(_SOURCE_SUFFIXES) for t in targets)
+
+
 # Set in the child, not a session (there is none): keep tools noninteractive so
 # nothing blocks on a pager or a credential prompt waiting for a tty that will
 # never answer -- that would just burn the whole timeout.
@@ -101,6 +185,8 @@ async def run_shell(
 ) -> str:
     if _BUILD_TRAP.search(command):
         return _BUILD_TRAP_MSG
+    if _authors_source(command):
+        return _WRITE_TRAP_MSG
     root = cwd or os.environ.get("AIRC_TOOLS_ROOT") or None
     env = {**os.environ, **_DEFANG_ENV}
     # Under a sandbox the wrapper owns cwd (--chdir) and environment

@@ -203,10 +203,13 @@ def _worktree_tools(
             name="shell",
             description=(
                 "Run a command in a fresh `bash -lc` in the worktree (stateless:"
-                " no cd/env persists). Also your list/grep primitive. The default"
-                f" timeout is {shell_timeout_s:g}s: raise it for work that is"
-                " honestly long (a build, a test suite, a benchmark), and lower it"
-                " for a command that may hang (e.g. a repro)."
+                " no cd/env persists): builds, test binaries, git state, and"
+                " listing/searching files. NOT for writing file content -- author"
+                " files with write_file/edit_file; a shell write into a source"
+                " file is refused. Redirecting a command's output to a log is"
+                f" fine. The default timeout is {shell_timeout_s:g}s: raise it for"
+                " work that is honestly long (a build, a test suite, a benchmark),"
+                " and lower it for a command that may hang (e.g. a repro)."
             ),
         ),
         StructuredTool.from_function(
@@ -225,7 +228,10 @@ def _worktree_tools(
             description=(
                 "Apply exact SEARCH/REPLACE `edits` to one file, all-or-nothing."
                 " Keep each search small and exact. For a whole new file or a full"
-                " rewrite, use write_file instead."
+                " rewrite, use write_file instead. If a SEARCH does not match,"
+                " read_file that region again and retry with the exact bytes --"
+                " a failed match is a stale search, not a reason to fall back to"
+                " a shell rewrite (which is refused anyway)."
             ),
         ),
         StructuredTool.from_function(
