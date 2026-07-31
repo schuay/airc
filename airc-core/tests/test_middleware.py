@@ -387,13 +387,13 @@ async def test_summary_call_does_not_leak_into_the_message_stream():
 
 
 def test_growing_cache_only_for_vertex_when_enabled():
-    assert growing_cache_middleware(_VERTEX, "sys", [], True, 30) is not None
+    assert growing_cache_middleware(_VERTEX, "sys", [], True, 30, 70) is not None
     # Non-Vertex model: create_context_cache is unavailable, so no overlay.
-    assert growing_cache_middleware(_NON_VERTEX, "sys", [], True, 30) is None
+    assert growing_cache_middleware(_NON_VERTEX, "sys", [], True, 30, 70) is None
 
 
 def test_growing_cache_omitted_when_disabled():
-    assert growing_cache_middleware(_VERTEX, "sys", [], False, 30) is None
+    assert growing_cache_middleware(_VERTEX, "sys", [], False, 30, 70) is None
 
 
 def test_context_budget_is_outermost():

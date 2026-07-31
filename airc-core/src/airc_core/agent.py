@@ -1108,11 +1108,11 @@ def base_middleware(
     return stack
 
 
-# Re-cache the growing prefix once the message list has grown by this many
-# messages (~2 per ReAct step) since the last cache, so each generation is read
-# several calls before it is superseded. Smaller = more cache writes; larger = a
-# longer uncached tail re-sent each call.
-_GROWING_RECACHE_GROWTH = 8
+# Vertex bills cache creation at the full input rate and cached reads at a
+# fraction of it, so a re-cache re-buys the ENTIRE prefix to move only the tail
+# behind the boundary. Both models we run price reads at 10% of input
+# (gemini-3.6-flash $0.15/$1.50, gemini-3.1-pro-preview $0.20/$2.00).
+_CACHE_READ_RATIO = 0.1
 # The cache serves its FULL prefix (ContextBudget cannot shed inside an immutable
 # cache), so cap the cached prefix, and serve uncached if prefix+tail would
 # exceed a larger fraction -- otherwise the re-inflated prefix plus a recent tail
@@ -1125,6 +1125,41 @@ _CACHE_FLOOR_TOKENS = 4096
 # Bound on live per-conversation cache states (and the server-side caches they
 # pin). The least-recently-used is evicted and its cache deleted.
 _GROWING_MAX_STATES = 256
+
+
+def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: int):
+    """Whether re-caching a `prefix_tokens` prefix to absorb a `delta`-token tail
+    is worth its creation cost. Returns (due, reason) -- reason for the log.
+
+    Per call, a cache of size B costs `r*B + (P - B)`: the cached prefix at the
+    read rate plus the uncached tail at full rate. Re-caching every k calls with
+    the prompt growing g tokens/call therefore averages
+
+        f(k) = B/k + g*k/2 + r*B      (creation, tail growth, reads)
+
+    where only the first two terms depend on k -- there is one live cache of
+    ~size B either way, so the read rate and the token-hour storage rate drop out
+    of the cadence entirely (they decide only WHETHER to cache at all, which for
+    our turn lengths is always yes). Minimizing gives the EOQ square-root law
+    k* = sqrt(2B/g), and substituting the measured g = delta/calls_since removes
+    the growth estimate, leaving `delta * calls_since >= 2B`.
+
+    A fixed message-count trigger ignored B: on a ~120k prefix growing ~400
+    tokens/call it re-cached every 4 calls to recoup over ~24, running ~2.6x the
+    cost of never re-caching at all.
+
+    The horizon check is the same trade over the calls actually left in the turn
+    rather than the steady state: creation costs B now to save (1-r)*delta on
+    each remaining call, so near a turn's end a re-cache can never repay and is
+    pure loss.
+    """
+    if delta <= 0:
+        return False, "no growth"
+    if delta * calls_since < 2 * prefix_tokens:
+        return False, "below payback"
+    if calls_left * (1 - _CACHE_READ_RATIO) * delta <= prefix_tokens:
+        return False, "turn ending"
+    return True, "due"
 
 
 def _last_step_boundary(messages: list) -> int:
@@ -1191,7 +1226,9 @@ class _PrefixState:
     model: object | None = None
     boundary: int = 0
     prefix_tokens: int = 0
-    attempt_len: int = 0
+    # Calls this generation has served -- the k in the payback rule, so a cache
+    # earns its keep by being read, not by the history happening to grow.
+    calls_since: int = 0
     seen_len: int = 0
 
 
@@ -1214,6 +1251,7 @@ class _GrowingPrefixCache(AgentMiddleware):
     - A long tool-using turn or a long conversation grows the cached prefix as
       history accrues, re-caching at ReAct step rest-points so the tail always
       starts on a model turn (a request may not begin with a tool response).
+      When to grow is a cost decision, not a fixed interval -- see _recache_pays.
 
     State is per conversation, keyed by thread id, because the persona graph (and
     this middleware) is shared across all of a persona's threads. No locks: the
@@ -1237,14 +1275,17 @@ class _GrowingPrefixCache(AgentMiddleware):
         system_message,
         tools_tokens,
         *,
-        growth=_GROWING_RECACHE_GROWTH,
+        max_calls,
     ):
         self._create = create
         self._delete = delete
         self._model_for = model_for
         self._system = system_message
         self._tools_tokens = tools_tokens
-        self._growth = growth
+        # The turn's model-call cap, so the horizon check knows how many calls a
+        # new cache could still be read over. Mirrors the ModelCallLimitMiddleware
+        # run_limit its caller installs.
+        self._max_calls = max_calls
         self._states: OrderedDict[object, _PrefixState] = OrderedDict()
         # Monotonic deadline before which no create is attempted. Carries the
         # backoff duration set at failure time (short for transient, long for
@@ -1274,7 +1315,25 @@ class _GrowingPrefixCache(AgentMiddleware):
             if victim.name:
                 await self._delete_quietly(victim.name)
 
-    async def _recache(self, st: _PrefixState, prefix: list, target: int, ptok: int):
+    def _calls_left(self, request) -> int:
+        """Model calls remaining in this turn under the call cap.
+
+        CallBudgetMiddleware keeps the per-turn count in graph state, and this
+        middleware is installed outside it, so the key is visible here. It is an
+        UntrackedValue (never checkpointed), so a resumed thread starts a turn
+        with it unset -- which lands on the same branch as a graph built without
+        the budget middleware at all. Both mean "no count to go on", and the safe
+        reading is the full cap: assuming zero calls left would permanently
+        suppress re-caching rather than merely mistime it.
+        """
+        calls = request.state.get("model_calls")
+        if calls is None:
+            return self._max_calls
+        return max(0, self._max_calls - calls)
+
+    async def _recache(
+        self, st: _PrefixState, prefix: list, target: int, ptok: int, why: str
+    ):
         try:
             name = await self._create(prefix)
         except Exception as e:
@@ -1297,7 +1356,16 @@ class _GrowingPrefixCache(AgentMiddleware):
         old = st.name
         st.name, st.boundary = name, target
         st.model, st.prefix_tokens = self._model_for(name), ptok
-        log.info("growing cache gen at boundary %d (%s)", target, name)
+        # A new generation restarts the payback clock: the next re-cache must be
+        # earned over the calls THIS one serves.
+        st.calls_since = 0
+        log.info(
+            "growing cache gen at boundary %d, %d tokens (%s, %s)",
+            target,
+            ptok,
+            why,
+            name,
+        )
         if old:
             await self._delete_quietly(old)
 
@@ -1319,14 +1387,28 @@ class _GrowingPrefixCache(AgentMiddleware):
             st = self._states[key] = _PrefixState()
         st.seen_len = len(messages)
 
+        st.calls_since += 1
         target = _last_step_boundary(messages)
-        due = st.name is None or len(messages) - st.attempt_len >= self._growth
-        if due and time.monotonic() >= self._cooldown_until:
+        if time.monotonic() >= self._cooldown_until:
             prefix = [self._system, *messages[:target]]
             ptok = self._prefix_size(prefix)
-            if _CACHE_FLOOR_TOKENS <= ptok <= _GROWING_MAX_PREFIX:
-                st.attempt_len = len(messages)
-                await self._recache(st, prefix, target, ptok)
+            if st.name is None:
+                # No cache yet: the first one is unconditional. It costs one
+                # prefill that this call pays anyway, and every later call reads
+                # it at the discount, so it repays within a few calls at any
+                # plausible read/storage rate.
+                due, why = True, "first"
+            else:
+                # prefix_tokens is the provider's exact cache_read after the
+                # first cached call, so the delta is measured, not estimated.
+                due, why = _recache_pays(
+                    st.prefix_tokens,
+                    ptok - st.prefix_tokens,
+                    st.calls_since,
+                    self._calls_left(request),
+                )
+            if due and _CACHE_FLOOR_TOKENS <= ptok <= _GROWING_MAX_PREFIX:
+                await self._recache(st, prefix, target, ptok, why)
 
         if st.name is not None and st.boundary < len(messages):
             tail = messages[st.boundary :]
@@ -1370,16 +1452,26 @@ def growing_cache_middleware(
     tools: list,
     caching_explicit: bool,
     cache_ttl_minutes: int,
+    max_calls: int,
 ):
     """The growing-prefix cache overlay for an agent graph, or None when caching
     is off or the model is not Vertex (create_context_cache is Vertex-only, a
     no-op on the dev google_genai model). Both agent builders append it as the
-    sole cache overlay."""
+    sole cache overlay.
+
+    max_calls is the turn's model-call cap (the run_limit of the caller's
+    ModelCallLimitMiddleware); the re-cache horizon check needs it to know how
+    many calls a new cache could still be read over."""
     if not (caching_explicit and model_id.startswith("google_vertexai:")):
         return None
     create, delete, model_for, tools_tokens = _growing_cache_fns(
         model_id, tools, cache_ttl_minutes
     )
     return _GrowingPrefixCache(
-        create, delete, model_for, SystemMessage(system_prompt), tools_tokens
+        create,
+        delete,
+        model_for,
+        SystemMessage(system_prompt),
+        tools_tokens,
+        max_calls=max_calls,
     )

@@ -481,6 +481,7 @@ class LangGraphHarness:
             tools,
             self._common.caching_explicit,
             self._common.cache_ttl_minutes,
+            _MAX_MODEL_CALLS,
         ):
             mw.append(cache)
         # Order matters: the after_model chain runs last-appended-first, so

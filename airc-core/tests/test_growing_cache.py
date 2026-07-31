@@ -13,7 +13,12 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from airc_core.agent import _GrowingPrefixCache, _is_cache_gone, _last_step_boundary
+from airc_core.agent import (
+    _GrowingPrefixCache,
+    _is_cache_gone,
+    _last_step_boundary,
+    _recache_pays,
+)
 
 
 async def _noop(r):
@@ -27,10 +32,12 @@ class _Req:
     """ModelRequest stand-in: messages, state, runtime.execution_info.thread_id,
     and override(model=, messages=)."""
 
-    def __init__(self, messages, thread="t1", model="BASE"):
+    def __init__(self, messages, thread="t1", model="BASE", model_calls=None):
         self.messages = messages
         self.model = model
-        self.state = {}
+        # model_calls is what CallBudgetMiddleware puts in graph state; None
+        # models a graph built without it (the key is simply absent).
+        self.state = {} if model_calls is None else {"model_calls": model_calls}
         self.runtime = type(
             "RT", (), {"execution_info": type("EI", (), {"thread_id": thread})()}
         )()
@@ -58,7 +65,21 @@ def _history(n_steps):
     return msgs
 
 
-def _mw(tools_tokens=5000, growth=8):
+def _fat_history(n_steps, chars=40_000):
+    """History whose tool results are large enough that growing the cache repays
+    its creation -- the payback rule is about tokens, so a thin history of the
+    same message count must NOT trigger a re-cache."""
+    msgs = [HumanMessage("hello")]
+    for i in range(n_steps):
+        cid = f"c{i}"
+        msgs += [
+            AIMessage(content="", tool_calls=[{"name": "look", "args": {}, "id": cid}]),
+            ToolMessage(content="x" * chars, tool_call_id=cid),
+        ]
+    return msgs
+
+
+def _mw(tools_tokens=5000, max_calls=70):
     state = {"created": [], "deleted": []}
 
     async def create(prefix):
@@ -73,7 +94,7 @@ def _mw(tools_tokens=5000, growth=8):
         return f"M:{name}"
 
     mw = _GrowingPrefixCache(
-        create, delete, model_for, SYS, tools_tokens, growth=growth
+        create, delete, model_for, SYS, tools_tokens, max_calls=max_calls
     )
     return mw, state
 
@@ -124,9 +145,9 @@ async def test_first_call_caches_system_only_and_sends_full_history():
 
 
 async def test_grows_to_a_step_boundary_and_sends_only_the_tail():
-    mw, state = _mw(growth=8)
+    mw, state = _mw()
     await mw.awrap_model_call(_Req(_history(0)), _noop)  # cache gen c1 (boundary 0)
-    msgs = _history(4)  # len 9 -> grows the cache
+    msgs = _fat_history(4)  # tail large enough to repay a re-cache
     seen = await _run(mw, _Req(msgs))
     boundary = _last_step_boundary(msgs)  # 7
     assert state["created"][-1] == ("c2", boundary + 1)  # [system]+prefix
@@ -134,6 +155,82 @@ async def test_grows_to_a_step_boundary_and_sends_only_the_tail():
     assert seen["model"] == "M:c2"
     assert seen["messages"] == msgs[boundary:]
     assert isinstance(seen["messages"][0], AIMessage)  # tail starts on a model turn
+
+
+# ── re-cache payback ─────────────────────────────────────────────────────────
+
+
+def test_recache_pays_follows_the_eoq_threshold():
+    # delta*calls_since >= 2B, with a horizon long enough not to bind.
+    assert not _recache_pays(100_000, 1_000, 4, calls_left=70)[0]  # 4k << 200k
+    assert not _recache_pays(100_000, 10_000, 19, calls_left=70)[0]  # 190k < 200k
+    assert _recache_pays(100_000, 10_000, 21, calls_left=70)[0]  # 210k >= 200k
+
+
+def test_recache_pays_needs_actual_growth():
+    # A boundary that moved no tokens can never repay: guards a divide-by-zero
+    # style degenerate where calls_since alone would eventually trip any
+    # threshold.
+    assert not _recache_pays(100_000, 0, 1_000, calls_left=70)[0]
+    assert not _recache_pays(100_000, -5_000, 1_000, calls_left=70)[0]
+
+
+def test_recache_pays_refuses_near_the_end_of_a_turn():
+    # Same delta and prefix, only the horizon differs: creation costs B now to
+    # save (1-r)*delta per remaining call, so with few calls left it is loss.
+    big_delta, prefix = 50_000, 100_000
+    assert _recache_pays(prefix, big_delta, 20, calls_left=70)[0]
+    assert not _recache_pays(prefix, big_delta, 20, calls_left=2)[0]
+
+
+async def test_thin_growth_does_not_recache():
+    # The regression this guards: a fixed message-count trigger re-cached every
+    # 8 messages regardless of prefix size, re-buying a ~120k prefix to absorb a
+    # ~2k tail -- recouping ~7% of its own cost before being superseded.
+    mw, state = _mw(tools_tokens=120_000)
+    await _run(mw, _Req(_history(0)))  # first cache
+    for steps in range(1, 12):  # many calls, but tiny tool results
+        await _run(mw, _Req(_history(steps)))
+    assert len(state["created"]) == 1  # never re-cached on thin growth
+
+
+async def test_horizon_blocks_recache_when_the_turn_is_nearly_over():
+    # A delta that HAS satisfied the payback rule (it is read over enough calls
+    # in steady state) but cannot repay over the 2 calls actually left. The
+    # prefix must dominate the delta for the horizon to bind -- a delta large
+    # relative to the prefix repays even in a couple of calls.
+    mw, state = _mw(tools_tokens=200_000, max_calls=70)
+    await _run(mw, _Req(_history(0)))
+    msgs = _fat_history(4)
+    for _ in range(20):  # accumulates calls_since past the payback threshold
+        await _run(mw, _Req(msgs, model_calls=68))
+    assert len(state["created"]) == 1  # horizon suppressed it
+
+
+async def test_missing_call_count_falls_back_to_the_full_cap():
+    # A graph without CallBudgetMiddleware has no model_calls key; the horizon
+    # must not read that as "0 calls left" and disable caching outright. Same
+    # shape as the horizon test above, differing only in the absent key.
+    mw, state = _mw(tools_tokens=200_000, max_calls=70)
+    await _run(mw, _Req(_history(0)))
+    msgs = _fat_history(4)
+    for _ in range(20):
+        await _run(mw, _Req(msgs))  # state has no model_calls
+    assert len(state["created"]) == 2  # re-cached on merit, horizon inert
+
+
+async def test_recache_resets_the_payback_clock():
+    # calls_since must restart per generation, else an old count keeps tripping
+    # the threshold and every subsequent call re-caches.
+    mw, state = _mw()
+    await _run(mw, _Req(_history(0)))
+    msgs = _fat_history(4)
+    for _ in range(6):
+        await _run(mw, _Req(msgs))
+    assert mw._states["t1"].calls_since < 6  # reset by the new generation
+    created_after_growth = len(state["created"])
+    await _run(mw, _Req(msgs))  # immediately after: must not re-cache again
+    assert len(state["created"]) == created_after_growth
 
 
 # ── per-conversation isolation ───────────────────────────────────────────────
@@ -187,7 +284,7 @@ async def test_permanent_create_failure_cools_down_instance_wide():
     async def delete(name):
         pass
 
-    mw = _GrowingPrefixCache(create, delete, lambda n: n, SYS, 5000, growth=4)
+    mw = _GrowingPrefixCache(create, delete, lambda n: n, SYS, 5000, max_calls=70)
     # Two conversations both try to create; a permanent failure holds the long
     # cooldown, capping the storm at one attempt regardless of thread.
     for thread in ("A", "B", "A", "B"):
@@ -213,7 +310,9 @@ async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatc
     async def delete(name):
         pass
 
-    mw = _GrowingPrefixCache(create, delete, lambda n: f"M:{n}", SYS, 5000, growth=4)
+    mw = _GrowingPrefixCache(
+        create, delete, lambda n: f"M:{n}", SYS, 5000, max_calls=70
+    )
     # First turn's create fails transiently; the short cooldown lets the next
     # turn rebuild instead of staying uncached.
     first = await _run(mw, _Req(_history(2), thread="A"))
@@ -330,7 +429,10 @@ async def test_end_to_end_graph_grows_cache_and_sends_tail():
     @tool
     def look(x: str) -> str:
         """Look something up."""
-        return f"result for {x}"
+        # Large enough that the growing history repays a re-cache; with a thin
+        # result the payback rule correctly declines to grow the boundary and
+        # the cache stays at gen 1 (covered by test_thin_growth_does_not_recache).
+        return f"result for {x}: " + "y" * 40_000
 
     script = [
         AIMessage(
@@ -354,7 +456,7 @@ async def test_end_to_end_graph_grows_cache_and_sends_tail():
         state["deleted"].append(name)
 
     gc = _GrowingPrefixCache(
-        create, delete, lambda n: cached, SystemMessage("SYS"), 5000, growth=4
+        create, delete, lambda n: cached, SystemMessage("SYS"), 5000, max_calls=70
     )
     mw = base_middleware("google_genai:fake", "SYS", [look])
     mw.append(gc)

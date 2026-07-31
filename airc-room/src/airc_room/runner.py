@@ -494,6 +494,7 @@ class AgentRunner:
             tools,
             self._cfg.caching_explicit,
             self._cfg.cache_ttl_minutes,
+            _TURN_MAX_MODEL_CALLS,
         ):
             middleware.append(cache)
         turn_timeout = self._cfg.orchestrator.turn_timeout
