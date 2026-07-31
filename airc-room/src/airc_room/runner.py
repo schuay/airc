@@ -167,38 +167,28 @@ def format_transcript(messages: list[Message]) -> str:
     return "\n\n".join(f"[{m.sender}] {m.text}" for m in messages)
 
 
-def sanitize_reply(text: str, self_name: str, others: set[str]) -> str:
-    """Strip fabricated transcript artifacts from a reply.
+def strip_self_attribution(text: str, self_name: str) -> str:
+    """Drop an agent's leading label on its own reply ("[perf] ..." / "perf: ...").
 
-    The format split makes echoed lines inert for routing; this keeps them out
-    of the room entirely: drop lines impersonating another participant
-    ("[compiler] ..." / "[users/...] ..." / raw "users/...: ...") and a leading
-    self-attribution prefix. `others` should be EVERY participant name (including
-    disabled personas), not just live ones, or a line attributed to a real but
-    disabled agent would pass through.
+    A common tic: the turn content is a transcript of labelled lines, so the model
+    labels its own. Only the leading prefix, and only the agent's own name -- the
+    room adds attribution itself, so the echoed one would render twice.
+
+    This deliberately does NOT police lines attributed to OTHER participants. That
+    guard existed and was removed: matching a persona name in brackets cannot tell
+    a fabricated line from a quoted one, and in a room whose subject matter uses
+    those same words as tags (a V8 commit subject opens "[compiler] ..."), quoting
+    is the more common case. Dropping a line is silent and unrecoverable, so a
+    false positive costs more than the cosmetic problem it prevents. Nothing
+    downstream depended on it: routing keys on MessageKind, and format_transcript's
+    bracket-vs-colon split already makes an echoed line inert for addressing.
     """
     text = text.strip()
     lowered = text.lower()
     for prefix in (f"[{self_name}]", f"{self_name}:"):
         if lowered.startswith(prefix):
-            text = text[len(prefix) :].lstrip()
-            break
-    # Tolerate bracket whitespace ("[ compiler]") so a spaced variant cannot slip
-    # an attribution past a literal "[compiler]" match.
-    fabricated = (
-        re.compile(r"\[\s*(?:%s)\s*\]" % "|".join(re.escape(o) for o in others), re.I)
-        if others
-        else None
-    )
-    lines = [
-        ln
-        for ln in text.splitlines()
-        if not (
-            (fabricated and fabricated.match(ln.lstrip()))
-            or re.match(r"\s*(\[)?users/\S+[\]:]", ln)
-        )
-    ]
-    return "\n".join(lines).strip()
+            return text[len(prefix) :].lstrip()
+    return text
 
 
 def build_turn_content(
@@ -629,9 +619,7 @@ class AgentRunner:
         )
         if unseen:
             self._store.set_agent_seen(thread_id, skey, unseen[-1].id)
-        # Every persona, including ones disabled this run, so an attribution to a
-        # real but disabled agent is still stripped.
-        text = sanitize_reply(text, agent_name, set(self._personas) - {agent_name})
+        text = strip_self_attribution(text, agent_name)
         if addressed:
             # The directive told the agent to answer; honor whatever it
             # produced, only stripping a stray sentinel so it never reaches

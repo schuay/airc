@@ -284,28 +284,23 @@ def test_build_turn_content_leads_with_current_time():
     assert "  ." not in content and " .\n" not in content
 
 
-def test_sanitize_reply_strips_fabrications():
-    from airc_room.runner import sanitize_reply
+def test_strip_self_attribution():
+    from airc_room.runner import strip_self_attribution
 
-    others = {"compiler", "jsc"}
-    # Leading self-attribution prefixes are removed (both shapes).
-    assert sanitize_reply("[perf] it deopts", "perf", others) == "it deopts"
-    assert sanitize_reply("perf: it deopts", "perf", others) == "it deopts"
-    # Fabricated lines for other participants and raw chat users are dropped;
-    # the agent's own content survives.
+    # The agent's own label, both shapes, leading only.
+    assert strip_self_attribution("[perf] it deopts", "perf") == "it deopts"
+    assert strip_self_attribution("perf: it deopts", "perf") == "it deopts"
+    assert strip_self_attribution("it deopts", "perf") == "it deopts"
+    # Mid-reply, the same string is content, not a label.
+    assert strip_self_attribution("see\nperf: it deopts", "perf") == (
+        "see\nperf: it deopts"
+    )
+    # Another participant's name is left alone wherever it appears. A quoted
+    # commit subject is the case that made policing these untenable: in a V8
+    # room "[compiler] ..." is a CL tag far more often than a fabrication.
     text = (
         "The win is IC-side.\n"
-        "[compiler] I agree with that\n"
-        "[users/42] are you sure?\n"
-        "users/43: yes\n"
+        "[compiler] Fix key check in inlined proxy loads\n"
         "compiler: please verify the lowering"
     )
-    out = sanitize_reply(text, "perf", others)
-    assert out == "The win is IC-side.\ncompiler: please verify the lowering"
-    # An address line is NOT a fabrication and stays intact.
-    assert "compiler: please verify" in out
-    # Bracket whitespace must not slip an attribution through.
-    assert sanitize_reply("[ compiler] hi\nmine", "perf", others) == "mine"
-    assert sanitize_reply("[compiler ] hi\nmine", "perf", others) == "mine"
-    # A disabled-but-real participant's name (passed in `others`) is stripped too.
-    assert sanitize_reply("[ghost] spooky\nmine", "perf", {"ghost"}) == "mine"
+    assert strip_self_attribution(text, "perf") == text
