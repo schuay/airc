@@ -16,10 +16,13 @@ auto-commit through the store's schema hook.
 
 Writes AUTO-COMMIT (there is no separate commit tool, and no shared dirty-set --
 which in a toolset shared across personas would be cross-persona mutable state).
-Each write/edit stages exactly its own path and commits it under a per-store lock,
-so concurrent persona turns cannot race on the git index. A commit rejected by the
-store's pre-commit schema hook is unstaged and its file left on disk, so the agent
-can read, fix, and rewrite it -- the validator errors come back as the tool result.
+Each write/edit stages exactly its own path and commits THAT PATH under a
+per-store lock, so concurrent persona turns cannot race on the git index and an
+unrelated file staged in the shared checkout cannot fail the hook for everyone
+(see _commit_path). A commit rejected by the store's pre-commit schema hook is
+unstaged and its file left on disk, so the agent can read, fix, and rewrite it --
+the validator errors come back as the tool result, led by whether they concern
+the agent's own entry or something else in the store.
 """
 
 from __future__ import annotations
@@ -44,6 +47,37 @@ def _clip(text: str, limit: int = _MAX_OUTPUT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n[... {len(text) - limit} bytes truncated ...]"
+
+
+def _rejection(rel: str, hook_output: str) -> str:
+    """The tool result for a rejected commit, told from the agent's point of view.
+
+    A hook reports per-file errors, and the agent's job is to know whether the
+    complaint is about ITS entry (fix and rewrite) or about some other file (it
+    cannot fix that, and retrying forever is the failure mode we actually saw).
+    Scoping the commit means the hook is normally handed only this path, so the
+    mixed case is rare -- but a hook free to validate the whole repo can still
+    produce it, and that is exactly when the agent most needs to be told to stop.
+
+    The distinction is drawn on the file's own path appearing in the output, which
+    is a heuristic, not a parse: hook formats are store-specific and unknowable
+    here. So the hook's full text is always passed through unchanged, and this
+    only prepends a lead line -- a wrong guess costs a misleading sentence above
+    the real errors, never a swallowed one.
+    """
+    if rel in hook_output:
+        lead = "commit rejected (fix the entry and write again)"
+    else:
+        # Nothing about this path: the store is failing for a reason outside this
+        # write, so rewriting the entry cannot clear it. Say so, or the agent
+        # burns its turn re-editing a file that was never the problem.
+        lead = (
+            f"commit rejected, but the errors are NOT about {rel} -- something else"
+            " in the store is failing validation. Do not rewrite this entry: it is"
+            " saved on disk and will commit once the store is repaired. Report this"
+            " instead of retrying"
+        )
+    return f"{lead}:\n{_clip(hook_output)}"
 
 
 def _git_sync(root: Path, *args: str) -> tuple[int, str]:
@@ -81,10 +115,25 @@ def make_memory_tools(store_root: Path) -> list:
         return str(abs_path.relative_to(root))
 
     async def _commit_path(abs_path: Path, message: str) -> str | None:
-        """Stage exactly `abs_path` and commit it with `message`, running the
-        store's pre-commit schema hook. Returns None on success, or an error
-        string (hook rejection or git failure) with the file left on disk and
-        unstaged so the agent can fix and retry."""
+        """Commit exactly `abs_path` with `message`, running the store's pre-commit
+        schema hook. Returns None on success, or an error string (hook rejection or
+        git failure) with the file left on disk and unstaged so the agent can fix
+        and retry.
+
+        The commit is PATHSPEC-SCOPED (`git commit -- <path>`) rather than a plain
+        commit of the index, because a store is a shared checkout an operator also
+        touches by hand. A plain commit takes everything staged, so one unrelated
+        malformed file sitting in the index fails the hook for EVERY write -- the
+        agent is handed a rejection naming a file it never wrote, and no amount of
+        fixing its own entry can clear it. That is not hypothetical: a stray
+        frontmatter-less file wedged a live store for a week, blocking every
+        persona write and every compaction. Scoping the commit makes a polluted
+        index structurally unable to wedge the tools; the operator's staged work is
+        left exactly as they left it.
+
+        `git add` still runs first: the pathspec form commits the worktree state,
+        and staging keeps a delete (a write that emptied the file) covered.
+        """
         rel = _rel(abs_path)
         async with commit_lock:
             # -- ends the option list so a path that looks like a flag is still a
@@ -93,14 +142,14 @@ def make_memory_tools(store_root: Path) -> list:
             code, out = await _git(root, "add", "--", rel)
             if code != 0:
                 return f"could not stage {rel}:\n{_clip(out)}"
-            code, out = await _git(root, "commit", "-m", message)
+            code, out = await _git(root, "commit", "-m", message, "--", rel)
             if code == 0:
                 return None
             # The pre-commit schema hook (or another git error) rejected it. Unstage
             # so the bad entry does not ride along on the next unrelated commit; the
             # hook's per-file errors are in `out` for the agent to act on.
             await _git(root, "reset", "--quiet", "--", rel)
-            return f"commit rejected (fix the entry and write again):\n{_clip(out)}"
+            return _rejection(rel, out)
 
     @tool
     async def memory_search(query: str, context: int = 0) -> str:

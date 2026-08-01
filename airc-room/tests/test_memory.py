@@ -141,6 +141,58 @@ async def test_edit_autocommits_and_requires_exact_match(tmp_path):
     assert _commit_count(tmp_path) == 2
 
 
+async def test_unrelated_staged_file_cannot_wedge_a_write(tmp_path):
+    # The regression that motivated pathspec-scoped commits: a memory store is a
+    # shared checkout, so an operator (or a persona with no delete tool) can leave
+    # a malformed file staged. A plain `git commit` takes the whole index, so that
+    # one file fails the hook for EVERY subsequent write -- which wedged a live
+    # store for a week, blocking all persona writes and compaction. The agent's
+    # own valid entry must commit regardless of what else sits in the index.
+    _make_store(tmp_path)
+    (tmp_path / "junk.md").write_text("no frontmatter, malformed\n")
+    _git(tmp_path, "add", "--", "junk.md")
+
+    tools = _tools(tmp_path)
+    out = await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add note"}
+    )
+    assert out == "saved note.md"
+    assert _commit_count(tmp_path) == 1
+    # Only the agent's file is in the commit, and the operator's staged work is
+    # neither committed nor discarded -- just left as they left it.
+    committed = _git(tmp_path, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed == ["note.md"]
+    assert _git(tmp_path, "diff", "--cached", "--name-only").split() == ["junk.md"]
+
+
+async def test_rejection_about_another_file_tells_the_agent_not_to_retry(tmp_path):
+    # A hook is free to validate more than the committed path. When it fails on a
+    # file the agent did not write, "fix the entry and write again" is actively
+    # wrong -- the entry is fine and rewriting it can never clear the error. The
+    # result must say so, or the agent loops on a file that was never the problem.
+    _make_store(tmp_path, schema_hook=False)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    # Validates the whole tree, not just what is staged.
+    hook.write_text(
+        "#!/bin/sh\n"
+        "for f in $(ls *.md 2>/dev/null); do\n"
+        '  grep -q "^summary: " "$f" || { echo "schema: $f missing summary"; exit 1; }\n'
+        "done\n"
+    )
+    os.chmod(hook, 0o755)
+    (tmp_path / "junk.md").write_text("malformed, not written by the agent\n")
+
+    tools = _tools(tmp_path)
+    out = await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add note"}
+    )
+    assert "NOT about note.md" in out
+    assert "Do not rewrite this entry" in out
+    assert "junk.md" in out  # the hook's own text still comes through verbatim
+    # The agent's entry survives on disk, ready to commit once the store is fixed.
+    assert (tmp_path / "note.md").exists()
+
+
 async def test_write_outside_the_jail_is_refused(tmp_path):
     _make_store(tmp_path)
     tools = _tools(tmp_path)
