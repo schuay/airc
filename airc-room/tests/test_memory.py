@@ -203,6 +203,92 @@ async def test_write_outside_the_jail_is_refused(tmp_path):
     assert not (tmp_path.parent / "escape.md").exists()
 
 
+# --- delete ----------------------------------------------------------------
+
+
+async def test_delete_removes_the_entry_and_commits(tmp_path):
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    out = await tools["memory_delete"].ainvoke(
+        {"path": "note.md", "message": "drop superseded note"}
+    )
+    assert out == "deleted note.md"
+    assert not (tmp_path / "note.md").exists()
+    assert _commit_count(tmp_path) == 2
+    # The removal is committed, not merely staged, and leaves the tree clean.
+    assert _git(tmp_path, "status", "--porcelain").strip() == ""
+    # Recoverable: the content is still in history.
+    assert "the body" in _git(tmp_path, "show", "HEAD~1:note.md")
+
+
+async def test_delete_refuses_a_directory(tmp_path):
+    # The guard that matters most on a tool an LLM holds: entries are files, and
+    # `git rm -r` on the store root would be one call away from erasing the whole
+    # memory. Nothing legitimate needs it.
+    _make_store(tmp_path)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "keep.md").write_text(_VALID)
+    tools = _tools(tmp_path)
+    out = await tools["memory_delete"].ainvoke({"path": "sub", "message": "m"})
+    assert out.startswith("error")
+    assert (tmp_path / "sub" / "keep.md").exists()
+
+
+async def test_delete_outside_the_jail_is_refused(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    _make_store(store)
+    victim = tmp_path / "victim.md"
+    victim.write_text("not the agent's to delete\n")
+    tools = _tools(store)
+    out = await tools["memory_delete"].ainvoke({"path": "../victim.md", "message": "m"})
+    assert out.startswith("error")
+    assert victim.exists()
+
+
+async def test_delete_rejected_by_the_hook_says_how_to_restore(tmp_path):
+    # A store may refuse removals on policy, and such a hook usually never names
+    # the path -- which the write-side heuristic would report as "the errors are
+    # NOT about your entry, it is saved on disk", about a file just unlinked. A
+    # rejected delete gets its own message: still tracked, here is how to get it
+    # back. The agent cannot rewrite content it no longer holds.
+    _make_store(tmp_path, schema_hook=False)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "git diff --cached --name-only --diff-filter=D | grep -q . && {\n"
+        '  echo "policy: deletions are not allowed"; exit 1; }\n'
+        "exit 0\n"
+    )
+    os.chmod(hook, 0o755)
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+
+    out = await tools["memory_delete"].ainvoke({"path": "note.md", "message": "drop"})
+    assert "delete of note.md rejected" in out
+    assert "git checkout -- note.md" in out
+    assert "saved on disk" not in out  # the write-side wording must not leak in
+    # Nothing left staged, so the removal is recoverable exactly as advertised.
+    assert _git(tmp_path, "diff", "--cached", "--name-only").strip() == ""
+    _git(tmp_path, "checkout", "--", "note.md")
+    assert (tmp_path / "note.md").exists()
+
+
+async def test_delete_of_a_missing_entry_says_so(tmp_path):
+    # A model working from a stale index line should be told the entry is already
+    # gone, not handed a raw git error to interpret.
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    out = await tools["memory_delete"].ainvoke({"path": "ghost.md", "message": "m"})
+    assert out.startswith("error")
+    assert "does not exist" in out
+
+
 # --- search ----------------------------------------------------------------
 
 

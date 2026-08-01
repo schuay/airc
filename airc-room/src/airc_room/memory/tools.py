@@ -5,8 +5,9 @@
 
 Local (non-MCP) langchain tools, granted to a persona via the reserved "memory"
 tool_group like the room's timer/chat_search tools. They give an agent
-read/search/write/edit over a git repo of markdown memory entries, HARD-JAILED to
-the store root (see jail.py -- an LLM with write access must not reach outside it).
+read/search/write/edit/delete over a git repo of markdown memory entries,
+HARD-JAILED to the store root (see jail.py -- an LLM with write access must not
+reach outside it).
 
 The file bodies (verbatim read, SEARCH/REPLACE edit, size limits) are REUSED from
 airc-tools, not copied: airc_tools.resolve_path returns an absolute path as-is, so
@@ -49,7 +50,7 @@ def _clip(text: str, limit: int = _MAX_OUTPUT) -> str:
     return text[:limit] + f"\n[... {len(text) - limit} bytes truncated ...]"
 
 
-def _rejection(rel: str, hook_output: str) -> str:
+def _rejection(rel: str, hook_output: str, *, deleting: bool = False) -> str:
     """The tool result for a rejected commit, told from the agent's point of view.
 
     A hook reports per-file errors, and the agent's job is to know whether the
@@ -64,7 +65,22 @@ def _rejection(rel: str, hook_output: str) -> str:
     here. So the hook's full text is always passed through unchanged, and this
     only prepends a lead line -- a wrong guess costs a misleading sentence above
     the real errors, never a swallowed one.
+
+    `deleting` exists because the heuristic reads backwards for a removal: a hook
+    refusing a deletion on policy ("deletions are not allowed") often never names
+    the path, which would otherwise be reported as "the errors are NOT about your
+    entry -- it is saved on disk", about a file just unlinked. A rejected delete
+    has one accurate thing to say regardless of whose fault it was, so say that.
     """
+    if deleting:
+        # _commit_path has already unstaged, so the removal is uncommitted; git
+        # restores it. Naming the command matters -- the agent cannot rewrite
+        # content it no longer holds.
+        return (
+            f"delete of {rel} rejected by the store; it is still tracked. Restore the"
+            f" file with `git checkout -- {rel}` if you need it back, and report this"
+            f" rather than retrying:\n{_clip(hook_output)}"
+        )
     if rel in hook_output:
         lead = "commit rejected (fix the entry and write again)"
     else:
@@ -114,7 +130,9 @@ def make_memory_tools(store_root: Path) -> list:
         path is what the airc-tools primitives see; the agent thinks in relatives)."""
         return str(abs_path.relative_to(root))
 
-    async def _commit_path(abs_path: Path, message: str) -> str | None:
+    async def _commit_path(
+        abs_path: Path, message: str, *, deleting: bool = False
+    ) -> str | None:
         """Commit exactly `abs_path` with `message`, running the store's pre-commit
         schema hook. Returns None on success, or an error string (hook rejection or
         git failure) with the file left on disk and unstaged so the agent can fix
@@ -149,7 +167,7 @@ def make_memory_tools(store_root: Path) -> list:
             # so the bad entry does not ride along on the next unrelated commit; the
             # hook's per-file errors are in `out` for the agent to act on.
             await _git(root, "reset", "--quiet", "--", rel)
-            return _rejection(rel, out)
+            return _rejection(rel, out, deleting=deleting)
 
     @tool
     async def memory_search(query: str, context: int = 0) -> str:
@@ -216,4 +234,40 @@ def make_memory_tools(store_root: Path) -> list:
             return err
         return f"updated {_rel(target)}"
 
-    return [memory_search, memory_read, memory_write, memory_edit]
+    @tool
+    async def memory_delete(path: str, message: str) -> str:
+        """Delete a memory entry that is wrong or obsolete, committing the removal
+        with `message` (e.g. "drop superseded bagel note"). Use when a fact stopped
+        being true and no rewrite makes sense -- if it merely CHANGED, prefer
+        memory_edit or memory_write so the note keeps its history in one place.
+        The entry stays recoverable from git history after deletion."""
+        try:
+            target = jail(root, path)
+        except Jailbreak as e:
+            return f"error: {e}"
+        rel = _rel(target)
+        # Refuse a directory outright. `git rm -r` on the store root would be one
+        # tool call away from erasing the whole memory, and no legitimate use needs
+        # it: entries are files. Checked before existence so the message is about
+        # the real problem.
+        if target.is_dir():
+            return f"error: {rel} is a directory; memory_delete removes one entry"
+        if not target.exists():
+            # A model that misremembers a path from the index should be told the
+            # entry is already gone, not handed a git error to interpret.
+            return f"error: {rel} does not exist (nothing to delete)"
+
+        def _unlink() -> None:
+            target.unlink()
+
+        await asyncio.to_thread(_unlink)
+        # Commit through the same scoped path as a write: `git add` stages the
+        # deletion, and _commit_path's pathspec commit records it. A hook that
+        # rejects the removal leaves the file deleted on disk but uncommitted,
+        # which _commit_path unstages -- so the entry is restorable with git
+        # checkout and the store is never left half-changed in the index.
+        if err := await _commit_path(target, message, deleting=True):
+            return err
+        return f"deleted {rel}"
+
+    return [memory_search, memory_read, memory_write, memory_edit, memory_delete]

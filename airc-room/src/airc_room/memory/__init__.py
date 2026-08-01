@@ -12,7 +12,8 @@ lines of persona prose). This is what lets a coding room and a grocery room shar
 one implementation with different memories.
 
 Public surface:
-- make_memory_tools(root) -- the jailed search/read/write/edit tools (auto-commit).
+- make_memory_tools(root) -- the jailed search/read/write/edit/delete tools
+  (auto-commit).
 - memory_index(root) -- the derived one-line index for per-turn injection.
 - MEMORY_RULES -- the default write-discipline block appended to a memory-enabled
   persona's system prompt.
@@ -55,6 +56,12 @@ task state; or anything you could re-derive next time. When in doubt, do not wri
 Before writing, memory_search first: prefer updating an existing note over
 creating a near-duplicate. Keep each note to the durable substance. Writes are
 committed for you; a malformed note is rejected with the reason, so fix and write
-again."""
+again.
+
+When a note turns out to be WRONG or is superseded outright, delete it with
+memory_delete -- a store that keeps stale facts around is worse than a small one,
+and the entry stays in git history. If the fact merely changed, update the note
+instead, so its history stays in one place. Never blank a note to "remove" it: an
+empty entry still shows up in the index and reads as a fact you have forgotten."""
 
 __all__ = ["MEMORY_GROUP", "MEMORY_RULES", "make_memory_tools", "memory_index"]
