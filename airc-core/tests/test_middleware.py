@@ -310,11 +310,11 @@ async def _retry_over_empty(responses):
 
 async def test_a_repeated_empty_is_retried_once_uncached_with_a_nudge():
     # The count the cache keys its step-aside on, and the mutation. The first
-    # call sees _empty_retry 0 (serve cached -- a flake re-rolls cheaply against
-    # a warm prefix) on the original 1-message request; the retry sees 2 (past
-    # the >1 step-aside threshold, so the cache drops its prefix) on a request
-    # grown by the nudge. Bounded to those two calls: no sixth identical resend.
-    assert await _retry_over_empty([_EMPTY_STOP] * 3) == [(0, 1), (2, 2)]
+    # call sees _empty_retry 0 (serve cached) on the original 1-message request;
+    # the retry sees 1 (step aside, so the cache stops serving the prefix that
+    # may be producing the empty) on a request grown by the nudge. Bounded to
+    # those two calls: no sixth identical resend.
+    assert await _retry_over_empty([_EMPTY_STOP] * 3) == [(0, 1), (1, 2)]
 
 
 async def test_a_non_empty_response_resets_the_retry_counter():
@@ -324,8 +324,23 @@ async def test_a_non_empty_response_resets_the_retry_counter():
     # same turn starts fresh against a warm cache rather than stepping aside
     # immediately.
     seen = await _retry_over_empty([_EMPTY_STOP, {"content": "the answer"}])
-    assert seen == [(0, 1), (2, 2)]
+    assert seen == [(0, 1), (1, 2)]
     assert agent._empty_retry.get() == 0
+
+
+async def test_an_empty_candidate_is_never_handed_back_to_the_retry_layer():
+    import airc_core.agent as agent
+
+    # _is_retryable must reject EmptyCandidateError by TYPE. The raise embeds
+    # the provider's finish_reason, so a reason naming an overload or an
+    # unavailable region would match the string-based transient test and
+    # re-drive the whole two-call episode per outer attempt -- 14 model calls
+    # and the full backoff ladder, worse than the wedge this path prevents.
+    for reason in ("STOP", "MODEL_OVERLOADED", "unavailable in region", "429 quota"):
+        exc = agent.EmptyCandidateError(f"empty candidate (finish_reason={reason})")
+        assert not agent._is_retryable(exc), reason
+    # A genuine transient still retries, by message.
+    assert agent._is_retryable(RuntimeError("503 model overloaded"))
 
 
 async def test_the_nudge_is_not_reappended_on_an_empty_candidate_retry():

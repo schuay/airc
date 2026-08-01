@@ -297,20 +297,20 @@ def _is_transient(exc: Exception) -> bool:
 # ~28% of the turn and the turn then ends in the orchestrator's timeout notice
 # rather than a reply. Sized for the harness because that is where a lost turn
 # costs a whole job; the room degrades to a missed reply either way.
-# Six attempts also cover an empty candidate (Gemini's zero-part bug): the first
-# retry is a fast 5s re-roll; only a deterministic cache-fault empty exhausts.
+# Empty candidates do not use this ladder at all: _EmptyCandidateRetry retries
+# them itself, once, and raises a non-retryable error (see _is_retryable).
 _RETRY_MAX = 6
 _RETRY_INITIAL_DELAY = 5.0
 _RETRY_BACKOFF_FACTOR = 3.0
 _RETRY_MAX_DELAY = 60.0
 
 
-# Set by _EmptyCandidateRetry when it raises, read by _GrowingPrefixCache on the
-# retry that follows. A contextvar rather than an attribute on the exception
-# because the two middlewares do not see each other: the retry layer sits between
-# them and re-invokes the handler with the same request object, so the exception
-# never reaches the cache. Both run in one task chain per model call, so the value
-# set on the raise is visible to the cache when the retry re-enters it.
+# Set by _EmptyCandidateRetry for the duration of its one mutated retry, read by
+# _GrowingPrefixCache (nested inside it) to step aside for that call, and by
+# CallBudgetMiddleware to suppress a second nudge. A contextvar rather than an
+# argument because the middlewares do not see each other: they communicate only
+# through the request, which the cache must not have to interpret. All three run
+# in one task chain per model call, so the value is visible where it is read.
 _empty_retry: contextvars.ContextVar[int] = contextvars.ContextVar(
     "airc_empty_candidate_retries", default=0
 )
@@ -338,7 +338,15 @@ def _is_retryable(exc: Exception) -> bool:
     reproduces the deterministic empty (observed: 6 identical calls, 0 output
     tokens). _is_transient stays string-matched (provider-dependent wording) for
     the bare retrying() helper which never sees empty candidates (single-shot
-    calls, no ToolStrategy)."""
+    calls, no ToolStrategy).
+
+    The type check is what enforces that, and it has to come first: the raise
+    embeds the provider's finish_reason in the message, so a reason reading
+    MODEL_OVERLOADED or naming an unavailable region would match _is_transient
+    and hand the empty back to the retry layer -- 14 model calls and the full
+    backoff ladder, worse than the wedge this path exists to prevent."""
+    if isinstance(exc, EmptyCandidateError):
+        return False
     return _is_transient(exc)
 
 
@@ -602,18 +610,19 @@ class _DropEmptyResponses(AgentMiddleware):
 
 
 class _EmptyCandidateRetry(AgentMiddleware):
-    """Treat a provider-side empty candidate as a retriable transient error.
+    """Retry a provider-side empty candidate once, mutated, then surface it.
 
     Gemini's known bug: returns a zero-part response (finish_reason=STOP or
     SAFETY/RECITATION, but no content and no tool calls) that reads as a benign
     end-of-turn but carries nothing -- the silent-dead-turn shape. Without this,
     the empty AIMessage sails through (or is scrubbed by _DropEmptyResponses)
     and the turn ends with no report, scored as a dead turn by the reentry loop.
-    Raising it as a transient error routes it through the existing
-    ModelRetryMiddleware backoff (via _is_retryable), unifying it with
-    5xx/429/overloaded -- one retry policy, one failure signal. On exhaustion
-    the turn errors visibly (the harness names the empty candidate) instead of
-    going silent.
+    The retry happens HERE rather than through ModelRetryMiddleware's backoff,
+    because that layer resends the identical request and a deterministic
+    zero-part candidate reproduces on identical input (observed: 6 identical
+    calls, 0 output tokens). When the mutated retry is also empty the turn
+    errors visibly (the harness names the empty candidate) instead of going
+    silent.
 
     Detection scope: empty candidate (0 parts: no text AND no tool calls) and
     STOP-with-no-content only -- the flake family. A SAFETY/RECITATION block
@@ -635,9 +644,8 @@ class _EmptyCandidateRetry(AgentMiddleware):
     """
 
     async def awrap_model_call(self, request, handler):
-        # Attempt 1: send as-is. A zero-part Gemini candidate is often a one-off
-        # flake, so a single identical call against a warm cache is the cheap
-        # first move.
+        # Attempt 1 is the turn's own call, unchanged and cached as usual: this
+        # middleware costs nothing until something comes back empty.
         resp = await handler(request)
         empty = _empty_ai_message(resp)
         if empty is None:
@@ -648,13 +656,13 @@ class _EmptyCandidateRetry(AgentMiddleware):
             return resp
         # Still empty. Do NOT raise for an identical retry -- the cache (nested
         # inside) would re-read the same prefix and the model would reproduce the
-        # zero-part candidate. Mutate, once: lift _empty_retry past the growing
-        # cache's step-aside threshold (>=2) so it drops any cached prefix -- a
-        # poisoned cache can only reproduce the empty -- and append a nudge that
-        # forces output, in case the poison is in the message history. Bounded:
-        # one mutated retry, then surface. Raises EmptyCandidateError (not
-        # retryable) so it propagates to the harness as a named dead turn.
-        _empty_retry.set(2)
+        # zero-part candidate. Mutate, once: set _empty_retry so the growing
+        # cache steps aside for this one call (a poisoned prefix can only
+        # reproduce the empty) and append a nudge that forces output, in case
+        # the poison is in the message history. Bounded: one mutated retry, then
+        # surface. Raises EmptyCandidateError (not retryable) so it propagates
+        # to the harness as a named dead turn.
+        _empty_retry.set(1)
         log.warning(
             "empty candidate (finish_reason=%s); retrying once uncached with a"
             " nudge to force output",
@@ -1037,9 +1045,6 @@ def _seed_vertex_cache_globals() -> str:
     return location
 
 
-_set_vertex_cache_region = _seed_vertex_cache_globals  # backward compatibility alias
-
-
 # Summarization fires here, deliberately BELOW the shed's _HARD_FRACTION, and keeps
 # the recent tail verbatim while compacting the rest. The two ceilings count on
 # different bases -- the shed on the provider-exact input (system + tool schemas +
@@ -1179,9 +1184,11 @@ def base_middleware(
             backoff_factor=_RETRY_BACKOFF_FACTOR,
             max_delay=_RETRY_MAX_DELAY,
         ),
-        # After ModelRetryMiddleware (innermore) so its raise is caught and
-        # retried. Inspects each response; raises EmptyCandidateError on a
-        # zero-part candidate, letting the retry layer treat it as transient.
+        # After ModelRetryMiddleware (innermore) so it wraps the cache, whose
+        # step-aside its retry depends on. It owns the empty-candidate retry
+        # itself (one mutated call, uncached + nudged); the raise that follows
+        # is NOT retryable, so the retry layer passes it straight through to
+        # the harness rather than resending.
         _EmptyCandidateRetry(),
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
     ]
@@ -1470,6 +1477,29 @@ class _GrowingPrefixCache(AgentMiddleware):
         else:
             self._states.move_to_end(key)
 
+        # An empty candidate's mutated retry: serve this ONE call uncached, so
+        # the retry cannot re-read the prefix that may have produced the empty.
+        # Step aside rather than delete -- an empty candidate is usually a
+        # one-off flake, and tearing the cache down would make a single flake
+        # cost a full uncached prefix resend on every later call in the turn
+        # (on a long conversation, repurchasing the whole prefix at full input
+        # rate). Nothing is lost by keeping it: if the prefix really is
+        # poisoned, this retry is the last call of the turn anyway.
+        #
+        # Ahead of the bookkeeping below, and returning before it: the request
+        # carries an ephemeral nudge that never enters graph state, so counting
+        # it would record a seen_len one longer than the history really is --
+        # and the next real call, being shorter, would read as a shrink and
+        # delete the very cache this branch just preserved.
+        if _empty_retry.get():
+            if st.name is not None:
+                log.warning(
+                    "growing cache: serving uncached past %s for an"
+                    " empty-candidate retry; cache kept",
+                    st.name,
+                )
+            return await handler(request)
+
         if len(messages) < st.seen_len:
             # History shrank: a fresh run reusing this graph (review). Drop the
             # prior run's cache and start this key over.
@@ -1479,20 +1509,6 @@ class _GrowingPrefixCache(AgentMiddleware):
         st.seen_len = len(messages)
 
         st.calls_since += 1
-        # A repeated empty candidate on an unchanged request: drop this thread's
-        # cache and serve uncached, so the retry cannot re-read the prefix that
-        # may have produced it. Dropping beats re-creating -- a new cache over
-        # the same messages would be the same bytes, testing nothing. The next
-        # call rebuilds normally from st.name is None.
-        if _empty_retry.get() > 1 and st.name is not None:
-            log.warning(
-                "growing cache: dropping %s after repeated empty candidates;"
-                " serving uncached",
-                st.name,
-            )
-            await self._delete_quietly(st.name)
-            self._states[key] = _PrefixState(seen_len=len(messages))
-            return await handler(request)
         target = _last_step_boundary(messages)
         if time.monotonic() >= self._cooldown_until:
             prefix = [self._system, *messages[:target]]

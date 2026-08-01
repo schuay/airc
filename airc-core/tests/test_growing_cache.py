@@ -325,41 +325,56 @@ async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatc
 # ── empty-candidate step-aside ───────────────────────────────────────────────
 
 
-async def test_repeated_empty_candidates_drop_the_cache_and_serve_uncached():
+async def test_empty_candidate_retry_serves_uncached():
     import airc_core.agent as agent
 
-    # _EmptyCandidateRetry sets this on each empty; past the first retry the
-    # cache must stop serving the prefix that may be producing it. Dropping
-    # beats re-creating: a new cache over the same messages is the same bytes.
+    # _EmptyCandidateRetry sets this for its one mutated retry: the cache must
+    # stop serving the prefix that may be producing the empty, so the retry
+    # tests a genuinely different input.
     mw, state = _mw()
     first = await _run(mw, _Req(_history(2)))
     assert first["model"] == "M:c1"  # cached normally
-    agent._empty_retry.set(2)  # a retry, not the first
-    try:
-        seen = await _run(mw, _Req(_history(2)))
-    finally:
-        agent._empty_retry.set(0)
-    assert seen["model"] == "BASE"  # uncached: the full request, no cached_content
-    assert state["deleted"] == ["c1"]  # and the suspect cache is gone
-    # The next call rebuilds, so one bad episode does not disable caching.
-    third = await _run(mw, _Req(_history(2)))
-    assert third["model"] == "M:c2"
-
-
-async def test_a_first_empty_candidate_still_serves_cached():
-    import airc_core.agent as agent
-
-    # The first re-roll is a cheap flake retry against a warm prefix; stepping
-    # aside there would pay an uncached prefill on every transient blip.
-    mw, state = _mw()
-    await _run(mw, _Req(_history(2)))
     agent._empty_retry.set(1)
     try:
         seen = await _run(mw, _Req(_history(2)))
     finally:
         agent._empty_retry.set(0)
-    assert seen["model"] == "M:c1"
-    assert state["deleted"] == []
+    assert seen["model"] == "BASE"  # uncached: the full request, no cached_content
+
+
+async def test_one_empty_candidate_flake_does_not_cost_the_cache():
+    """_EmptyCandidateRetry over the real cache: one flake, then a normal turn.
+
+    Driven through both middlewares rather than by setting _empty_retry by
+    hand, because the cost being guarded against comes from how the two
+    compose -- a hand-set counter cannot see a mismatch between what the retry
+    sets and what the cache keys on. A single flake must not tear down a warm
+    prefix: on a long conversation that repurchases the whole thing at full
+    input rate on every later call in the turn.
+    """
+    import airc_core.agent as agent
+
+    mw, state = _mw()
+    empty = agent._EmptyCandidateRetry()
+    box = [AIMessage(content=""), AIMessage(content="the answer")]
+
+    async def inner(req):
+        # The cache is nested inside the empty-candidate retry, so it serves
+        # each attempt; pop one canned response per model call.
+        await mw.awrap_model_call(req, _noop)
+        return type("R", (), {"result": [box.pop(0)]})()
+
+    agent._empty_retry.set(0)
+    try:
+        await empty.awrap_model_call(_Req(_history(2)), inner)  # flake, then ok
+        assert not box, "both canned responses should have been consumed"
+        assert state["deleted"] == []
+        # The turn continues on the SAME cache: no delete, no second prefill.
+        after = await _run(mw, _Req(_history(2)))
+        assert after["model"] == "M:c1"
+        assert [name for name, _ in state["created"]] == ["c1"]
+    finally:
+        agent._empty_retry.set(0)
 
 
 # ── window guard ─────────────────────────────────────────────────────────────
@@ -527,9 +542,7 @@ def test_seed_vertex_cache_globals_seeds_location_project_and_file_creds(
 ):
     import json
     from google.cloud.aiplatform import initializer
-    from airc_core.agent import _seed_vertex_cache_globals, _set_vertex_cache_region
-
-    assert _set_vertex_cache_region is _seed_vertex_cache_globals
+    from airc_core.agent import _seed_vertex_cache_globals
 
     tok = tmp_path / "vertex.json"
     tok.write_text(json.dumps({"token": "t", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}))
@@ -544,9 +557,7 @@ def test_seed_vertex_cache_globals_seeds_location_project_and_file_creds(
     assert initializer.global_config._credentials.token == "t"
 
 
-def test_seed_vertex_cache_globals_skips_creds_when_token_absent(
-    monkeypatch, tmp_path
-):
+def test_seed_vertex_cache_globals_skips_creds_when_token_absent(monkeypatch, tmp_path):
     from google.cloud.aiplatform import initializer
     from airc_core.agent import _seed_vertex_cache_globals
 
@@ -602,7 +613,9 @@ async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_tok
     initializer.global_config._location = None
     initializer.global_config._project = None
 
-    create, delete, _, _ = _growing_cache_fns("google_vertexai:gemini-2.5-flash", [], 10)
+    create, delete, _, _ = _growing_cache_fns(
+        "google_vertexai:gemini-2.5-flash", [], 10
+    )
 
     cache_name = await create([SystemMessage("SYS")])
     assert cache_name == "cache-123"
@@ -618,7 +631,9 @@ async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_tok
     # Scenario 2: AIRC_VERTEX_TOKEN_FILE is present and valid
     tok = tmp_path / "vertex.json"
     tok.write_text(
-        json.dumps({"token": "real-token-val", "expiry": "Fri Jul 10 12:07:06 UTC 2026"})
+        json.dumps(
+            {"token": "real-token-val", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}
+        )
     )
     monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tok))
 
