@@ -54,6 +54,15 @@ _MAX_TOOL_RESULT_CHARS = 200_000
 # ToolException conversion in capped().
 _TOOL_CALL_TIMEOUT_S = 120
 
+# Per-server startup budget: spawn, initialize, and list tools. A stdio server is
+# an arbitrary external binary, so it can hang rather than fail -- waiting on a
+# credential prompt, or wedged mid-handshake -- and without a bound here every
+# caller inherits that hang, including ones that never wanted this server's
+# tools. Generous, because a cold uv-tool launcher genuinely takes seconds.
+# Expiry is treated like any other startup failure: log, drop the server, carry
+# on with the rest.
+_SERVER_START_TIMEOUT_S = 60
+
 
 class _LocalToolError(ToolException):
     """An error raised by this wrapper (timeout, dead transport), as opposed to
@@ -298,11 +307,20 @@ class MCPToolset:
             # already handles its absence (it resolves tools by pattern and
             # self-disables when the pattern matches nothing).
             try:
-                sess = await self._stack.enter_async_context(
-                    client.session(srv, auto_initialize=False)
+                async with asyncio.timeout(_SERVER_START_TIMEOUT_S):
+                    sess = await self._stack.enter_async_context(
+                        client.session(srv, auto_initialize=False)
+                    )
+                    init_result = await sess.initialize()
+                    srv_tools = await load_mcp_tools(sess, server_name=srv)
+            except TimeoutError:
+                log.error(
+                    "mcp: %s: no response within %ds; continuing without it",
+                    srv,
+                    _SERVER_START_TIMEOUT_S,
                 )
-                init_result = await sess.initialize()
-                srv_tools = await load_mcp_tools(sess, server_name=srv)
+                failed.append(srv)
+                continue
             except Exception:
                 log.exception("mcp: %s: failed to start; continuing without it", srv)
                 failed.append(srv)
