@@ -12,7 +12,7 @@ three tools share a single policy.
 
 # Displayed shell output (head+tail). Well under airc_core's ~200k result cap so
 # one command can't dominate a turn; the model is told to pipe rg/tail itself.
-MAX_SHELL_OUTPUT = 100_000
+MAX_SHELL_OUTPUT = 2_000
 # Hard ceiling on bytes buffered from a child before we kill it. Bounds memory
 # against unbounded producers (`yes`, `cat /dev/zero`); we keep the head and drop
 # the rest rather than read-and-discard forever.
