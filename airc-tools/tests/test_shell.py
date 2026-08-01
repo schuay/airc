@@ -28,6 +28,37 @@ async def test_build_trap_blocks_raw_ninja_and_gn_clean():
         assert await run_shell(cmd) == _BUILD_TRAP_MSG, cmd
 
 
+async def test_build_trap_blocks_gm_and_gclient_however_they_are_spelled():
+    # A worktree arrives build-ready with deps symlinked from a shared read-only
+    # checkout, so gm.py/gclient would try to re-sync against it. The prompt has
+    # said so in prose; a refused call is what actually holds. Both are
+    # reachable by path or through an interpreter, so the spellings matter.
+    for cmd in (
+        "tools/dev/gm.py x64.release",
+        "./tools/dev/gm.py x64.release",
+        "python3 tools/dev/gm.py x64.release",
+        "vpython3 tools/dev/gm.py x64.release",
+        "/usr/bin/python3 tools/dev/gm.py x64.release",
+        "cd /wt && gm.py x64.release",
+        "gclient sync -D",
+        "gclient runhooks",
+    ):
+        assert await run_shell(cmd) == _BUILD_TRAP_MSG, cmd
+
+
+async def test_build_trap_allows_reading_about_gm_and_running_gn_gen():
+    # gm.py as an ARGUMENT is not running it, and repro.md instructs `gn args`
+    # / `gn gen` for flag-gated repro configs -- only `gn clean` is banned.
+    for cmd in (
+        "echo cat tools/dev/gm.py",
+        "echo grep gclient DEPS",
+        "echo gn args out/repro --list",
+        "echo gn gen out/repro",
+    ):
+        out = await run_shell(cmd)
+        assert out != _BUILD_TRAP_MSG and "exit 0" in out, cmd
+
+
 async def test_build_trap_allows_autoninja_and_lookalikes():
     # autoninja, autoninja -o, a build.ninja path, gn gen, and a bare mention of
     # "ninja" mid-command must NOT be trapped -- they execute normally.

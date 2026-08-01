@@ -225,9 +225,17 @@ class Sandbox:
         Early: a strict ancestor of any tmpfs mount -- it must precede that
         tmpfs or shadow it read-only (the home-tmpfs leak). Late: the rest,
         bound after the tmpfs so descendant binds (deps under $HOME) win on top
-        of the blanked home. Dedups by resolved destination and drops anything
-        already bound by _SYSTEM_ARGS (/usr, /etc): already mounted, and mounted
-        in the safe early order."""
+        of the blanked home. Drops anything already bound by _SYSTEM_ARGS
+        (/usr, /etc): already mounted, and mounted in the safe early order.
+
+        Two keys, deliberately: membership in _SYSTEM_RO_ROOTS asks "is this
+        /usr under any name", which only the resolved path answers, while
+        dedup asks "have I already emitted this mount destination", which is
+        the literal one. Keying dedup on the resolved path drops aliases that
+        are distinct destinations in the box -- and the interpreter roots are
+        exactly that shape (a versioned dir plus the unversioned symlink the
+        venv names), where binding only one leaves the other missing and every
+        exec fails with ENOENT."""
         tmpfs_mounts = [Path(mnt) for mnt, _ in self.tmpfs]
         early: list[Path] = []
         late: list[Path] = []
@@ -236,9 +244,9 @@ class Sandbox:
             if not _bindable(p):
                 continue
             rp = p.resolve()
-            if rp in _SYSTEM_RO_ROOTS or rp in seen:
+            if rp in _SYSTEM_RO_ROOTS or p in seen:
                 continue
-            seen.add(rp)
+            seen.add(p)
             if any(_strict_ancestor(rp, t) for t in tmpfs_mounts):
                 early.append(p)
             else:

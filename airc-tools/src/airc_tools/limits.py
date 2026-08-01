@@ -10,8 +10,13 @@ while buffering). The caps and the one truncation-marker style live here so the
 three tools share a single policy.
 """
 
-# Displayed shell output (head+tail). Well under airc_core's ~200k result cap so
-# one command can't dominate a turn; the model is told to pipe rg/tail itself.
+# Displayed shell output (head+tail). Sized against context pollution, not the
+# ~200k result cap it sits far below: a verbose build or test run that survives
+# in full crowds out the reasoning it was meant to inform, and the model is told
+# to pipe through rg/tail to narrow. The cost is that a failure whose real cause
+# is in the MIDDLE of a long log (the first compile error, with the tail showing
+# only the summary) does not survive the elision -- that is the case worth
+# re-running narrowed.
 MAX_SHELL_OUTPUT = 2_000
 # Hard ceiling on bytes buffered from a child before we kill it. Bounds memory
 # against unbounded producers (`yes`, `cat /dev/zero`); we keep the head and drop
@@ -41,10 +46,15 @@ def head_tail(text: str, limit: int = MAX_SHELL_OUTPUT) -> str:
     """Keep the head and tail of `text`, eliding the middle with a byte/line
     count. Both ends matter for command output: the head has the start (the
     command, first errors), the tail has the exit summary a truncation-from-the-
-    front would drop."""
+    front would drop.
+
+    Split evenly. A 3:1 head bias was harmless when the budget was large, but at
+    a few thousand bytes it leaves a tail too short for the part that usually
+    says what went wrong -- the failing assertion and the exit summary are both
+    at the end."""
     if len(text) <= limit:
         return text
-    head_len = limit * 3 // 4
+    head_len = limit // 2
     tail_len = limit - head_len
     elided = len(text) - head_len - tail_len
     elided_lines = text.count("\n", head_len, len(text) - tail_len)

@@ -30,12 +30,26 @@ if TYPE_CHECKING:
 # `build.ninja` path, or `grep ninja` are untouched. A deliberately simple
 # regex, not a shell parser -- it only sees the agent's own command, never
 # autoninja's internal ninja/siso calls.
-_BUILD_TRAP = re.compile(r"(?:^|[;&|]+)\s*(?:ninja|siso\s+ninja|gn\s+clean)\b", re.I)
+# Anchored at a command position (start, or after a ;/&/| separator) and matched
+# against the whole word, so `autoninja` -- the one sanctioned build entry point
+# -- is not caught by the `ninja` alternative. gm.py and gclient are reachable by
+# a path or through an interpreter, so allow a leading dir prefix and an optional
+# python/vpython launcher; `cat tools/dev/gm.py` stays clear because `cat` is
+# neither.
+_BUILD_TRAP = re.compile(
+    r"(?:^|[;&|]+)\s*"
+    r"(?:(?:\S*/)?(?:v?python3?)\s+)?"
+    r"(?:\S*/)?"
+    r"(?:ninja|siso\s+ninja|gn\s+clean|gm\.py|gclient)\b",
+    re.I,
+)
 _BUILD_TRAP_MSG = (
-    "error: raw `ninja` / `siso ninja` / `gn clean` is disabled -- builds go"
-    " through autoninja. Use `autoninja -C out/<build> <target>`, or add `-o`"
-    " (`autoninja -o -C ...`) for an offline (no-RBE) build. Never `gn clean`:"
-    " it forces a slow cold rebuild."
+    "error: raw `ninja` / `siso ninja` / `gn clean` / `gm.py` / `gclient` is"
+    " disabled -- builds go through autoninja. Use `autoninja -C out/<build>"
+    " <target>`, or add `-o` (`autoninja -o -C ...`) for an offline (no-RBE)"
+    " build. The worktree is already build-ready: gm.py and gclient would"
+    " re-sync deps against the shared read-only checkout, and `gn clean` forces"
+    " a slow cold rebuild."
 )
 
 # Authoring a SOURCE file through the shell, refused so the model uses the
@@ -54,6 +68,19 @@ _BUILD_TRAP_MSG = (
 # Deliberately conservative: a missed shell write costs one badly-authored file
 # (and the prose still says not to), while a false positive blocks a legitimate
 # command and burns a turn. Anything not clearly authoring is allowed through.
+#
+# So this is a nudge off the well-worn spellings, NOT a boundary. It matches
+# literal suffixes on a statically visible redirect target, which `> patch.txt`,
+# a computed name, `dd of=`, `ed`, or write-then-rename all walk around, and the
+# apply side is not closed either. Do not build anything on top of it that
+# assumes an agent CANNOT author a patch; real prevention would be removing
+# `git apply`/`patch` from the sandbox PATH.
+#
+# .diff/.patch are the one place the target-not-command rule is knowingly bent:
+# `git diff > review.diff` is output capture by that rule, but the same shape is
+# how a heredoc patch gets staged, and the suffix cannot tell them apart. The
+# refusal message names the .log alternative so a legitimate capture recovers in
+# one turn.
 _SOURCE_SUFFIXES = (
     # Source and headers.
     ".c",

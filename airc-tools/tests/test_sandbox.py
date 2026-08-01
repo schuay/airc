@@ -389,6 +389,28 @@ def test_system_ro_root_is_dropped_not_reemitted(tmp_path):
     assert usr_binds == 1
 
 
+def test_symlinked_alias_and_its_target_are_both_bound(tmp_path):
+    # The prod shape: uv gives an unversioned interpreter root that symlinks to
+    # a versioned one, and the venv names the alias. Both are real, distinct
+    # destinations in the box, so deduping them to one leaves the other absent
+    # and exec fails ENOENT. Keying dedup on the resolved path collapsed them.
+    root = tmp_path / "wt"
+    root.mkdir()
+    versioned = tmp_path / "cpython-3.12.12"
+    versioned.mkdir()
+    alias = tmp_path / "cpython-3.12"
+    alias.symlink_to(versioned)
+    boxed = Sandbox(root=root, ro_paths=(alias, versioned), use_cgroup=False)
+    dests = {
+        argv[i + 2]
+        for argv in (boxed.wrapper(),)
+        for i in range(len(argv))
+        if argv[i] == "--ro-bind"
+    }
+    assert str(alias) in dests
+    assert str(versioned) in dests
+
+
 def test_assert_no_leak_raises_on_a_later_ancestor(tmp_path):
     # The guarantee: a hand-built argv where a ro ancestor lands AFTER a tmpfs it
     # covers fails loud at assembly, rather than producing a silently-broken box.
