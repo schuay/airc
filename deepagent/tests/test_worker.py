@@ -4,8 +4,7 @@
 """The worker core: run a goal loop from a LoopSpec, write outcome.json.
 
 Uses MockHarness so no model/langchain is touched -- this exercises the file
-contract (spec in, outcome out) and the sandbox=None in-box tool posture, not a
-real turn.
+contract (spec in, outcome out), not a real turn.
 """
 
 from pathlib import Path
@@ -52,17 +51,6 @@ async def test_run_loop_writes_outcome(tmp_path):
     # The terminal result is persisted where the runner reads it back.
     back = read_outcome(Path(spec.control_dir))
     assert back is not None and back.data["reproduced"] is True
-
-
-async def test_run_loop_runs_tools_unwrapped(tmp_path):
-    # In the box the harness must run each turn with sandbox=None -- the process
-    # boundary is the confinement, so no per-call wrapper.
-    spec = _spec(tmp_path)
-    harness = MockHarness([AgentResult(disposition=Disposition.COMPLETE)])
-
-    await run_loop_from_spec(harness, spec)
-
-    assert harness.sandboxes == [None]
 
 
 async def test_run_loop_abandon_is_persisted(tmp_path):

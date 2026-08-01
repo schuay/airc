@@ -30,7 +30,7 @@ Known give-ups of this tier, documented rather than papered over:
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .shell import _DEFANG_ENV
@@ -151,8 +151,6 @@ class Sandbox:
     # so a host firewall rule can match every sandbox scope (e.g. drop the GCE
     # metadata IP from this slice's cgroup); empty leaves systemd's default.
     slice_unit: str = ""
-
-    _resolved: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def wrapper(self) -> list[str]:
         """The argv prefix: [systemd-run ...] bwrap ... -- ready to have the
@@ -324,41 +322,8 @@ class Sandbox:
             return ["--ro-bind", str(_JOURNAL_STDOUT_SOCK), str(_JOURNAL_STDOUT_SOCK)]
         return []
 
-    def check(self, path: str | Path, *, write: bool) -> str | None:
-        """Containment for the in-process read/edit tools: None when `path` is
-        inside the profile, else a refusal message (the tool's return value).
-        Resolves symlinks first, so a link pointing out of the worktree cannot
-        smuggle a read/write past the boundary."""
-        p = Path(path).resolve()  # non-strict: also resolves not-yet-created files
-        # ro-over paths (.git config/hooks) sit under an rw parent, so a plain
-        # roots check would call them writable; refuse the write explicitly.
-        if write and any(p.is_relative_to(r) for r in self._ro_over_roots()):
-            return (
-                f"error: {path} is read-only in this job's sandbox "
-                f"(not writable: "
-                f"{', '.join(str(r) for r in self.ro_over_rw_paths)})"
-            )
-        allowed = self._roots(write)
-        if any(p.is_relative_to(r) for r in allowed):
-            return None
-        mode = "write" if write else "read"
-        return (
-            f"error: {path} is outside this job's sandbox ({mode} allowed under: "
-            f"{', '.join(str(r) for r in allowed)})"
-        )
-
-    def _roots(self, write: bool) -> tuple[Path, ...]:
-        # Resolve the policy roots once (the worktree path itself may contain
-        # symlinks) and cache; the profile is frozen so this cannot go stale.
-        key = "w" if write else "r"
-        if key not in self._resolved:
-            roots = (self.root, *self.rw_paths)
-            if not write:
-                roots += self.ro_paths
-            self._resolved[key] = tuple(r.resolve() for r in roots)
-        return self._resolved[key]
-
-    def _ro_over_roots(self) -> tuple[Path, ...]:
-        if "o" not in self._resolved:
-            self._resolved["o"] = tuple(r.resolve() for r in self.ro_over_rw_paths)
-        return self._resolved["o"]
+    # There is deliberately no path-containment check here. Confinement is the
+    # mount namespace: a caller runs the whole loop inside the wrapper, so a
+    # second in-process check of the same policy would be a copy that can drift
+    # from the argv without anything failing. A tool that needs containment
+    # belongs inside the box, not behind a predicate.

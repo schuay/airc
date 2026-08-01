@@ -18,13 +18,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from typing import TYPE_CHECKING
-
 from .harness import REPORT_TOOL_NAME, AgentResult, Disposition, Harness
 from .journal import Journal
-
-if TYPE_CHECKING:
-    from airc_tools.sandbox import Sandbox
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +97,6 @@ async def run_agent_loop(
     agent: str = "",
     casefile: Path | None = None,
     journal: Journal | None = None,
-    sandbox: "Sandbox | None" = None,
 ) -> AgentResult:
     """Drive the harness to a terminal disposition (or synthesize an ABANDON).
 
@@ -128,7 +122,6 @@ async def run_agent_loop(
             resume_prompt=_resume_prompt(i, caps) if i > 0 else "",
             casefile=casefile,
             journal=journal,
-            sandbox=sandbox,
         )
         if run.result is None:
             # No valid result: a turn that was cut (timeout) or violated the

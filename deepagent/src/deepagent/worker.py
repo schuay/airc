@@ -7,8 +7,10 @@ This is the in-box half of the whole-process sandbox: the orchestrator spawns a
 worker under the job's bwrap+cgroup wrapper, and the worker runs the *entire*
 reentry loop here -- so every agent turn, its tools, and any d8/gdb/perf run are
 confined by the process boundary, not per shell call. The tools therefore run
-free inside the box (sandbox=None on the harness), and a sandboxed job keeps its
-full active tool groups; the confinement is the process, not a narrowed surface.
+free inside the box, and the job keeps its full tool groups; the confinement is
+the process, not a narrowed surface. This is the only supported way to run a
+turn against untrusted input -- there is no per-call confinement to fall back
+on, by design.
 
 The contract is exactly the file-contract the loop already uses: a `LoopSpec`
 in (paths, agent, caps), `events.jsonl` appended live under the bound-rw control
@@ -69,11 +71,10 @@ def read_outcome(control_dir: Path) -> AgentResult | None:
 async def run_loop_from_spec(harness: Harness, spec: LoopSpec) -> AgentResult:
     """Drive the reentry loop to a terminal result and persist it.
 
-    The harness runs each turn with sandbox=None -- we are already inside the
-    box, so the tools need no per-call wrapper and read/edit need no realpath
-    containment (the mount namespace is the boundary). The journal is the same
-    events.jsonl the orchestrator tails, so `icu tail` keeps working live across
-    the boundary.
+    The tools run unwrapped: we are already inside the box, so the mount
+    namespace is the boundary and a per-call wrapper would only duplicate it.
+    The journal is the same events.jsonl the orchestrator tails, so `icu tail`
+    keeps working live across the boundary.
     """
     control_dir = Path(spec.control_dir)
     result = await run_agent_loop(
@@ -90,7 +91,6 @@ async def run_loop_from_spec(harness: Harness, spec: LoopSpec) -> AgentResult:
         agent=spec.agent,
         casefile=Path(spec.casefile),
         journal=Journal(spec.journal_path),
-        sandbox=None,
     )
     write_outcome(control_dir, result)
     return result

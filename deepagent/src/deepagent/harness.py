@@ -19,8 +19,6 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from airc_tools.sandbox import Sandbox
-
     from .journal import Journal
 
 log = logging.getLogger(__name__)
@@ -119,7 +117,6 @@ class Harness(Protocol):
         resume_prompt: str = "",
         casefile: Path | None = None,
         journal: "Journal | None" = None,
-        sandbox: "Sandbox | None" = None,
     ) -> HarnessRun: ...
 
 
@@ -135,7 +132,6 @@ class MockHarness:
     calls: int = 0
     invocations: list[tuple[str, bool]] = field(default_factory=list)  # (agent, resume)
     resume_prompts: list[str] = field(default_factory=list)  # resume_prompt per call
-    sandboxes: list[object] = field(default_factory=list)  # sandbox arg per call
 
     async def run_once(
         self,
@@ -149,11 +145,9 @@ class MockHarness:
         resume_prompt="",
         casefile=None,
         journal=None,
-        sandbox=None,
     ) -> HarnessRun:
         self.invocations.append((agent, resume))
         self.resume_prompts.append(resume_prompt)
-        self.sandboxes.append(sandbox)
         r = self.results[min(self.calls, len(self.results) - 1)]
         self.calls += 1
         result_path.parent.mkdir(parents=True, exist_ok=True)

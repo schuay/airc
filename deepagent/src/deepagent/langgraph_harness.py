@@ -47,7 +47,6 @@ from airc_core import (
 from airc_tools.edit import apply_edits as _apply_edits
 from airc_tools.edit import write_file as _write_file
 from airc_tools.read import read_file as _read_file
-from airc_tools.sandbox import Sandbox
 from airc_tools.shell import run_shell as _run_shell
 
 from .harness import REPORT_TOOL_NAME, AgentResult, HarnessRun, Report, to_result
@@ -164,9 +163,7 @@ def _abs(workdir: Path, path: str) -> str:
     return str(p if p.is_absolute() else workdir / p)
 
 
-def _worktree_tools(
-    workdir: Path, shell_timeout_s: float, sandbox: Sandbox | None = None
-) -> list:
+def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     """airc-tools shell/read/edit bound to one job's worktree.
 
     cwd and relative-path resolution are bound in the closure (not tool args), so
@@ -175,36 +172,27 @@ def _worktree_tools(
     tree. Per-thread binding also means no shared mutable cwd/env across the
     concurrent jobs a scheduler may run.
 
-    With a sandbox, shell commands run inside its bwrap/cgroup wrapper, and
-    read/edit -- which execute in this trusted process -- enforce the same
-    boundary via realpath containment. The latter matters because casefile
-    documents flow out to chat: an unconfined read_file would let injected
-    content exfiltrate credentials without any network egress.
+    These tools do no confinement of their own. Confinement is whole-process:
+    the caller runs the entire loop inside a bwrap worker (see worker.py), so the
+    mount namespace is the boundary and a per-call wrapper would only duplicate
+    it. Do not reintroduce a per-tool sandbox argument -- an in-process turn is
+    not a supported way to run untrusted work.
     """
     from langchain_core.tools import StructuredTool
 
     wt = Path(workdir)
 
     async def shell(command: str, timeout: float = shell_timeout_s) -> str:
-        return await _run_shell(command, cwd=str(wt), timeout=timeout, sandbox=sandbox)
+        return await _run_shell(command, cwd=str(wt), timeout=timeout)
 
     def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
-        p = _abs(wt, path)
-        if sandbox is not None and (deny := sandbox.check(p, write=False)):
-            return deny
-        return _read_file(p, offset, limit)
+        return _read_file(_abs(wt, path), offset, limit)
 
     def edit_file(path: str, edits: list[_Edit]) -> str:
-        p = _abs(wt, path)
-        if sandbox is not None and (deny := sandbox.check(p, write=True)):
-            return deny
-        return _apply_edits(p, [(e.search, e.replace) for e in edits])
+        return _apply_edits(_abs(wt, path), [(e.search, e.replace) for e in edits])
 
     def write_file(path: str, content: str) -> str:
-        p = _abs(wt, path)
-        if sandbox is not None and (deny := sandbox.check(p, write=True)):
-            return deny
-        return _write_file(p, content)
+        return _write_file(_abs(wt, path), content)
 
     return [
         StructuredTool.from_function(
@@ -389,7 +377,6 @@ class LangGraphHarness:
         schemas: Mapping[str, type[Report]] | None = None,
         coding_model_key: str = "default",
         coding_tool_groups: tuple[str, ...] = ("read", "active"),
-        sandboxed_tool_groups: tuple[str, ...] = ("read",),
         shell_timeout_s: float = 300.0,
     ) -> None:
         self._common = common
@@ -401,11 +388,6 @@ class LangGraphHarness:
                 f"no model configured: [models].{coding_model_key} or .default"
             )
         self._groups = list(coding_tool_groups)
-        # Sandboxed jobs get a narrower MCP surface: `active`-group tools
-        # (run_d8, benchmarks) execute in this trusted process outside any
-        # sandbox and take arbitrary paths, so a sandboxed job keeps only the
-        # read group and runs d8/tests/gdb/perf through its confined shell.
-        self._sandboxed_groups = list(sandboxed_tool_groups)
         self._shell_timeout_s = shell_timeout_s
         self._schemas: dict[str, type[Report]] = dict(schemas or {})
         self._system_base = system_prompt
@@ -414,7 +396,6 @@ class LangGraphHarness:
         self._stack = contextlib.AsyncExitStack()
         self._toolset: MCPToolset | None = None
         self._v8_tools: list = []
-        self._v8_tools_sandboxed: list = []
         self._graphs: OrderedDict[str, object] = OrderedDict()
         self._init_lock = asyncio.Lock()
 
@@ -428,9 +409,6 @@ class LangGraphHarness:
             ts = MCPToolset(self._common.mcp_servers, self._common.tool_groups)
             await self._stack.enter_async_context(ts)
             self._v8_tools = ts.tools_for(ts.resolve_patterns(self._groups))
-            self._v8_tools_sandboxed = ts.tools_for(
-                ts.resolve_patterns(self._sandboxed_groups)
-            )
             if ts.instructions:
                 self._system = (
                     f"{self._system_base}\n\n## MCP server instructions\n\n"
@@ -452,10 +430,7 @@ class LangGraphHarness:
         thread_id: str,
         workdir: Path,
         schema: type[Report],
-        sandbox: Sandbox | None = None,
     ):
-        # A sandbox is a per-job constant, so the thread cache never mixes
-        # sandboxed and unsandboxed tool sets for one thread.
         if thread_id in self._graphs:
             self._graphs.move_to_end(thread_id)
             return self._graphs[thread_id]
@@ -470,10 +445,9 @@ class LangGraphHarness:
             RequireStructuredResultMiddleware,
         )
 
-        mcp_tools = self._v8_tools_sandboxed if sandbox is not None else self._v8_tools
         tools = [
-            *mcp_tools,
-            *_worktree_tools(workdir, self._shell_timeout_s, sandbox),
+            *self._v8_tools,
+            *_worktree_tools(workdir, self._shell_timeout_s),
         ]
         mw = base_middleware(
             self._model_id,
@@ -546,7 +520,6 @@ class LangGraphHarness:
         resume_prompt: str = "",
         casefile: Path | None = None,
         journal: Journal | None = None,
-        sandbox: Sandbox | None = None,
     ) -> HarnessRun:
         await self._ensure_init()
         # One thread per stage-loop (its control dir); stable across the loop's
@@ -562,7 +535,7 @@ class LangGraphHarness:
         # carry the real state), with any phase instruction (reflect/final)
         # appended so a cache eviction cannot swallow it.
         thread_live = thread_id in self._graphs
-        graph = self._graph_for(thread_id, workdir, schema, sandbox)
+        graph = self._graph_for(thread_id, workdir, schema)
 
         default_resume = (
             "Continue from where you left off -- your previous report was a"

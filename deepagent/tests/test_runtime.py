@@ -4,7 +4,9 @@
 """Pure-seam coverage that needs no live model: the worktree-bound tools, the
 Report -> AgentResult flattening, and the skill-index renderer."""
 
-from deepagent import Disposition, Report, Sandbox, render_skill_index, to_result
+import inspect
+
+from deepagent import Disposition, Report, render_skill_index, to_result
 from deepagent.langgraph_harness import _abs, _worktree_tools
 
 
@@ -41,37 +43,13 @@ def test_bound_edit_and_read_resolve_relative(tmp_path):
     assert "x = 1" in out
 
 
-def test_sandboxed_read_edit_contained(tmp_path):
-    wt = tmp_path / "wt"
-    case = tmp_path / "case"
-    wt.mkdir()
-    case.mkdir()
-    (case / "JOB.md").write_text("job")
-    secret = tmp_path / "secret.txt"
-    secret.write_text("s3cret")
-    box = Sandbox(root=wt, rw_paths=(case,), use_cgroup=False)
-    tools = {t.name: t for t in _worktree_tools(wt, 10.0, sandbox=box)}
-
-    # Inside the boundary: worktree-relative and casefile-absolute both work.
-    tools["edit_file"].invoke(
-        {"path": "a.py", "edits": [{"search": "", "replace": "x = 1\n"}]}
-    )
-    assert "x = 1" in tools["read_file"].invoke({"path": "a.py"})
-    assert "job" in tools["read_file"].invoke({"path": str(case / "JOB.md")})
-
-    # Outside: refused by the policy, and never touched.
-    out = tools["read_file"].invoke({"path": str(secret)})
-    assert "outside" in out and "s3cret" not in out
-    out = tools["edit_file"].invoke(
-        {"path": str(secret), "edits": [{"search": "s3cret", "replace": "gone"}]}
-    )
-    assert "outside" in out and secret.read_text() == "s3cret"
-    out = tools["write_file"].invoke({"path": str(secret), "content": "gone"})
-    assert "outside" in out and secret.read_text() == "s3cret"
-
-    # A symlink inside the worktree cannot smuggle a read outside it.
-    (wt / "link.txt").symlink_to(secret)
-    assert "outside" in tools["read_file"].invoke({"path": "link.txt"})
+def test_worktree_tools_take_no_confinement_argument():
+    # The tools do no containment of their own -- the caller runs the whole loop
+    # inside a bwrap worker, so the mount namespace is the boundary. Pinned as a
+    # test because reintroducing a per-call sandbox argument would silently
+    # recreate a second, unexercised copy of the policy (see worker.py).
+    params = inspect.signature(_worktree_tools).parameters
+    assert list(params) == ["workdir", "shell_timeout_s"]
 
 
 def test_abs(tmp_path):

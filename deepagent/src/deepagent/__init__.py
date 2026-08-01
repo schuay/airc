@@ -8,8 +8,10 @@ bring your own state machine, job spec, prompts, and verdict schemas. See
 DESIGN.md for the package/application boundary and how to build a new app.
 """
 
-# Re-exported so applications can build confinement profiles for run_once /
-# run_agent_loop without depending on airc-tools directly.
+# Re-exported so applications can build the confinement profile they hand to a
+# worker (see worker.py) without depending on airc-tools directly. Confinement
+# is whole-process: a Sandbox wraps the worker subprocess, and neither run_once
+# nor run_agent_loop takes one.
 from airc_tools.sandbox import Sandbox
 
 from .harness import (

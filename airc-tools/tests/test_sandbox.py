@@ -170,31 +170,6 @@ def test_cgroup_prefix(profile, monkeypatch):
     assert boxed.wrapper()[0] == "bwrap"
 
 
-def test_check_containment(profile, tmp_path):
-    inside = profile.root / "a.cc"
-    case_doc = profile.rw_paths[0] / "DRAFT.md"
-    dep_file = profile.ro_paths[0] / "header.h"
-    secret = profile.opaque_ro_paths[0] / "tokens.json"
-    outside = tmp_path / "elsewhere.txt"
-
-    assert profile.check(inside, write=True) is None
-    assert profile.check(case_doc, write=True) is None
-    assert profile.check(dep_file, write=False) is None
-    # Deps are read-only; credentials and stray paths are refused both ways.
-    assert "outside" in profile.check(dep_file, write=True)
-    assert "outside" in profile.check(secret, write=False)
-    assert "outside" in profile.check(outside, write=False)
-    assert "outside" in profile.check("/home", write=False)
-
-
-def test_check_resolves_symlink_escape(profile, tmp_path):
-    target = tmp_path / "secret.txt"
-    target.write_text("s")
-    link = profile.root / "innocent.txt"
-    link.symlink_to(target)
-    assert "outside" in profile.check(link, write=False)
-
-
 needs_bwrap = pytest.mark.skipif(
     shutil.which("bwrap") is None, reason="bubblewrap not installed"
 )
@@ -290,16 +265,6 @@ def test_ro_over_binds_land_after_the_rw_parent(tmp_path):
         if argv[i] == "--ro-bind" and argv[i + 1] == str(gitdir / "config")
     )
     assert config_ro > gitdir_rw  # ro-over shadows the rw parent
-
-
-def test_check_refuses_write_to_ro_over_but_allows_read_and_rw_siblings(tmp_path):
-    gitdir, boxed = _ro_over_box(tmp_path)
-    # refs under the rw .git are writable (repo state); config/hooks are not,
-    # but stay readable.
-    assert boxed.check(gitdir / "refs" / "heads" / "x", write=True) is None
-    assert "read-only" in boxed.check(gitdir / "config", write=True)
-    assert "read-only" in boxed.check(gitdir / "hooks" / "post-commit", write=True)
-    assert boxed.check(gitdir / "config", write=False) is None
 
 
 @needs_bwrap
