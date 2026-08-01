@@ -437,7 +437,7 @@ class LangGraphHarness:
 
         from langchain.agents import create_agent
         from langchain.agents.middleware import ModelCallLimitMiddleware
-        from langchain.agents.structured_output import ToolStrategy
+        from langchain.agents.structured_output import OutputToolBinding, ToolStrategy
         from langgraph.checkpoint.memory import InMemorySaver
 
         from airc_core import (
@@ -449,10 +449,37 @@ class LangGraphHarness:
             *self._v8_tools,
             *_worktree_tools(workdir, self._shell_timeout_s),
         ]
+        # ToolStrategy names the structured-output tool after the schema class
+        # (DraftReport/ReviewReport/...). Override it to one fixed name so every
+        # stage's prompt can name the exact tool -- schema_specs[0].name is what
+        # langchain builds the tool with (structured_output.py: name=spec.name).
+        # The schema (its fields) is unchanged, so structured_response is still
+        # parsed into the Report subclass.
+        strategy = ToolStrategy(
+            schema=schema, handle_errors=True, tool_message_content=_REPORT_ACK
+        )
+        strategy.schema_specs[0].name = REPORT_TOOL_NAME
+        # The report tool must be in the CACHED tool list, though not in
+        # create_agent(tools=...) -- langchain appends the structured-output tool
+        # itself at bind time (factory: final_tools.extend(structured_tools)), so
+        # passing it here too would bind it twice.
+        #
+        # Why it has to be cached: a Vertex request that carries cached_content
+        # DROPS tools and tool_config entirely (langchain_google_vertexai
+        # _request_from_cached_content lists both as not_allowed_parameters and
+        # logs "will be ignored"). Whatever bind_tools attached is therefore
+        # invisible on any cache-served call, and the cache is built on the first
+        # call of every turn -- so a report tool that lives only in the binding is
+        # a tool the model is told to call and never shown. The tools the model
+        # sees are exactly the ones handed to the cache.
+        cached_tools = [
+            *tools,
+            OutputToolBinding.from_schema_spec(strategy.schema_specs[0]).tool,
+        ]
         mw = base_middleware(
             self._model_id,
             self._system,
-            tools,
+            cached_tools,
             # Compact old history at the ceiling on the cheap model; falls back to
             # the agent model if no filter model is configured.
             summarizer_model_id=self._common.models.get("filter")
@@ -461,7 +488,7 @@ class LangGraphHarness:
         if cache := growing_cache_middleware(
             self._model_id,
             self._system,
-            tools,
+            cached_tools,
             self._common.caching_explicit,
             self._common.cache_ttl_minutes,
             _MAX_MODEL_CALLS,
@@ -484,16 +511,6 @@ class LangGraphHarness:
             ),
             ModelCallLimitMiddleware(run_limit=_MAX_MODEL_CALLS, exit_behavior="end"),
         ]
-        # ToolStrategy names the structured-output tool after the schema class
-        # (DraftReport/ReviewReport/...). Override it to one fixed name so every
-        # stage's prompt can name the exact tool -- schema_specs[0].name is what
-        # langchain builds the tool with (structured_output.py: name=spec.name).
-        # The schema (its fields) is unchanged, so structured_response is still
-        # parsed into the Report subclass.
-        strategy = ToolStrategy(
-            schema=schema, handle_errors=True, tool_message_content=_REPORT_ACK
-        )
-        strategy.schema_specs[0].name = REPORT_TOOL_NAME
         graph = create_agent(
             make_model(self._model_id),
             tools=tools,

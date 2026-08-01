@@ -6,7 +6,10 @@ Report -> AgentResult flattening, and the skill-index renderer."""
 
 import inspect
 
+import pytest
+
 from deepagent import Disposition, Report, render_skill_index, to_result
+from deepagent.harness import REPORT_TOOL_NAME
 from deepagent.langgraph_harness import _abs, _worktree_tools
 
 
@@ -55,6 +58,71 @@ def test_worktree_tools_take_no_confinement_argument():
 def test_abs(tmp_path):
     assert _abs(tmp_path, "/etc/hosts") == "/etc/hosts"
     assert _abs(tmp_path, "rel/f") == str(tmp_path / "rel" / "f")
+
+
+def test_vertex_drops_bound_tools_when_serving_from_cache():
+    """The constraint the report tool must be cached for.
+
+    A Vertex request carrying cached_content silently discards tools and
+    tool_config (_request_from_cached_content lists them as
+    not_allowed_parameters and only logs). So anything bind_tools attached --
+    including the structured-output report tool langchain appends at bind time --
+    is invisible on every cache-served call. Pinned here because it is an
+    upstream behaviour we depend on and cannot see from our own code: were it to
+    change, the workaround in _graph_for becomes dead weight rather than a
+    silent bug.
+    """
+    pytest.importorskip("langchain_google_vertexai")
+    from langchain_core.messages import HumanMessage
+    from langchain_core.tools import tool
+    from langchain_google_vertexai import ChatVertexAI
+
+    @tool
+    def probe(x: str) -> str:
+        """A tool that must survive into the request."""
+        return x
+
+    kw = {"model": "gemini-2.0-flash", "project": "p", "location": "us-central1"}
+    plain = ChatVertexAI(**kw)._prepare_request_gemini(
+        [HumanMessage("hi")], tools=[probe]
+    )
+    assert plain.tools, "without a cache the bound tools reach the request"
+
+    cached = ChatVertexAI(cached_content="C1", **kw)._prepare_request_gemini(
+        [HumanMessage("hi")], tools=[probe]
+    )
+    assert not cached.tools, "cached_content drops bound tools; cache them instead"
+
+
+def test_report_tool_is_in_the_cached_tool_list(tmp_path, monkeypatch):
+    """The report tool must reach the growing cache, or it reaches the model at all.
+
+    Vertex serves a cache-bound call without the tools bind_tools attached (see
+    the test above), and the cache is built on a turn's first call -- so a report
+    tool present only in the binding is one the prompts order the agent to call
+    and the model is never shown. That ends every turn in the re-ask path with
+    structured_response unset.
+    """
+    from airc_core import CommonConfig
+    from deepagent import langgraph_harness as lh
+
+    seen: dict[str, list] = {}
+
+    def spy(model_id, system, tools, *args, **kwargs):
+        seen["tools"] = list(tools)
+        return None  # no cache overlay; we only want the tool list it was handed
+
+    monkeypatch.setattr(lh, "growing_cache_middleware", spy)
+    monkeypatch.setattr(lh, "base_middleware", lambda *a, **k: [])
+    monkeypatch.setattr(lh, "make_model", lambda *a, **k: object())
+
+    common = CommonConfig()
+    common.models = {"default": "google_vertexai:gemini-3.6-flash"}
+    h = lh.LangGraphHarness(common)
+    h._v8_tools = []
+    h._graph_for("t1", tmp_path, Report)
+
+    assert REPORT_TOOL_NAME in {t.name for t in seen["tools"]}
 
 
 def test_to_result_flattens_extra_fields():
