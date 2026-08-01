@@ -321,23 +321,24 @@ class EmptyCandidateError(Exception):
 
     Gemini's known bug: returns finish_reason=STOP with zero parts -- reads as a
     benign end-of-turn but carries nothing (the silent-dead-turn shape). Raised
-    by _EmptyCandidateRetry after inspecting the response, caught by
-    ModelRetryMiddleware (via _is_retryable), and retried with the same backoff
-    as a 429/5xx. On exhaustion, on_failure="error" re-raises; the harness
-    catches it by type and surfaces a named diagnostic instead of a generic
-    traceback. Treated as equivalent to HTTP 5xx / empty response.text, per the
-    observed provider-flake family.
+    by _EmptyCandidateRetry AFTER its own single mutated retry (drop the cached
+    prefix + append a nudge) also comes back empty, so the empty is deterministic
+    rather than a one-off flake. Not retryable by ModelRetryMiddleware (see
+    _is_retryable): an identical resend would reproduce it. on_failure="error"
+    re-raises; the harness catches it by type and surfaces a named diagnostic
+    instead of a generic traceback.
     """
 
 
 def _is_retryable(exc: Exception) -> bool:
     """Retry policy for ModelRetryMiddleware: transient provider errors (429/503/
-    overloaded) OR a zero-part empty candidate (Gemini's bug). Unifies the flake
-    family under one backoff. _is_transient stays string-matched (provider-
-    dependent wording) for the bare retrying() helper which never sees empty
-    candidates (single-shot calls, no ToolStrategy)."""
-    if isinstance(exc, EmptyCandidateError):
-        return True
+    overloaded) only. A zero-part empty candidate is NOT retried here --
+    _EmptyCandidateRetry owns that path and mutates the request on its single
+    retry (drop the cached prefix + append a nudge), because an identical resend
+    reproduces the deterministic empty (observed: 6 identical calls, 0 output
+    tokens). _is_transient stays string-matched (provider-dependent wording) for
+    the bare retrying() helper which never sees empty candidates (single-shot
+    calls, no ToolStrategy)."""
     return _is_transient(exc)
 
 
@@ -626,51 +627,79 @@ class _EmptyCandidateRetry(AgentMiddleware):
     half its docstring describes (durable checkpoints poisoned before either
     middleware existed).
 
-    Placement: listed AFTER ModelRetryMiddleware in base_middleware, so the
-    retry layer wraps this and catches its raise. The growing cache (appended
-    by the harness after base_middleware) sits inside this middleware, so a
-    retry resends the same cached request. The first retry keeps it that way --
-    a transient flake re-rolls cheaply against a warm cache. From the second on,
-    _empty_retry tells the cache to step aside and send the request uncached:
-    a repeat empty on an unchanged request is deterministic, and re-reading the
-    same cached prefix can only reproduce it. Observed in the wild: two
-    consecutive turns on one thread, 7 calls with 0 output tokens, every call
-    reading an identical cached prefix.
-
-    That step-aside doubles as the diagnostic we otherwise lack. If the uncached
-    call produces output, the cached prefix was the fault; if it is still empty,
-    the cache is exonerated and the poison is in the message history. The log
-    line below names which, so the next occurrence is evidence rather than
-    another round of inference.
+    Placement: listed AFTER ModelRetryMiddleware in base_middleware, so a raise
+    propagates up to it. EmptyCandidateError is NOT retryable (see _is_retryable):
+    this middleware owns the empty retry, because ModelRetryMiddleware would
+    resend the identical request and a deterministic zero-part candidate
+    reproduces on identical input.
     """
 
     async def awrap_model_call(self, request, handler):
+        # Attempt 1: send as-is. A zero-part Gemini candidate is often a one-off
+        # flake, so a single identical call against a warm cache is the cheap
+        # first move.
         resp = await handler(request)
-        for msg in resp.result:
-            if not isinstance(msg, AIMessage):
-                continue
-            tool_calls = msg.tool_calls or []
-            content = str(msg.content or "").strip()
-            if not tool_calls and not content:
-                meta = msg.response_metadata or {}
-                reason = meta.get("finish_reason", "")
-                n = _empty_retry.get() + 1
-                _empty_retry.set(n)
-                if n > 1:
-                    log.warning(
-                        "empty candidate x%d (finish_reason=%s); next retry goes"
-                        " uncached to test whether the cached prefix is the fault",
-                        n,
-                        reason or "unknown",
-                    )
-                raise EmptyCandidateError(
-                    f"empty candidate (finish_reason={reason or 'unknown'})"
-                )
-        # A non-empty response ends the episode: reset so a later empty in the
-        # same turn starts its own retry ladder with a warm cache.
-        if _empty_retry.get():
+        empty = _empty_ai_message(resp)
+        if empty is None:
+            # A non-empty response ends the episode: clear the counter so a later
+            # empty in the same turn starts fresh against a warm cache.
+            if _empty_retry.get():
+                _empty_retry.set(0)
+            return resp
+        # Still empty. Do NOT raise for an identical retry -- the cache (nested
+        # inside) would re-read the same prefix and the model would reproduce the
+        # zero-part candidate. Mutate, once: lift _empty_retry past the growing
+        # cache's step-aside threshold (>=2) so it drops any cached prefix -- a
+        # poisoned cache can only reproduce the empty -- and append a nudge that
+        # forces output, in case the poison is in the message history. Bounded:
+        # one mutated retry, then surface. Raises EmptyCandidateError (not
+        # retryable) so it propagates to the harness as a named dead turn.
+        _empty_retry.set(2)
+        log.warning(
+            "empty candidate (finish_reason=%s); retrying once uncached with a"
+            " nudge to force output",
+            _finish_reason(empty),
+        )
+        resp2 = await handler(
+            request.override(messages=[*request.messages, _EMPTY_NUDGE])
+        )
+        empty2 = _empty_ai_message(resp2)
+        if empty2 is None:
             _empty_retry.set(0)
-        return resp
+            return resp2
+        raise EmptyCandidateError(
+            f"empty candidate (finish_reason={_finish_reason(empty2)})"
+        )
+
+
+# The one-shot nudge appended on a repeated empty candidate. Ephemeral --
+# _EmptyCandidateRetry overrides the request with it, never mutates graph state,
+# so it cannot reach the checkpoint and poison the next turn. Names the empty
+# explicitly because Gemini's zero-part STOP reads as a benign end-of-turn.
+_EMPTY_NUDGE = HumanMessage(
+    "Your previous response was empty: zero parts, no text and no tool calls"
+    " (finish_reason STOP). That is a known provider bug, not a valid end-of-turn."
+    " Regenerate now -- call a tool or write your reply. An empty response is"
+    " never correct here."
+)
+
+
+def _empty_ai_message(resp):
+    """The first zero-part AIMessage in resp (no text AND no tool calls), or None.
+
+    A tool-calling step with empty text carries parts (the tool_calls), so it is
+    not empty by this definition. resp.result is the message list the model
+    returned; a non-AI response (e.g. a structured-output object) has none."""
+    for msg in getattr(resp, "result", ()) or ():
+        if not isinstance(msg, AIMessage):
+            continue
+        if not (msg.tool_calls or []) and not str(msg.content or "").strip():
+            return msg
+    return None
+
+
+def _finish_reason(msg: AIMessage) -> str:
+    return (msg.response_metadata or {}).get("finish_reason", "") or "unknown"
 
 
 class _CallBudgetState(AgentState):
@@ -1121,9 +1150,10 @@ def base_middleware(
         # poisons the next turn (Gemini rejects empty parts).
         _DropEmptyResponses(),
         # Backoff (~4min worst case per model call, see _RETRY_MAX) outlasts a
-        # per-minute 429 quota window, then fails the turn visibly. _is_retryable
-        # extends _is_transient with EmptyCandidateError so a zero-part Gemini
-        # response retries through the same path as a 429.
+        # per-minute 429 quota window, then fails the turn visibly. Only
+        # transient provider errors; a zero-part empty candidate is owned by
+        # _EmptyCandidateRetry (which mutates the request on its retry), not
+        # retried here -- an identical resend reproduces the deterministic empty.
         ModelRetryMiddleware(
             retry_on=_is_retryable,
             on_failure="error",
@@ -1341,7 +1371,12 @@ class _GrowingPrefixCache(AgentMiddleware):
         try:
             await self._delete(name)
         except Exception as e:
-            log.debug(
+            # WARNING, not debug: a delete that fails leaks a cached_content
+            # (billable, and -- if it were poisoned -- able to be re-read). The
+            # empty-candidate step-aside logs "dropping" before this; pairing a
+            # failed delete with a visible warning is how an operator tells a
+            # busted delete from a successful one at default log level.
+            log.warning(
                 "growing cache delete failed (%s: %s); relies on TTL",
                 type(e).__name__,
                 e,

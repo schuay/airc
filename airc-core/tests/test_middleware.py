@@ -223,9 +223,11 @@ async def test_empty_candidate_exhausts_and_raises_by_type(monkeypatch):
     import airc_core.agent as agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
-    # A deterministic empty (a cache-fault, not a flake) exhausts the budget and
-    # raises EmptyCandidateError -- a NAMED failure the harness catches by type,
-    # never a silent dead turn.
+    # A deterministic empty (a cache-fault or history poison, not a flake)
+    # exhausts _EmptyCandidateRetry's own retry -- one identical call, then one
+    # uncached+nudged call -- and raises EmptyCandidateError, a NAMED failure the
+    # harness catches by type, never a silent dead turn. Two calls total, not the
+    # six identical resends the old ModelRetryMiddleware loop churned through.
     model, graph = _candidate_agent([_EMPTY_STOP])
     try:
         await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
@@ -233,7 +235,7 @@ async def test_empty_candidate_exhausts_and_raises_by_type(monkeypatch):
     except EmptyCandidateError:
         raised = True
     assert raised
-    assert model.calls == agent._RETRY_MAX + 1
+    assert model.calls == 2
 
 
 async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypatch):
@@ -268,11 +270,13 @@ async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypat
 
 async def _retry_over_empty(responses):
     """Compose ModelRetryMiddleware over _EmptyCandidateRetry the way
-    base_middleware nests them, and return the _empty_retry count each inner
-    attempt observed. Exercised at the middleware level, not through a graph:
-    langgraph runs nodes in a copied context, so a contextvar set inside the
-    node is invisible to the caller. What matters is propagation to the
-    middleware NESTED inside the retry (the cache), which shares this context.
+    base_middleware nests them, and return (per inner call) the _empty_retry
+    count the cache would key its step-aside on and the request's message count
+    (so a mutated retry is visible). Exercised at the middleware level, not
+    through a graph: langgraph runs nodes in a copied context, so a contextvar
+    set inside the node is invisible to the caller. What matters is propagation
+    to the middleware NESTED inside the retry (the cache), which shares this
+    context.
     """
     import airc_core.agent as agent
 
@@ -287,39 +291,40 @@ async def _retry_over_empty(responses):
     )
     seen, box = [], list(responses)
 
-    async def inner(_req):
+    async def inner(req):
         # Stands in for the growing cache: records the count it would key its
-        # step-aside on at the moment it is asked to serve the call.
-        seen.append(agent._empty_retry.get())
+        # step-aside on at the moment it is asked to serve the call, and the
+        # request length (the nudge _EmptyCandidateRetry appends grows it).
+        seen.append((agent._empty_retry.get(), len(req.messages)))
         return type("R", (), {"result": [AIMessage(**box.pop(0))]})()
 
     agent._empty_retry.set(0)
     try:
         await retry.awrap_model_call(
-            object(), lambda r: empty.awrap_model_call(r, inner)
+            _Req(0, [HumanMessage("go")]), lambda r: empty.awrap_model_call(r, inner)
         )
     except EmptyCandidateError:
         pass
     return seen
 
 
-async def test_the_retry_counter_escalates_for_the_middleware_nested_inside():
-    # The count the cache keys its step-aside on. Attempt 1 sees 0 (serve cached
-    # -- a flake re-rolls cheaply against a warm prefix); attempt 2 sees 1 and
-    # attempt 3 sees 2, crossing the >1 threshold. Without escalation the cache
-    # would re-read the same prefix on every retry, which is exactly the wedge
-    # observed in the wild (7 calls, 0 output tokens, one identical cached read).
-    assert await _retry_over_empty([_EMPTY_STOP] * 3) == [0, 1, 2]
+async def test_a_repeated_empty_is_retried_once_uncached_with_a_nudge():
+    # The count the cache keys its step-aside on, and the mutation. The first
+    # call sees _empty_retry 0 (serve cached -- a flake re-rolls cheaply against
+    # a warm prefix) on the original 1-message request; the retry sees 2 (past
+    # the >1 step-aside threshold, so the cache drops its prefix) on a request
+    # grown by the nudge. Bounded to those two calls: no sixth identical resend.
+    assert await _retry_over_empty([_EMPTY_STOP] * 3) == [(0, 1), (2, 2)]
 
 
 async def test_a_non_empty_response_resets_the_retry_counter():
     import airc_core.agent as agent
 
     # One empty then a real reply: the episode is over, so a later empty in the
-    # same turn starts its own ladder against a warm cache rather than stepping
-    # aside immediately.
+    # same turn starts fresh against a warm cache rather than stepping aside
+    # immediately.
     seen = await _retry_over_empty([_EMPTY_STOP, {"content": "the answer"}])
-    assert seen == [0, 1]
+    assert seen == [(0, 1), (2, 2)]
     assert agent._empty_retry.get() == 0
 
 
