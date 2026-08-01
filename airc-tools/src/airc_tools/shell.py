@@ -77,6 +77,10 @@ _SOURCE_SUFFIXES = (
     ".gypi",
     ".star",
     ".tq",
+    # Patch and diff files: writing patch files via heredoc to apply later is
+    # authoring source code through the shell.
+    ".diff",
+    ".patch",
 )
 # Redirect targets, ignoring fd duplication (`2>&1`, `>&2`) and fd-prefixed
 # redirects (`2> x`). The lookbehind keeps `2>&1` out; `[^&]` on the target keeps

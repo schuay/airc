@@ -56,6 +56,8 @@ async def test_write_trap_blocks_authoring_a_source_file():
         "perl -i -pe 's/a/b/' src/a.cc",
         "git apply /cf/patch.diff",
         "patch -p1 < /cf/patch.diff",
+        "cat <<'EOF' > patch.diff\n--- a/src/a.cc\n+++ b/src/a.cc\nEOF",
+        "echo x > patch.patch",
         "tee src/compiler/foo.cc <<'EOF'\nint x;\nEOF",
         "echo x >> BUILD.gn",
     ):
