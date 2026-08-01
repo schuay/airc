@@ -520,3 +520,112 @@ async def test_end_to_end_graph_grows_cache_and_sends_tail():
     grown = [m for m in cached_calls if not any(isinstance(x, HumanMessage) for x in m)]
     assert grown, "expected at least one sub-tail call once the cache grew"
     assert all(isinstance(m[0], SystemMessage) for m in cached_calls)
+
+
+def test_seed_vertex_cache_globals_seeds_location_project_and_file_creds(
+    monkeypatch, tmp_path
+):
+    import json
+    from google.cloud.aiplatform import initializer
+    from airc_core.agent import _seed_vertex_cache_globals, _set_vertex_cache_region
+
+    assert _set_vertex_cache_region is _seed_vertex_cache_globals
+
+    tok = tmp_path / "vertex.json"
+    tok.write_text(json.dumps({"token": "t", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}))
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east4")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tok))
+
+    loc = _seed_vertex_cache_globals()
+    assert loc == "us-east4"
+    assert initializer.global_config._location == "us-east4"
+    assert initializer.global_config._project == "test-project"
+    assert initializer.global_config._credentials.token == "t"
+
+
+def test_seed_vertex_cache_globals_skips_creds_when_token_absent(
+    monkeypatch, tmp_path
+):
+    from google.cloud.aiplatform import initializer
+    from airc_core.agent import _seed_vertex_cache_globals
+
+    sentinel = "ORIGINAL_SENTINEL"
+    initializer.global_config._credentials = sentinel
+
+    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tmp_path / "gone.json"))
+    _seed_vertex_cache_globals()
+    assert initializer.global_config._credentials == sentinel
+
+    monkeypatch.delenv("AIRC_VERTEX_TOKEN_FILE", raising=False)
+    _seed_vertex_cache_globals()
+    assert initializer.global_config._credentials == sentinel
+
+
+async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_token_file(
+    monkeypatch, tmp_path
+):
+    import json
+    from google.cloud.aiplatform import initializer
+    import langchain_google_vertexai as lgv
+    from vertexai.preview import caching
+    from airc_core.agent import _growing_cache_fns
+
+    captured_create = {}
+    captured_delete = {}
+
+    def fake_create_context_cache(model, messages, **kw):
+        captured_create["creds"] = initializer.global_config._credentials
+        captured_create["location"] = initializer.global_config._location
+        captured_create["project"] = initializer.global_config._project
+        return "cache-123"
+
+    def fake_cached_content_init(self, name):
+        captured_delete["creds"] = initializer.global_config._credentials
+        captured_delete["location"] = initializer.global_config._location
+        captured_delete["project"] = initializer.global_config._project
+        self._name = name
+
+    def fake_cached_content_delete(self):
+        captured_delete["deleted"] = getattr(self, "_name", None)
+
+    monkeypatch.setattr(lgv, "create_context_cache", fake_create_context_cache)
+    monkeypatch.setattr(caching.CachedContent, "__init__", fake_cached_content_init)
+    monkeypatch.setattr(caching.CachedContent, "delete", fake_cached_content_delete)
+
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project-123")
+
+    # Scenario 1: AIRC_VERTEX_TOKEN_FILE points to an absent file (not yet minted)
+    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tmp_path / "not_yet_minted.json"))
+    initializer.global_config._credentials = None
+    initializer.global_config._location = None
+    initializer.global_config._project = None
+
+    create, delete, _, _ = _growing_cache_fns("google_vertexai:gemini-2.5-flash", [], 10)
+
+    cache_name = await create([SystemMessage("SYS")])
+    assert cache_name == "cache-123"
+    assert captured_create["location"] == "us-central1"
+    assert captured_create["project"] == "test-project-123"
+    assert captured_create["creds"] is None
+
+    await delete("cache-123")
+    assert captured_delete["location"] == "us-central1"
+    assert captured_delete["project"] == "test-project-123"
+    assert captured_delete["creds"] is None
+
+    # Scenario 2: AIRC_VERTEX_TOKEN_FILE is present and valid
+    tok = tmp_path / "vertex.json"
+    tok.write_text(
+        json.dumps({"token": "real-token-val", "expiry": "Fri Jul 10 12:07:06 UTC 2026"})
+    )
+    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tok))
+
+    initializer.global_config._credentials = None
+    await create([SystemMessage("SYS")])
+    assert captured_create["creds"].token == "real-token-val"
+
+    initializer.global_config._credentials = None
+    await delete("cache-123")
+    assert captured_delete["creds"].token == "real-token-val"

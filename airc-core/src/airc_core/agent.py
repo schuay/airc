@@ -1005,14 +1005,23 @@ class GroundingReminderMiddleware(AgentMiddleware):
         return self.before_model(state, runtime)
 
 
-def _set_vertex_cache_region() -> str:
-    """Pin the aiplatform initializer to the model's serving region and return
-    it. CachedContent.create reads the region from the initializer (default
-    us-central1), not the model, and a cache must share the model's serving
-    region. Set it directly -- aiplatform.init() would too but eagerly builds a
-    client that imports pyOpenSSL (absent in some envs). Pre-set the project too
-    so reading global_config.project does not trigger the SDK's lazy project-id
-    normalization (an otherwise-needless Cloud Resource Manager projects.get).
+def _seed_vertex_cache_globals() -> str:
+    """Seed `aiplatform.initializer.global_config` with location, project, and
+    credentials before calling `CachedContent.create` or `.delete`.
+
+    `langchain_google_vertexai.create_context_cache` is incomplete: it takes a
+    ChatVertexAI model instance but never passes the model's location, project,
+    or credentials to `caching.CachedContent.create`, which instead reads from
+    the SDK initializer (`global_config`). `caching.CachedContent(name).delete`
+    similarly relies on global initializer state.
+
+    We seed `global_config` directly:
+      - `_location`: must match the model's serving region (default us-central1).
+      - `_project`: avoids lazy normalization that triggers an otherwise-needless
+        Cloud Resource Manager `projects.get` call.
+      - `_credentials`: seeds `_vertex_file_credentials` when `AIRC_VERTEX_TOKEN_FILE`
+        is set, so sandboxed calls authenticate via the brokered token file rather
+        than falling back to GCE metadata ADC.
     """
     from google.cloud.aiplatform import initializer
 
@@ -1020,7 +1029,15 @@ def _set_vertex_cache_region() -> str:
     initializer.global_config._location = location
     if project := os.environ.get("GOOGLE_CLOUD_PROJECT"):
         initializer.global_config._project = project
+    if tok := os.environ.get("AIRC_VERTEX_TOKEN_FILE"):
+        if os.path.exists(tok):
+            from .model import _vertex_file_credentials
+
+            initializer.global_config._credentials = _vertex_file_credentials(tok)
     return location
+
+
+_set_vertex_cache_region = _seed_vertex_cache_globals  # backward compatibility alias
 
 
 # Summarization fires here, deliberately BELOW the shed's _HARD_FRACTION, and keeps
@@ -1266,7 +1283,7 @@ def _growing_cache_fns(model_id, tools, ttl_minutes):
     async def create(prefix: list) -> str:
         from langchain_google_vertexai import create_context_cache
 
-        _set_vertex_cache_region()
+        _seed_vertex_cache_globals()
         return await asyncio.to_thread(
             create_context_cache,
             make_model(model_id),
@@ -1278,6 +1295,7 @@ def _growing_cache_fns(model_id, tools, ttl_minutes):
     async def delete(name: str) -> None:
         from vertexai.preview import caching
 
+        _seed_vertex_cache_globals()
         await asyncio.to_thread(caching.CachedContent(name).delete)
 
     def model_for(name: str):
