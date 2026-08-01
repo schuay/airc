@@ -422,3 +422,31 @@ def test_assert_no_leak_raises_on_a_later_ancestor(tmp_path):
     bad = ["bwrap", "--tmpfs", str(home), "--ro-bind", str(tmp_path), str(tmp_path)]
     with pytest.raises(ValueError, match="leaks"):
         boxed._assert_no_leak(bad)
+
+
+def test_assert_no_leak_raises_on_a_later_bind_of_the_exact_path(tmp_path):
+    # Equality, not just ancestry: a bind that remounts the tmpfs mount point
+    # itself replaces the blanked scratch with the real directory underneath.
+    # The guard leans on is_relative_to being true for equality, so a refactor
+    # to a strict-ancestor test would open exactly this hole -- pin it.
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(root=root, tmpfs=((str(home), 1 << 20),), use_cgroup=False)
+    bad = ["bwrap", "--tmpfs", str(home), "--ro-bind", str(home), str(home)]
+    with pytest.raises(ValueError, match="leaks"):
+        boxed._assert_no_leak(bad)
+    # Same for the rw root: a later bind over it swaps the worktree for real
+    # disk, which is writable and so hides the swap.
+    bad_root = [
+        "bwrap",
+        "--bind",
+        str(root),
+        str(root),
+        "--ro-bind",
+        str(root),
+        str(root),
+    ]
+    with pytest.raises(ValueError, match="leaks"):
+        boxed._assert_no_leak(bad_root)
