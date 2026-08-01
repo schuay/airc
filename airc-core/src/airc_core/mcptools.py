@@ -34,9 +34,17 @@ from langchain_core.tools import BaseTool, ToolException
 
 log = logging.getLogger(__name__)
 
-# Keys stripped from tool schemas: redundant ("title", "description" duplicate
-# the tool definition) or unsupported by Gemini ("additionalProperties").
-_STRIP_KEYS = {"additionalProperties", "$schema", "title", "description"}
+# Keys stripped from tool schemas: redundant ("title" restates the field name)
+# or unsupported by Gemini ("additionalProperties").
+#
+# NOT "description". Only the schema's TOP-LEVEL description duplicates the tool
+# definition; a description on a property is the documentation for that argument
+# and exists nowhere else. Stripping it recursively deleted every per-parameter
+# doc a server sent, leaving the model to match prose in the tool description
+# against a signature by name -- and silently discarding the docs of any server
+# that documents its arguments properly. The top-level one is dropped separately
+# below, where the distinction is visible.
+_STRIP_KEYS = {"additionalProperties", "$schema", "title"}
 
 # Safety valve on a single tool result, not an efficiency mechanism (the
 # context-budget pruning in airc_core.agent handles steady-state size). Its only
@@ -138,19 +146,23 @@ def _truncated(value):
     return value
 
 
-def _clean_schema(schema: dict) -> None:
+def _clean_schema(schema: dict, top: bool = True) -> None:
     if not isinstance(schema, dict):
         return
     for key in _STRIP_KEYS & schema.keys():
         del schema[key]
+    # The root description restates the tool's own description, which is sent
+    # alongside; a nested one documents its property and is kept.
+    if top:
+        schema.pop("description", None)
     if schema.get("type") == "array" and "items" not in schema:
         schema["items"] = {}
     for v in schema.values():
         if isinstance(v, dict):
-            _clean_schema(v)
+            _clean_schema(v, top=False)
         elif isinstance(v, list):
             for item in v:
-                _clean_schema(item)
+                _clean_schema(item, top=False)
 
 
 def _result_chars(value) -> int:

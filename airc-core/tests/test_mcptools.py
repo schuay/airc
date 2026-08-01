@@ -252,6 +252,37 @@ def test_clean_schema():
     assert "$schema" not in schema["properties"]["nested"]
 
 
+def test_clean_schema_keeps_per_parameter_descriptions():
+    """A property's description is that argument's documentation and exists
+    nowhere else -- unlike the root one, which restates the tool description
+    sent alongside it. Stripping descriptions recursively deleted the argument
+    docs of every server that documents its arguments in the schema (the place
+    the protocol provides for them) rather than in tool-level prose.
+    """
+    schema = {
+        "type": "object",
+        "description": "restates the tool description",
+        "properties": {
+            "ref": {"type": "string", "description": "git ref to read at"},
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "search": {"type": "string", "description": "text to find"}
+                    },
+                },
+            },
+        },
+    }
+    _clean_schema(schema)
+    assert "description" not in schema, "the root description is still dropped"
+    assert schema["properties"]["ref"]["description"] == "git ref to read at"
+    # Nested arbitrarily deep: an array item's own properties are documented too.
+    items = schema["properties"]["edits"]["items"]
+    assert items["properties"]["search"]["description"] == "text to find"
+
+
 class _FakeSession:
     """A session that either initializes and serves tools, or fails on start."""
 
