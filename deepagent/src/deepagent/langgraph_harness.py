@@ -411,6 +411,41 @@ class LangGraphHarness:
         self._init_lock = asyncio.Lock()
         self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
         self._saver_obj = None
+        self._saver_conn = None
+
+    def _checkpoint_db_usable(self) -> bool:
+        """Whether the checkpoint DB can actually be opened AND written.
+
+        `aiosqlite.connect()` returns without touching the file -- the real open
+        happens in the worker thread on the first await. So constructing the
+        saver proves nothing, and a corrupt DB, a read-only mount or a full disk
+        all yielded a working-looking saver that raised much later, inside
+        `ainvoke`. There it lands in run_once's generic handler: a dead turn,
+        three of them, and the goal abandons as "no valid result after 3 dead
+        attempts" -- checkpointing costing the job rather than a few turns,
+        which is the opposite of the guarantee it is documented under.
+
+        Probing it here with the stdlib driver is the cheap way to make the
+        degrade real: same file, same sqlite, synchronous, once per harness. The
+        write matters as much as the open -- a read-only mount opens fine and
+        only fails when the saver first writes a checkpoint.
+        """
+        import sqlite3
+
+        try:
+            self._checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(str(self._checkpoint_db), timeout=5.0) as probe:
+                probe.execute("CREATE TABLE IF NOT EXISTS _airc_probe (x INTEGER)")
+                probe.execute("DROP TABLE _airc_probe")
+                probe.commit()
+        except Exception as e:
+            log.warning(
+                "checkpoint db %s unusable (%s); conversations stay in memory",
+                self._checkpoint_db,
+                e,
+            )
+            return False
+        return True
 
     def _saver(self):
         """The conversation store for a graph.
@@ -432,12 +467,15 @@ class LangGraphHarness:
         if self._checkpoint_db is None:
             return InMemorySaver()
         if self._saver_obj is None:
+            if not self._checkpoint_db_usable():
+                self._saver_obj = InMemorySaver()
+                return self._saver_obj
             try:
                 import aiosqlite
                 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-                self._checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
                 conn = aiosqlite.connect(str(self._checkpoint_db))
+                self._saver_conn = conn
                 self._saver_obj = AsyncSqliteSaver(conn)
             except Exception as e:
                 log.warning(
@@ -473,6 +511,24 @@ class LangGraphHarness:
     async def aclose(self) -> None:
         await self._stack.aclose()
         self._tokens.close()
+        # aiosqlite runs its connection on a NON-daemon thread, so leaving it
+        # open hangs interpreter exit: the process then dies to the unit's
+        # TimeoutStopSec rather than shutting down, and SIGKILL leaves the WAL
+        # uncheckpointed. Closing also commits it, which is the point of a
+        # durable saver. Best-effort -- shutdown must not raise.
+        if self._saver_conn is not None:
+            conn, self._saver_conn = self._saver_conn, None
+            # `forget` deletes rows; sqlite keeps the pages on its freelist, so
+            # the file never shrinks. Measured: a 240KB conversation wrote 3.7MB
+            # of database plus a 4.2MB WAL, and deleting every row left both
+            # exactly as big. One VACUUM here (the DB is per-job and a few MB at
+            # most) took the same file to 20KB. At close, not in forget: this
+            # runs once per process, after the last goal.
+            with contextlib.suppress(Exception):
+                await conn.execute("VACUUM")
+                await conn.commit()
+            with contextlib.suppress(Exception):
+                await conn.close()
 
     async def forget(self, control_dir: Path | str) -> None:
         """Drop the stored conversation for a finished goal.

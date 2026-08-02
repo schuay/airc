@@ -384,3 +384,46 @@ async def test_a_finished_goal_drops_its_conversation(tmp_path):
         caps=LoopCaps(max_iters=2, timeout_s=1.0),
     )
     assert forgotten == [str(tmp_path / "ctl")]
+
+
+async def test_an_abandoning_goal_also_drops_its_conversation(tmp_path):
+    # Both synthesized ABANDONs used to skip forget, which is backwards: a goal
+    # that ran to max_iters or died three turns in a row has the LARGEST history
+    # in the checkpoint DB, and it is exactly the history nothing will resume.
+    forgotten = []
+
+    class _H(MockHarness):
+        async def forget(self, control_dir):
+            forgotten.append(str(control_dir))
+
+    # Never converges: run_agent_loop synthesizes the max_iters ABANDON.
+    out = await run_agent_loop(
+        _H(results=[AgentResult(disposition=Disposition.CONTINUE)]),
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=3, timeout_s=1.0),
+    )
+    assert out.disposition is Disposition.ABANDON
+    assert forgotten == [str(tmp_path / "ctl")]
+
+
+async def test_a_dead_turn_abandon_also_drops_its_conversation(tmp_path):
+    # The other synthesized ABANDON: no valid result, no journal progress, cap
+    # reached. Same reasoning -- nothing will ever resume this thread.
+    forgotten = []
+
+    class _H(_ScriptedHarness):
+        async def forget(self, control_dir):
+            forgotten.append(str(control_dir))
+
+    out = await run_agent_loop(
+        _H(script=[(None, False)]),
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=10, no_result_cap=3, timeout_s=1.0),
+    )
+    assert out.disposition is Disposition.ABANDON
+    assert "dead attempts" in out.reason
+    assert forgotten == [str(tmp_path / "ctl")]

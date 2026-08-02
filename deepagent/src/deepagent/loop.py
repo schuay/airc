@@ -277,6 +277,7 @@ async def run_agent_loop(
                 journal.path if journal is not None else run.log_path,
             )
             if consecutive_empty >= caps.no_result_cap:
+                await _forget(harness, control_dir)
                 return AgentResult(
                     disposition=Disposition.ABANDON,
                     reason=f"no valid result after {consecutive_empty} dead attempts "
@@ -286,14 +287,28 @@ async def run_agent_loop(
         consecutive_empty = 0
         _append_attempt(casefile, agent, i, run.result, label=control_dir.name)
         if run.result.disposition is not Disposition.CONTINUE:
-            # Terminal: the stored conversation's only remaining value was
-            # resuming it, so let the harness drop it rather than accumulate
-            # every attempt of every job in a durable saver.
-            if (forget := getattr(harness, "forget", None)) is not None:
-                with contextlib.suppress(Exception):
-                    await forget(control_dir)
+            await _forget(harness, control_dir)
             return run.result
+    await _forget(harness, control_dir)
     return AgentResult(
         disposition=Disposition.ABANDON,
         reason=f"did not converge in {caps.max_iters} iterations",
     )
+
+
+async def _forget(harness: Harness, control_dir: Path) -> None:
+    """Drop the goal's stored conversation on the way out.
+
+    Every exit from run_agent_loop is terminal for this goal, so the thread's
+    only remaining value -- resuming it -- is gone. Both synthesized ABANDONs
+    used to skip this, which is exactly backwards: a goal that abandoned at
+    max_iters or after three dead turns has the LARGEST history in the DB.
+    Measured on a durable saver, a 240KB conversation occupied ~7MB across its
+    checkpoint rows.
+
+    Best-effort: a checkpoint that outlives its goal wastes disk, which beats
+    failing a goal that already reached a verdict.
+    """
+    if (forget := getattr(harness, "forget", None)) is not None:
+        with contextlib.suppress(Exception):
+            await forget(control_dir)
