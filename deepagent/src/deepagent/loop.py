@@ -15,6 +15,7 @@ a turn resumes the prior context or starts fresh.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,6 +88,18 @@ def _resume_prompt(i: int, caps: LoopCaps) -> str:
     return head
 
 
+def _with_interjection(prompt: str, interject) -> str:
+    """Append pending out-of-band news to a turn's prompt.
+
+    Also applies to turn 0 (whose resume prompt is empty), so a goal that starts
+    with news already waiting carries it into its first turn rather than only
+    from the second.
+    """
+    if interject is None or not (news := interject()):
+        return prompt
+    return f"{prompt}\n\n{news}" if prompt else news
+
+
 async def run_agent_loop(
     harness: Harness,
     *,
@@ -97,6 +110,7 @@ async def run_agent_loop(
     agent: str = "",
     casefile: Path | None = None,
     journal: Journal | None = None,
+    interject: Callable[[], str] | None = None,
 ) -> AgentResult:
     """Drive the harness to a terminal disposition (or synthesize an ABANDON).
 
@@ -106,6 +120,15 @@ async def run_agent_loop(
     events into it and its work-event count (`progress`) is the liveness signal
     (a turn that produced no result but emitted agent output/tool calls is alive
     -- a long build still running).
+
+    `interject` is consulted BETWEEN turns and its text, when non-empty, is
+    appended to the next turn's prompt. That is the whole mechanism for telling a
+    RUNNING goal something the orchestrator learned after it started (new review
+    comments, say): the turn boundary already exists and already carries a
+    per-turn string, so nothing new couples the caller to a live turn, and the
+    agent is never interrupted mid-edit. The text rides the resume prompt rather
+    than the system prompt on purpose -- the growing-prefix cache covers
+    [system + tools], so mutating the system text re-caches mid-goal.
     """
     control_dir.mkdir(parents=True, exist_ok=True)
     consecutive_empty = 0
@@ -119,7 +142,9 @@ async def run_agent_loop(
             timeout_s=caps.timeout_s,
             agent=agent,
             resume=i > 0,  # turn 0 sends the task; later turns continue the thread
-            resume_prompt=_resume_prompt(i, caps) if i > 0 else "",
+            resume_prompt=_with_interjection(
+                _resume_prompt(i, caps) if i > 0 else "", interject
+            ),
             casefile=casefile,
             journal=journal,
         )

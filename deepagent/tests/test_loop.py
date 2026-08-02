@@ -233,3 +233,64 @@ async def test_dead_turn_abandon_names_finish_reason(tmp_path):
     )
     assert out.disposition is Disposition.ABANDON
     assert "finish_reason=SAFETY" in out.reason
+
+
+async def test_interjection_reaches_the_next_turn(tmp_path):
+    # The orchestrator learns something after a goal started (new review
+    # comments). It must reach the agent at the next turn boundary -- not
+    # interrupt the running turn, and not wait for the goal to finish.
+    news = ["", "NEW REVIEW COMMENTS: use a scope here"]
+    harness = MockHarness(
+        results=[
+            AgentResult(disposition=Disposition.CONTINUE),
+            AgentResult(disposition=Disposition.COMPLETE),
+        ]
+    )
+    await run_agent_loop(
+        harness,
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=3, timeout_s=1.0),
+        interject=lambda: news.pop(0) if news else "",
+    )
+    # Turn 0 saw nothing; turn 1 carries the news APPENDED to its resume prompt,
+    # so the loop's own turn-awareness framing is not replaced by it.
+    assert "REVIEW COMMENTS" not in harness.resume_prompts[0]
+    assert "NEW REVIEW COMMENTS: use a scope here" in harness.resume_prompts[1]
+    assert "Continue from where you left off" in harness.resume_prompts[1]
+
+
+async def test_interjection_on_the_first_turn(tmp_path):
+    # News already waiting when the goal starts rides turn 0, whose resume
+    # prompt is empty -- otherwise a comment that landed between steps would sit
+    # unseen until the second turn.
+    harness = MockHarness(results=[AgentResult(disposition=Disposition.COMPLETE)])
+    await run_agent_loop(
+        harness,
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=2, timeout_s=1.0),
+        interject=lambda: "PENDING: a reviewer commented",
+    )
+    assert harness.resume_prompts[0] == "PENDING: a reviewer commented"
+
+
+async def test_no_interjection_leaves_prompts_untouched(tmp_path):
+    harness = MockHarness(
+        results=[
+            AgentResult(disposition=Disposition.CONTINUE),
+            AgentResult(disposition=Disposition.COMPLETE),
+        ]
+    )
+    await run_agent_loop(
+        harness,
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=3, timeout_s=1.0),
+        interject=lambda: "",
+    )
+    assert harness.resume_prompts[0] == ""
+    assert "Continue from where you left off" in harness.resume_prompts[1]

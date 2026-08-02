@@ -53,6 +53,13 @@ class LoopSpec(BaseModel):
     timeout_s: float = 3600.0  # per turn
     no_result_cap: int = 3
     checkpoint_turn: int | None = None  # reflection-turn index; see LoopCaps
+    # Absolute path the orchestrator drops out-of-band news into (see
+    # run_agent_loop's `interject`). A FILE rather than a callback because the
+    # worker is a subprocess: the loop runs in the box and the orchestrator does
+    # not, so the only channel between them is the shared mount -- which is the
+    # file contract this whole design rests on, not an exception to it. Read and
+    # then REMOVED between turns, so each interjection is delivered exactly once.
+    interject_path: str = ""
 
 
 def write_outcome(control_dir: Path, result: AgentResult) -> None:
@@ -66,6 +73,33 @@ def read_outcome(control_dir: Path) -> AgentResult | None:
         return AgentResult.model_validate_json(path.read_text())
     except (OSError, ValueError):
         return None
+
+
+def _file_interjection(path: str):
+    """Read-and-consume the interjection file, or None when none is configured.
+
+    Consuming (unlink) is what makes delivery exactly-once: the loop asks every
+    turn, and a file left in place would repeat the same news until the goal
+    ended. A read error is swallowed -- an interjection is an optimization, and
+    losing one costs a round, while raising here would kill a turn that was
+    doing real work.
+    """
+    if not path:
+        return None
+    p = Path(path)
+
+    def read() -> str:
+        try:
+            text = p.read_text()
+        except OSError:
+            return ""
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return text.strip()
+
+    return read
 
 
 async def run_loop_from_spec(harness: Harness, spec: LoopSpec) -> AgentResult:
@@ -91,6 +125,7 @@ async def run_loop_from_spec(harness: Harness, spec: LoopSpec) -> AgentResult:
         agent=spec.agent,
         casefile=Path(spec.casefile),
         journal=Journal(spec.journal_path),
+        interject=_file_interjection(spec.interject_path),
     )
     write_outcome(control_dir, result)
     return result
