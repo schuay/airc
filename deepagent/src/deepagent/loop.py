@@ -98,10 +98,17 @@ def _resume_prompt(i: int, caps: LoopCaps) -> str:
 ATTEMPTS_FILE = "ATTEMPTS.md"
 
 
-def _append_attempt(casefile: Path | None, agent: str, turn: int, result) -> None:
+def _append_attempt(
+    casefile: Path | None, agent: str, turn: int, result, label: str = ""
+) -> None:
     if casefile is None:
         return
-    parts = [f"## {agent or 'agent'} attempt {turn + 1} -- {result.disposition.value}"]
+    # `label` distinguishes goals that share a casefile. Without it a revise
+    # round's entries are indistinguishable from the first round's -- both read
+    # "attempt 1" -- so a reader (and the next attempt) cannot tell what has
+    # already been tried from what is being retried.
+    head = f"{agent or 'agent'}{f' [{label}]' if label else ''}"
+    parts = [f"## {head} attempt {turn + 1} -- {result.disposition.value}"]
     if result.summary:
         parts.append(result.summary.strip())
     if result.reason:
@@ -277,7 +284,7 @@ async def run_agent_loop(
                 )
             continue
         consecutive_empty = 0
-        _append_attempt(casefile, agent, i, run.result)
+        _append_attempt(casefile, agent, i, run.result, label=control_dir.name)
         if run.result.disposition is not Disposition.CONTINUE:
             # Terminal: the stored conversation's only remaining value was
             # resuming it, so let the harness drop it rather than accumulate

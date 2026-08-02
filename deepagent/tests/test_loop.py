@@ -321,6 +321,11 @@ async def test_attempts_ledger_records_every_turn(tmp_path):
     text = (cf / ATTEMPTS_FILE).read_text()
     assert "attempt 1 -- continue" in text and "tried A" in text
     assert "attempt 2 -- complete" in text and "fixed it" in text
+    # Labelled by control dir, which is the goal's step+round: several goals
+    # share one casefile, so without it a revise round's entries are
+    # indistinguishable from the first round's (both read "attempt 1") and the
+    # ledger cannot say what was already tried versus what is being retried.
+    assert "[ctl]" in text
 
 
 async def test_resume_hands_the_agent_the_tree_state(tmp_path):
