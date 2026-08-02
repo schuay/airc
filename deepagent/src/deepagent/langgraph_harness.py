@@ -388,6 +388,7 @@ class LangGraphHarness:
         coding_model_key: str = "default",
         coding_tool_groups: tuple[str, ...] = ("read", "active"),
         shell_timeout_s: float = 300.0,
+        checkpoint_db: Path | str | None = None,
     ) -> None:
         self._common = common
         self._model_id = common.models.get(coding_model_key) or common.models.get(
@@ -408,6 +409,44 @@ class LangGraphHarness:
         self._v8_tools: list = []
         self._graphs: OrderedDict[str, object] = OrderedDict()
         self._init_lock = asyncio.Lock()
+        self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
+        self._saver_obj = None
+
+    def _saver(self):
+        """The conversation store for a graph.
+
+        With `checkpoint_db`, a SQLite saver that OUTLIVES the process: a goal
+        killed at attempt 6 resumes with its thread intact instead of re-sending
+        the whole prompt and re-deriving six attempts of context. Without it,
+        in-memory -- the shape every test and one-shot run wants, and the
+        fallback when the DB cannot be opened.
+
+        One saver for every thread, not one per graph: they are keyed by
+        thread_id internally, and a per-graph connection would leave a file
+        handle per LRU slot. A failure to open degrades to memory rather than
+        raising -- checkpointing is a cache, never the correctness path (see
+        run_once's thread_live check), so losing it costs turns, not work.
+        """
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        if self._checkpoint_db is None:
+            return InMemorySaver()
+        if self._saver_obj is None:
+            try:
+                import aiosqlite
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+                self._checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
+                conn = aiosqlite.connect(str(self._checkpoint_db))
+                self._saver_obj = AsyncSqliteSaver(conn)
+            except Exception as e:
+                log.warning(
+                    "checkpoint db %s unusable (%s); conversations stay in memory",
+                    self._checkpoint_db,
+                    e,
+                )
+                self._saver_obj = InMemorySaver()
+        return self._saver_obj
 
     async def _ensure_init(self) -> None:
         if self._toolset is not None:
@@ -435,6 +474,27 @@ class LangGraphHarness:
         await self._stack.aclose()
         self._tokens.close()
 
+    async def forget(self, control_dir: Path | str) -> None:
+        """Drop the stored conversation for a finished goal.
+
+        Called when a goal reaches a terminal disposition: the thread's only
+        remaining value was resuming it, and a durable saver would otherwise
+        accumulate every attempt of every job forever. Keyed by control dir
+        because that is what run_once derives thread_id from.
+
+        Best-effort -- a checkpoint that outlives its goal wastes disk, which is
+        strictly better than failing a job that already succeeded.
+        """
+        thread_id = str(control_dir)
+        self._graphs.pop(thread_id, None)
+        saver = self._saver_obj
+        if saver is None or not hasattr(saver, "adelete_thread"):
+            return
+        try:
+            await saver.adelete_thread(thread_id)
+        except Exception as e:
+            log.warning("could not drop checkpoint for %s: %s", thread_id, e)
+
     def _graph_for(
         self,
         thread_id: str,
@@ -448,7 +508,6 @@ class LangGraphHarness:
         from langchain.agents import create_agent
         from langchain.agents.middleware import ModelCallLimitMiddleware
         from langchain.agents.structured_output import OutputToolBinding, ToolStrategy
-        from langgraph.checkpoint.memory import InMemorySaver
 
         from airc_core import (
             CallBudgetMiddleware,
@@ -526,7 +585,7 @@ class LangGraphHarness:
             tools=tools,
             system_prompt=self._system,
             middleware=mw,
-            checkpointer=InMemorySaver(),  # per-thread; freed when the graph evicts
+            checkpointer=self._saver(),
             response_format=strategy,
         ).with_config({"recursion_limit": _RECURSION_LIMIT})
 

@@ -294,3 +294,88 @@ async def test_no_interjection_leaves_prompts_untouched(tmp_path):
     )
     assert harness.resume_prompts[0] == ""
     assert "Continue from where you left off" in harness.resume_prompts[1]
+
+
+async def test_attempts_ledger_records_every_turn(tmp_path):
+    # The ledger is what a resume rests on when a checkpoint is missing, and
+    # what the next attempt reads instead of re-deriving six attempts of
+    # context. It must record CONTINUE turns too -- those are precisely the
+    # attempts a crash would otherwise lose.
+    from deepagent.loop import ATTEMPTS_FILE
+
+    cf = tmp_path / "cf"
+    await run_agent_loop(
+        MockHarness(
+            results=[
+                AgentResult(disposition=Disposition.CONTINUE, summary="tried A"),
+                AgentResult(disposition=Disposition.COMPLETE, summary="fixed it"),
+            ]
+        ),
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=3, timeout_s=1.0),
+        agent="drafter",
+        casefile=cf,
+    )
+    text = (cf / ATTEMPTS_FILE).read_text()
+    assert "attempt 1 -- continue" in text and "tried A" in text
+    assert "attempt 2 -- complete" in text and "fixed it" in text
+
+
+async def test_resume_hands_the_agent_the_tree_state(tmp_path):
+    # A restart leaves partial work behind -- a half-applied edit, an
+    # interrupted build. An agent told nothing assumes a clean tree and
+    # compounds it, so turn 0 of a resumed loop carries git status.
+    import subprocess
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+    (wt / "dirty.txt").write_text("half-applied\n")
+
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    (ctl / "result.000.json").write_text("{}")  # a previous run died here
+
+    h = MockHarness(results=[AgentResult(disposition=Disposition.COMPLETE)])
+    await run_agent_loop(
+        h,
+        prompt_path=tmp_path / "p.md",
+        workdir=wt,
+        control_dir=ctl,
+        caps=LoopCaps(max_iters=2, timeout_s=1.0),
+    )
+    assert "RESUMING" in h.resume_prompts[0]
+    assert "dirty.txt" in h.resume_prompts[0]
+
+
+async def test_a_fresh_goal_gets_no_resume_notice(tmp_path):
+    h = MockHarness(results=[AgentResult(disposition=Disposition.COMPLETE)])
+    await run_agent_loop(
+        h,
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=2, timeout_s=1.0),
+    )
+    assert h.resume_prompts[0] == ""
+
+
+async def test_a_finished_goal_drops_its_conversation(tmp_path):
+    # A durable saver would otherwise accumulate every attempt of every job
+    # forever; a terminal goal's thread has no remaining use.
+    forgotten = []
+
+    class _H(MockHarness):
+        async def forget(self, control_dir):
+            forgotten.append(str(control_dir))
+
+    await run_agent_loop(
+        _H(results=[AgentResult(disposition=Disposition.COMPLETE)]),
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=2, timeout_s=1.0),
+    )
+    assert forgotten == [str(tmp_path / "ctl")]

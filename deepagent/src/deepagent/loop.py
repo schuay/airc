@@ -14,6 +14,8 @@ a turn resumes the prior context or starts fresh.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -88,6 +90,32 @@ def _resume_prompt(i: int, caps: LoopCaps) -> str:
     return head
 
 
+# The per-attempt ledger, appended to on every turn. Its readers, in order of
+# how much they can be trusted to exist: a human following the job, the agent's
+# own next attempt (which reads conclusions rather than re-deriving them), and
+# the resume path when a checkpoint is missing. That ordering is why the ledger
+# is a plain file and the checkpoint is a cache -- correctness rests on the file.
+ATTEMPTS_FILE = "ATTEMPTS.md"
+
+
+def _append_attempt(casefile: Path | None, agent: str, turn: int, result) -> None:
+    if casefile is None:
+        return
+    parts = [f"## {agent or 'agent'} attempt {turn + 1} -- {result.disposition.value}"]
+    if result.summary:
+        parts.append(result.summary.strip())
+    if result.reason:
+        parts.append(f"reason: {result.reason.strip()}")
+    try:
+        casefile.mkdir(parents=True, exist_ok=True)
+        with (casefile / ATTEMPTS_FILE).open("a") as f:
+            f.write("\n\n".join(parts) + "\n\n")
+    except OSError as e:
+        # The ledger is for the reader and the next attempt; losing an entry
+        # costs context, never the run.
+        log.warning("could not append to %s: %s", ATTEMPTS_FILE, e)
+
+
 def _with_interjection(prompt: str, interject) -> str:
     """Append pending out-of-band news to a turn's prompt.
 
@@ -98,6 +126,40 @@ def _with_interjection(prompt: str, interject) -> str:
     if interject is None or not (news := interject()):
         return prompt
     return f"{prompt}\n\n{news}" if prompt else news
+
+
+async def _resume_notice(workdir: Path) -> str:
+    """What a turn needs to know when it resumes into a tree it did not leave.
+
+    A restart leaves whatever the previous attempt was mid-way through: a
+    half-applied edit, an interrupted build, a conflicted rebase. An agent that
+    assumes a clean tree compounds that, so it is handed the actual state rather
+    than left to check -- deterministic, cheap, and in front of it instead of
+    dependent on it asking.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(workdir),
+            "status",
+            "--short",
+            "--branch",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except (OSError, asyncio.TimeoutError):
+        return ""
+    status = out.decode(errors="replace").strip()
+    return (
+        "You are RESUMING after an interruption -- this loop restarted, so work"
+        " from an earlier attempt may be partial: a half-applied edit, an"
+        " interrupted build, an unfinished rebase. Read your casefile"
+        f" {ATTEMPTS_FILE} for what was already tried, and reconcile the tree"
+        " before continuing.\n\nCurrent `git status --short --branch`:\n\n"
+        f"{status or '(clean)'}"
+    )
 
 
 async def run_agent_loop(
@@ -131,6 +193,14 @@ async def run_agent_loop(
     [system + tools], so mutating the system text re-caches mid-goal.
     """
     control_dir.mkdir(parents=True, exist_ok=True)
+    # Turn 0 of a loop whose control dir already holds results is a RESUME: the
+    # previous run of this same goal died. (A fresh goal gets a fresh control
+    # dir, keyed by step and round, so this cannot false-positive on a revise.)
+    resumed_notice = (
+        await _resume_notice(workdir) if any(control_dir.glob("result.*.json")) else ""
+    )
+    if resumed_notice:
+        log.info("%s: resuming into an existing control dir", agent or "agent")
     consecutive_empty = 0
     for i in range(caps.max_iters):
         result_path = control_dir / f"result.{i:03d}.json"
@@ -143,7 +213,7 @@ async def run_agent_loop(
             agent=agent,
             resume=i > 0,  # turn 0 sends the task; later turns continue the thread
             resume_prompt=_with_interjection(
-                _resume_prompt(i, caps) if i > 0 else "", interject
+                _resume_prompt(i, caps) if i > 0 else resumed_notice, interject
             ),
             casefile=casefile,
             journal=journal,
@@ -207,7 +277,14 @@ async def run_agent_loop(
                 )
             continue
         consecutive_empty = 0
+        _append_attempt(casefile, agent, i, run.result)
         if run.result.disposition is not Disposition.CONTINUE:
+            # Terminal: the stored conversation's only remaining value was
+            # resuming it, so let the harness drop it rather than accumulate
+            # every attempt of every job in a durable saver.
+            if (forget := getattr(harness, "forget", None)) is not None:
+                with contextlib.suppress(Exception):
+                    await forget(control_dir)
             return run.result
     return AgentResult(
         disposition=Disposition.ABANDON,
