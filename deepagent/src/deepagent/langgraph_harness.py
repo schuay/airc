@@ -172,6 +172,16 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     tree. Per-thread binding also means no shared mutable cwd/env across the
     concurrent jobs a scheduler may run.
 
+    Granted unconditionally rather than through tool_groups, deliberately. Those
+    groups are MCP-only: MCPToolset expands a group name to patterns matched
+    against MCP tool names, and these are per-job StructuredTools closed over
+    `workdir`. Routing them through it would mean either a second non-MCP
+    registry inside the toolset or moving job-scoped construction into
+    suite-shared substrate. Neither earns its keep for a knob with one setting --
+    every coding goal builds and runs, so a config that could withhold `shell`
+    only offers a way to boot an agent that cannot work, which is a failure mode
+    that has already happened once (see MCPToolset._expand's empty-group warning).
+
     These tools do no confinement of their own. Confinement is whole-process:
     the caller runs the entire loop inside a bwrap worker (see worker.py), so the
     mount namespace is the boundary and a per-call wrapper would only duplicate
