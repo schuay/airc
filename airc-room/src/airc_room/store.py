@@ -26,7 +26,8 @@ BADGE_BUCKETS = ("blocker", "high", "medium", "low", "unknown", "info")
 # Retention: `airc-prune` (airc_room.prune) ages out old threads -- it redacts
 # message text/sender for every kind but SYSTEM, drops the thread's persona
 # checkpoints, and vacuums both files. It deliberately keeps the dedup keys
-# (commit_threads, chat_threads, chat_seen_messages, handover_jobs) so a late
+# (commit_threads, chat_threads, chat_seen_messages, handover_jobs,
+# delivered_results) so a late
 # event cannot re-announce a thread whose discussion was just purged. Run it
 # from its systemd timer; the room must be stopped for the vacuum.
 _SCHEMA = """
@@ -128,6 +129,10 @@ CREATE TABLE IF NOT EXISTS source_notes (
 CREATE INDEX IF NOT EXISTS idx_source_notes ON source_notes(source, id);
 CREATE TABLE IF NOT EXISTS chat_seen_messages (
     name TEXT PRIMARY KEY,
+    ts REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS delivered_results (
+    job_id TEXT PRIMARY KEY,
     ts REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS handover_jobs (
@@ -790,6 +795,35 @@ class Store:
         self._db.execute(
             "INSERT OR IGNORE INTO commit_threads (hash, thread_id) VALUES (?, ?)",
             (hash, thread_id),
+        )
+        self._db.commit()
+
+    def result_delivered(self, job_id: str) -> bool:
+        """Whether this result's outcome has already been posted to the room.
+
+        Result delivery is at-least-once by design (a crash between the state
+        save and the publish re-finalizes on restart), and the two things a
+        result does on arrival -- post it to the room, file its bug -- are the
+        two that are not idempotent. The finding badge and the fix enqueue key
+        off ids and already are. Durable rather than in-memory because the
+        redelivery this guards against is the one a RESTART causes.
+        """
+        row = self._db.execute(
+            "SELECT 1 FROM delivered_results WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        return row is not None
+
+    def mark_result_delivered(self, job_id: str) -> None:
+        """Record that a result reached the room, after the post succeeded.
+
+        Recorded after rather than claimed before: a post that raises is retried
+        by the caller, and a claim taken up front would make that retry skip the
+        very post it is retrying. The residual window (crash between post and
+        this write) duplicates one message, which is the lesser failure and far
+        narrower than the restart redelivery result_delivered exists to stop."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO delivered_results (job_id, ts) VALUES (?, ?)",
+            (job_id, time.time()),
         )
         self._db.commit()
 

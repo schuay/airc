@@ -365,3 +365,18 @@ def test_pending_bug_enqueue_is_idempotent_and_preserves_attempts(tmp_path):
     (row,) = s.list_pending_bugs()
     assert row["title"] == "t2" and row["attempts"] == 1
     assert row["isolates"] is None
+
+
+def test_result_delivery_is_recorded_after_the_fact_and_survives_reopen(tmp_path):
+    # Marked after the post rather than claimed before it: a post that raises is
+    # retried by the caller, and a claim taken up front would make that retry
+    # skip the very post it is retrying.
+    s = make_store(tmp_path)
+    assert not s.result_delivered("v8-abc-repro-1")
+    s.mark_result_delivered("v8-abc-repro-1")
+    assert s.result_delivered("v8-abc-repro-1")
+    s.mark_result_delivered("v8-abc-repro-1")  # replay: no error, no second row
+    assert not s.result_delivered("v8-abc-repro-2")
+    # Durable, because the redelivery it guards against is the one a restart
+    # causes -- an in-memory set would be empty exactly when it is needed.
+    assert Store(tmp_path / "test.db").result_delivered("v8-abc-repro-1")

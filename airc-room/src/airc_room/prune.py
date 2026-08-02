@@ -9,8 +9,9 @@ LangGraph checkpoint blobs (airc.ckpt.db, which is the bulk of the volume). A
 sweep that skips the checkpoints has not scrubbed anything.
 
 The shape is REDACT, not delete. Blanking text keeps the rows, and with them the
-four dedup keys that stop a real-world event being announced twice
-(`commit_threads`, `chat_threads`, `chat_seen_messages`, `handover_jobs`). That
+five dedup keys that stop a real-world event being announced twice
+(`commit_threads`, `chat_threads`, `chat_seen_messages`, `handover_jobs`,
+`delivered_results`). That
 matters concretely: an icompleteu CL job polls CQ for hours and can sit awaiting
 review for days, so its result can arrive for a thread this sweep already
 scrubbed. With the keys intact that result routes into the existing thread; with

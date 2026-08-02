@@ -184,6 +184,7 @@ async def test_dedup_keys_survive_so_a_late_result_still_routes(store):
     store.link_chat_thread("spaces/A", "spaces/A/threads/T", t.id)
     store.mark_chat_message("spaces/A/messages/M1")
     store.mark_handover("job-1")
+    store.mark_result_delivered("job-1")
     store.set_announcement_meta(t.id, "v8", "/src/v8", "deadbeef")
 
     redact_threads(store._db, [t.id])
@@ -192,6 +193,7 @@ async def test_dedup_keys_survive_so_a_late_result_still_routes(store):
     assert store.chat_thread_id("spaces/A", "spaces/A/threads/T") == t.id
     assert store.chat_message_seen("spaces/A/messages/M1")
     assert store.handover_claimed("job-1")
+    assert store.result_delivered("job-1")
     assert store.announcement_meta(t.id) is not None
     assert store.get_thread(t.id) is not None
 

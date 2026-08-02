@@ -1,7 +1,10 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
-from airc_room.room import Room
+import pytest
+
+from airc_room.room import Room, UndeliveredError
+from airc_room.store import MessageKind, Store
 
 
 class _Store:
@@ -57,3 +60,72 @@ async def test_typing_isolates_transport_failures():
     room.add_transport(cap)
     await room.typing(1, "gc", True)  # _Boom raises; must not stop cap
     assert cap.calls == [(1, "gc", True, None)]
+
+
+class _DeadTransport:
+    """Every deliver fails -- an outage, a 503, an expired credential."""
+
+    name = "dead"
+
+    async def deliver(self, msg):
+        raise RuntimeError("503 from the chat backend")
+
+
+class _Recorder:
+    name = "recorder"
+
+    def __init__(self):
+        self.seen = []
+
+    async def deliver(self, msg):
+        self.seen.append(msg)
+
+
+def _real_room(tmp_path):
+    return Room(Store(tmp_path / "airc.db"))
+
+
+async def test_post_is_best_effort_by_default(tmp_path):
+    # The conversational contract: the store is the record, so a broken frontend
+    # must not fail a turn.
+    room = _real_room(tmp_path)
+    room.add_transport(_DeadTransport())
+    t = room.create_thread("t")
+    msg = await room.post(t.id, "u", MessageKind.NOTICE, "hello")
+    assert [m.text for m in room.thread_messages(t.id)] == ["hello"]
+    assert msg.text == "hello"
+
+
+async def test_require_delivery_raises_when_no_transport_took_it(tmp_path):
+    # The queue-drain contract: a subscriber acks its bus message when post
+    # returns, so a swallowed transport failure drops the item with no retry and
+    # no failed/ record. It has to hear about it.
+    room = _real_room(tmp_path)
+    room.add_transport(_DeadTransport())
+    t = room.create_thread("t")
+    with pytest.raises(UndeliveredError):
+        await room.post(t.id, "u", MessageKind.NOTICE, "hi", require_delivery=True)
+    # Still persisted: the raise is about delivery, and the caller's retry finds
+    # the history intact.
+    assert [m.text for m in room.thread_messages(t.id)] == ["hi"]
+
+
+async def test_require_delivery_accepts_a_partial_delivery(tmp_path):
+    # One transport working means the message reached a reader; re-posting would
+    # duplicate it for them. Only a total failure is a lost message.
+    room = _real_room(tmp_path)
+    rec = _Recorder()
+    room.add_transport(_DeadTransport())
+    room.add_transport(rec)
+    t = room.create_thread("t")
+    await room.post(t.id, "u", MessageKind.NOTICE, "hi", require_delivery=True)
+    assert [m.text for m in rec.seen] == ["hi"]
+
+
+async def test_require_delivery_is_satisfied_with_no_transports(tmp_path):
+    # Headless (tests, a room with no frontend attached): there is nothing to
+    # fail, so demanding delivery must not turn every post into an error.
+    room = _real_room(tmp_path)
+    t = room.create_thread("t")
+    await room.post(t.id, "u", MessageKind.NOTICE, "hi", require_delivery=True)
+    assert len(room.thread_messages(t.id)) == 1

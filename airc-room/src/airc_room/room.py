@@ -25,6 +25,17 @@ log = logging.getLogger(__name__)
 _TRANSPORT_TIMEOUT = 60.0
 
 
+class UndeliveredError(RuntimeError):
+    """Every transport failed to deliver a message the caller must not lose.
+
+    Raised only by `post(require_delivery=True)`. The default stays
+    fire-and-forget, because for a conversational turn the store IS the record
+    and a failed frontend is the frontend's problem. A subscriber draining a
+    durable queue is the opposite case: it acks the queue message on return, so
+    a swallowed transport failure loses the item with no retry and no trace.
+    """
+
+
 class Transport(Protocol):
     """A chat frontend (console, Matrix, Google Chat, ...).
 
@@ -134,6 +145,7 @@ class Room:
         kind: MessageKind,
         text: str,
         follow_up: str = "",
+        require_delivery: bool = False,
     ) -> Message:
         """Persist a message, enqueue for orchestration, deliver to transports.
 
@@ -146,15 +158,30 @@ class Room:
         announcement (default "" = the room's plain forced-commentator turn); a
         subscriber sets it so the orchestrator can dispatch without knowing the
         domain.
+
+        Delivery is best-effort by default: a transport that raises is logged
+        and the post still succeeds, because the store is the record and one
+        broken frontend must not fail a turn. `require_delivery` inverts that
+        for a caller whose own retry depends on the answer -- a subscriber
+        draining a durable queue acks on return, so for it a swallowed failure
+        is a silently dropped item. It raises UndeliveredError only when EVERY
+        transport failed; a partial failure is still a delivered message, and
+        re-posting it would duplicate for the transports that worked.
         """
         msg = self._store.add_message(thread_id, sender, kind, text, follow_up)
         self.inbox.put_nowait(msg)
+        delivered = 0
         for t in self._transports:
             try:
                 async with asyncio.timeout(_TRANSPORT_TIMEOUT):
                     await t.deliver(msg)
+                delivered += 1
             except Exception:
                 log.exception("transport %s failed to deliver message", t.name)
+        if require_delivery and self._transports and not delivered:
+            raise UndeliveredError(
+                f"no transport delivered message {msg.id} to thread {thread_id}"
+            )
         return msg
 
     async def typing(
