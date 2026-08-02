@@ -361,6 +361,23 @@ class _StopReasonCallback(BaseCallbackHandler):
             pass
 
 
+async def _thread_live(graph, thread_id: str) -> bool:
+    """Whether `thread_id` already holds a conversation in the graph's saver.
+
+    Asked of the saver rather than of a per-process dict, because with a durable
+    saver those are different questions -- see the call site. Anything that goes
+    wrong reading the checkpoint answers "not live": that re-sends the full
+    prompt and clears the report channel, which costs context and is safe, where
+    the other way round credits a report the turn did not produce.
+    """
+    try:
+        snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    except Exception as e:
+        log.warning("could not read thread state for %s: %s", thread_id, e)
+        return False
+    return bool(getattr(snap, "values", None))
+
+
 class _TurnUsage:
     input_tokens = 0
     output_tokens = 0
@@ -668,16 +685,20 @@ class LangGraphHarness:
         # turns so context and cache warmth accumulate.
         thread_id = str(result_path.parent)
         schema = self._schemas.get(agent, Report)
-        # Whether the thread actually exists BEFORE _graph_for may (re)build it.
-        # Thread continuity is a cache-warmth optimization, never correctness: if
-        # the graph was LRU-evicted or the process restarted, the InMemorySaver is
-        # gone and "continue where you left off" would address an empty thread. So
-        # resume only sends the short continue prompt when the thread is really
-        # live; otherwise it re-sends the full prompt (the worktree + casefile
-        # carry the real state), with any phase instruction (reflect/final)
-        # appended so a cache eviction cannot swallow it.
-        thread_live = thread_id in self._graphs
         graph = self._graph_for(thread_id, workdir, schema)
+        # Whether the thread has a conversation to continue. Asked of the SAVER,
+        # not of `self._graphs`: the dict is per-process, so with the durable
+        # saver it answers a different question than the one that matters. A
+        # restarted goal read live=False while its checkpoint was intact, which
+        # both re-sent the full prompt into a thread that already contained it
+        # AND skipped the structured_response clear below -- so a turn that made
+        # no report read the PRE-CRASH verdict back as its own, crediting a
+        # COMPLETE the restarted turn never earned. An empty state means the
+        # thread is genuinely new (fresh run, LRU eviction under the in-memory
+        # saver, or a saver that degraded to memory), and the full prompt is
+        # right there: the worktree and casefile carry the real state, so the
+        # cost is context, not work.
+        thread_live = await _thread_live(graph, thread_id)
 
         default_resume = (
             "Continue from where you left off -- your previous report was a"
