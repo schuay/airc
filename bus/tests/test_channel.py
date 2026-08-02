@@ -96,3 +96,35 @@ def test_blob_roundtrip_is_content_addressed(tmp_path):
     assert bs.get_text(ref) == "a big diff"
     assert ref == bs.put_text("a big diff")  # stable: same content, same ref
     assert ref != bs.put_text("other")
+
+
+def test_an_unparseable_claim_is_quarantined_not_raised(tmp_path):
+    # A consumer re-lists in-progress/ on every tick, so raising past one bad
+    # file wedges the whole daemon: it crash-loops under systemd forever, no job
+    # runs, and the first diagnostic (which reads the same directory) is down
+    # too. Both shapes must be survivable -- a torn write, and a well-formed
+    # JSON envelope from a producer whose schema has drifted.
+    ch = Channel(tmp_path / "c")
+    ch.publish(_job(1))
+    ch.claim()  # a real claim, sitting in in-progress/
+    (ch.root / "in-progress" / "torn.json").write_bytes(b'{"type": "patch.job"')
+    (ch.root / "in-progress" / "drifted.json").write_text('{"not": "an envelope"}')
+
+    claims = ch.in_progress()
+
+    # The good claim still comes back...
+    assert [c.env.correlation_id for c in claims] == ["j1"]
+    # ...and the bad ones are moved aside for inspection, not deleted.
+    assert not (ch.root / "in-progress" / "torn.json").exists()
+    assert (ch.root / "in-progress" / "torn.json.bad").exists()
+    assert (ch.root / "in-progress" / "drifted.json.bad").exists()
+
+
+def test_quarantining_does_not_repeat_on_the_next_tick(tmp_path):
+    # The bad file leaves the .json namespace, so a re-list neither re-reports
+    # it nor re-renames it -- otherwise every tick would log the same error.
+    ch = Channel(tmp_path / "c")
+    (ch.root / "in-progress" / "torn.json").write_bytes(b"{")
+    assert ch.in_progress() == []
+    assert ch.in_progress() == []
+    assert len(list((ch.root / "in-progress").glob("*.bad"))) == 1

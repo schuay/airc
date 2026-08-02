@@ -78,12 +78,30 @@ class Channel:
         A claim moves a message to in-progress/ and only leaves on complete/fail,
         so anything still here when a consumer restarts is unfinished work it
         should resume.
+
+        A file that cannot be parsed is QUARANTINED rather than raised past: a
+        consumer re-lists this directory on every tick, so one torn write or one
+        envelope from a drifted producer would otherwise abort the listing
+        forever -- the whole daemon crash-looping under systemd, and its
+        diagnostics (`icu ps` reads the same directory) down with it. Renamed
+        out of the way like Subscription.poll does, so the bad file survives for
+        inspection and the good ones are still returned.
         """
         d = self.root / "in-progress"
         out = []
         for name in sorted(p.name for p in d.iterdir() if p.suffix == ".json"):
             path = d / name
-            out.append(Claim(self, path, Envelope.from_bytes(path.read_bytes())))
+            try:
+                env = Envelope.from_bytes(path.read_bytes())
+            except Exception as e:
+                bad = path.with_suffix(".json.bad")
+                try:
+                    os.rename(path, bad)
+                except OSError:
+                    pass
+                log.error("ERROR: bus: unparseable %s; quarantined: %s", name, e)
+                continue
+            out.append(Claim(self, path, env))
         return out
 
 
