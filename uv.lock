@@ -640,8 +640,10 @@ name = "deepagent"
 version = "0.1.0"
 source = { editable = "deepagent" }
 dependencies = [
+    { name = "aiosqlite" },
     { name = "airc-core" },
     { name = "airc-tools" },
+    { name = "langgraph-checkpoint-sqlite" },
     { name = "pydantic" },
 ]
 
@@ -654,8 +656,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
     { name = "airc-core", editable = "airc-core" },
     { name = "airc-tools", editable = "airc-tools" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2" },
 ]
 

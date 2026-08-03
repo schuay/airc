@@ -104,3 +104,32 @@ async def test_aclose_closes_the_saver_connection_and_reclaims_its_pages(tmp_pat
     assert db.stat().st_size < before / 4
     assert h._saver_conn is None
     assert not [t for t in threading.enumerate() if "_connection_worker" in t.name]
+
+
+def test_the_durable_saver_ships_its_own_dependencies():
+    """The checkpointer's imports must be in deepagent's OWN requirements.
+
+    They were not: `aiosqlite` and `langgraph-checkpoint-sqlite` were declared
+    only by airc-room, which deepagent does not depend on, so they arrived
+    transitively in a suite install and were absent from deepagent alone. The
+    failure is silent by design -- _saver catches ImportError and degrades to
+    InMemorySaver -- so a dep trim in another package would have turned durable
+    conversations off across the fleet, announced by one warning line.
+
+    Read from the installed metadata rather than from what happens to be
+    importable, because in this venv airc-room supplies both and any import
+    check would pass whether or not the declaration exists.
+    """
+    import re
+    from importlib.metadata import requires
+
+    # The distribution name is the leading run of name characters; everything
+    # after it is a version specifier, extras or an environment marker. Split by
+    # hand rather than with packaging.Requirement -- packaging is itself an
+    # undeclared transitive, which is the bug this test is about.
+    declared = {
+        m.group(0).lower()
+        for r in requires("deepagent") or []
+        if (m := re.match(r"[A-Za-z0-9._-]+", r))
+    }
+    assert {"aiosqlite", "langgraph-checkpoint-sqlite"} <= declared, declared

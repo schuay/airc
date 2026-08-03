@@ -10,7 +10,20 @@ license = "MIT"
 # airc-core brings the model stack (langchain/langgraph/vertex) + middleware,
 # ledger, and MCPToolset; airc-tools is the worktree shell/read/edit. The turn
 # engine is all this package adds on top.
-dependencies = ["airc-core", "airc-tools", "pydantic>=2"]
+#
+# The two sqlite entries are the durable checkpointer's own (LangGraphHarness
+# ._saver). They were reached only transitively through airc-room, which
+# deepagent does not depend on: installed alone, `import aiosqlite` raised, the
+# saver caught it, and every goal ran with in-memory conversations -- the
+# resume-after-restart guarantee off, announced by one warning line. Declared
+# here because this package is the one that imports them.
+dependencies = [
+    "airc-core",
+    "airc-tools",
+    "pydantic>=2",
+    "langgraph-checkpoint-sqlite>=3.0.3",
+    "aiosqlite>=0.20",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
