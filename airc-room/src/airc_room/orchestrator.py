@@ -556,9 +556,7 @@ class Orchestrator:
         except asyncio.CancelledError:
             raise  # incomplete; do not commit, let the message replay
         except Exception:
-            log.error(
-                "agent %s round failed in thread %d", name, thread_id, exc_info=True
-            )
+            log.exception("agent %s round failed in thread %d", name, thread_id)
         self._finish_one(pm, thread_id)
 
     async def deliver_wake(self, thread_id: int, agent: str, note: str) -> None:
@@ -581,19 +579,18 @@ class Orchestrator:
             )
             return
         lock = self._agent_locks.setdefault((thread_id, name), asyncio.Lock())
-        async with lock:
-            async with self._turn_sem:
-                timeout = self._cfg.orchestrator.turn_timeout
-                await self._room.typing(thread_id, name, True, budget=timeout)
-                try:
-                    text = await self._guarded_turn(
-                        name, thread_id, addressed=True, task_prompt=note
-                    )
-                    if text is None:
-                        return
-                    await self._room.post(thread_id, name, MessageKind.AGENT, text)
-                finally:
-                    await self._room.typing(thread_id, name, False)
+        async with lock, self._turn_sem:
+            timeout = self._cfg.orchestrator.turn_timeout
+            await self._room.typing(thread_id, name, True, budget=timeout)
+            try:
+                text = await self._guarded_turn(
+                    name, thread_id, addressed=True, task_prompt=note
+                )
+                if text is None:
+                    return
+                await self._room.post(thread_id, name, MessageKind.AGENT, text)
+            finally:
+                await self._room.typing(thread_id, name, False)
 
     def _finish_one(self, pm: _PendingMsg, thread_id: int) -> None:
         """Mark one outstanding turn (or the routing phase) done; commit prefix.

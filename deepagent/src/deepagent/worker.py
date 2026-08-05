@@ -21,6 +21,7 @@ Harness (its system prompt + verdict schemas); deepagent supplies the loop.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -93,10 +94,8 @@ def _file_interjection(path: str):
             text = p.read_text()
         except OSError:
             return ""
-        try:
+        with contextlib.suppress(OSError):
             p.unlink()
-        except OSError:
-            pass
         return text.strip()
 
     return read

@@ -31,6 +31,7 @@ from collections.abc import Iterable
 from fnmatch import fnmatch
 
 from langchain_core.tools import BaseTool, ToolException
+from typing_extensions import Self
 
 log = logging.getLogger(__name__)
 
@@ -297,7 +298,7 @@ class MCPToolset:
         self.tools: list[BaseTool] = []
         self.instructions: str = ""
 
-    async def __aenter__(self) -> MCPToolset:
+    async def __aenter__(self) -> Self:
         if not self._mcp_servers:
             log.warning("no MCP servers configured; agents run without tools")
             return self

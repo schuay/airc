@@ -18,6 +18,7 @@ incoming sorts by time and the oldest is claimed first.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -95,10 +96,8 @@ class Channel:
                 env = Envelope.from_bytes(path.read_bytes())
             except Exception as e:
                 bad = path.with_suffix(".json.bad")
-                try:
+                with contextlib.suppress(OSError):
                     os.rename(path, bad)
-                except OSError:
-                    pass
                 log.error("ERROR: bus: unparseable %s; quarantined: %s", name, e)
                 continue
             out.append(Claim(self, path, env))

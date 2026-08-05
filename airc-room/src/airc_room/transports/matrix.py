@@ -31,6 +31,7 @@ plaintext, so E2E plugs in without an interface change (see design D4).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from html import escape
@@ -276,23 +277,18 @@ class MatrixTransport:
         thinking in the room. The first notice is sent inline by typing(); this
         loop only renews it. One task per active room; cancelled by _stop_typing
         when the last typer finishes."""
-        try:
-            while self._typing_count.get(room_id, 0) > 0:
-                await asyncio.sleep(_TYPING_REFRESH_S)
-                if self._typing_count.get(room_id, 0) > 0:
-                    await self._send_typing(room_id)
-        except asyncio.CancelledError:
-            raise
+        while self._typing_count.get(room_id, 0) > 0:
+            await asyncio.sleep(_TYPING_REFRESH_S)
+            if self._typing_count.get(room_id, 0) > 0:
+                await self._send_typing(room_id)
 
     async def _stop_typing(self, room_id: str) -> None:
         """Cancel the refresh task and clear the notice for a room."""
         task = self._typing_tasks.pop(room_id, None)
         if task is not None:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         try:
             await self._client.room_typing(room_id, False)
         except Exception:

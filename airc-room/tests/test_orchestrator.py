@@ -107,6 +107,7 @@ def test_parse_coordinator_reply():
     assert parse_coordinator_reply("Sure! I think maybe perf?", known, 2) == []
     # A unicode dash the model substitutes for " -- " still routes (not [] ).
     assert parse_coordinator_reply("perf — most relevant", known, 2) == ["perf"]
+
     assert parse_coordinator_reply("compiler – lowering", known, 2) == ["compiler"]
 
 
@@ -124,7 +125,7 @@ def test_humans_moved_on():
     # Only one trailing human: not yet moved on.
     assert humans_moved_on(msgs[:-1], known) is False
     # A trailing human addressed an agent: engaged, not moved on.
-    msgs2 = msgs[:-1] + [m("human", "b", "perf: what do you think?")]
+    msgs2 = [*msgs[:-1], m("human", "b", "perf: what do you think?")]
     assert humans_moved_on(msgs2, known) is False
     # No agent has spoken at all.
     assert humans_moved_on([m("human", "a"), m("human", "b")], known) is False

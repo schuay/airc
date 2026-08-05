@@ -46,3 +46,103 @@ testpaths = ["*/tests"]
 addopts = "--import-mode=importlib"
 consider_namespace_packages = true
 asyncio_mode = "auto"
+
+# Lint policy for every workspace member. Kept at the ROOT so the rule set is one
+# decision rather than five that drift; ruff walks up from each member directory
+# and finds this.
+#
+# Ruff is deliberately NOT pinned (a pin ends up different on the prod box and
+# fights every deploy), so a new release can surface findings in code that has
+# not changed. The way that stays workable is keeping the backlog at zero, which
+# means a rule we do not intend to honour must be turned off HERE, with a reason,
+# rather than accumulating inline noqas.
+[tool.ruff.lint]
+extend-select = [
+    "B",      # bugbear: real mistakes, not style
+    "BLE",    # blind except -- see the ignore below
+    "C4",     # comprehension misuse
+    "DTZ",    # naive datetimes: this codebase has been bitten by expiry handling
+    "G",      # logging call shape
+    "ISC",    # implicit string concat, i.e. the missing-comma bug
+    "PL",     # pylint subset
+    "RET",    # return-path smells
+    "RUF",
+    "S",      # bandit subset
+    "SIM",
+    "TRY",    # exception antipatterns
+    "UP",     # pyupgrade
+]
+ignore = [
+    # Blind `except Exception` is the intended shape at this codebase's
+    # boundaries: callbacks that must not fail a turn, best-effort artifact
+    # writes, a bus record that must be quarantined rather than crash the loop.
+    # Every such site logs and explains itself; narrowing them would mean
+    # enumerating exception types from libraries that do not document them, and
+    # the failure mode of missing one is exactly what these guards exist to stop.
+    # S110 (try/except/pass) stays ENABLED -- silent is the part we do not want.
+    "BLE001",
+    # Asserts in tests are the point.
+    "S101",
+    # Function-level imports are load-bearing here, not laziness: they keep
+    # optional dependencies optional (google-cloud, vertexai, matrix) and keep
+    # import cost off the startup path. 200+ deliberate sites.
+    "PLC0415",
+    # A literal in an assertion IS the specification; naming it moves the fact
+    # away from the check that reads it.
+    "PLR2004",
+    # Message-in-raise is how these exceptions are read in logs and tracebacks;
+    # hoisting every one to a constant would make them harder to follow, not
+    # easier.
+    "TRY003",
+    # Argument counts, branch/statement counts: these flag real complexity, but
+    # the fix is a refactor with its own risk. Left off rather than suppressed
+    # inline, so the decision is visible and revisitable in one place.
+    "PLR0913",
+    "PLR0917",
+    "PLR0912",
+    "PLR0915",
+    "PLR0911",
+    # Every flagged query interpolates a validated literal or a hardcoded table
+    # name; user data goes through ? placeholders. Checked site by site. The rule
+    # cannot see the validation, and rewriting these to satisfy it would mean
+    # building table names dynamically -- less safe, not more.
+    "S608",
+    # log.error vs log.exception is a judgement call the rule cannot make: a
+    # timeout has no informative traceback, and the parse-error sites already
+    # carry the exception in the message.
+    "TRY400",
+    # Naive datetimes are load-bearing in two places and harmless in the rest:
+    # google.auth compares token expiry as NAIVE UTC (attaching a tzinfo makes
+    # every comparison raise), and the console/search timestamps are local time
+    # printed next to a human's own clock. Checked site by site.
+    "DTZ001",
+    "DTZ006",
+    "DTZ007",
+    # Unicode dashes appear only as DATA -- a regex character class that
+    # normalizes them, and the test asserting it does.
+    "RUF001",
+    # dict(...) with kwargs is sometimes the clearer form, e.g. when it mirrors
+    # the attribute names of the thing it fakes.
+    "C408",
+    # subprocess with a bare "git" and a constructed argv: PATH lookup is
+    # intended (the box and the host resolve different git binaries), and every
+    # argv here is built from validated internal values, not user input.
+    "S603",
+    "S607",
+]
+
+# Per-path exceptions, kept narrow. A rule switched off for src/ too would be a
+# real loss of coverage; these are cases where the rule's assumption does not
+# hold for test code.
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+    "S105",  # "token"/"password" literals in fixtures are fake by construction
+    "S106",
+    "S108",  # /tmp paths in tests are the test's own scratch
+    "S103",  # chmod 0o755 to set up a permissions fixture
+    "S603",  # subprocess in a test harness, with fixed argv
+    "S607",
+    "B017",  # a bare-Exception assertRaises is sometimes exactly the assertion
+    "RUF012",  # dataclass-ish test doubles carry mutable defaults by design
+    "ASYNC221",  # a git fixture in an async test is setup, not I/O under test
+]

@@ -111,7 +111,6 @@ def test_report_tool_is_in_the_cached_tool_list(tmp_path, monkeypatch):
 
     def spy(model_id, system, tools, *args, **kwargs):
         seen["tools"] = list(tools)
-        return None  # no cache overlay; we only want the tool list it was handed
 
     monkeypatch.setattr(lh, "growing_cache_middleware", spy)
     monkeypatch.setattr(lh, "base_middleware", lambda *a, **k: [])

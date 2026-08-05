@@ -36,6 +36,7 @@ from langchain.agents.middleware import (
 from langchain_core.messages import (
     AIMessageChunk,
 )
+from typing_extensions import Self
 
 from .config import Config
 from .personas import Persona
@@ -377,7 +378,7 @@ class AgentRunner:
 
         return self._cfg.memory.enabled and MEMORY_GROUP in persona.tool_groups
 
-    async def __aenter__(self) -> AgentRunner:
+    async def __aenter__(self) -> Self:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
         ckpt_path = self._cfg.db_path.with_suffix(".ckpt.db")
@@ -715,7 +716,7 @@ class AgentRunner:
         parts: list[str] = []
         seen_tool_ids: set[str] = set()
         cur_msg_id: str | None = None
-        async for mode, data in graph.astream(
+        async for _mode, data in graph.astream(
             input, config=config, stream_mode=["messages"]
         ):
             chunk, meta = data
@@ -759,9 +760,12 @@ class AgentRunner:
                 else [{"type": "text", "text": chunk.content}]
             )
             for block in blocks:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    if text := block.get("text", ""):
-                        parts.append(text)
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and (text := block.get("text", ""))
+                ):
+                    parts.append(text)
         usage = usage_cb.usage_metadata.values()
         return "".join(parts), _TurnUsage(
             input_tokens=sum(u.get("input_tokens", 0) for u in usage),

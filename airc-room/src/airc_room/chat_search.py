@@ -61,6 +61,7 @@ def _parse_since(s: str) -> float | None:
 
 
 def _iso(ts: float) -> str:
+    # Local time on purpose: this is read by a human, next to their own clock.
     return datetime.fromtimestamp(ts).isoformat(timespec="minutes")
 
 

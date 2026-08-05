@@ -702,7 +702,7 @@ class Store:
             badge,
             regress,
             improve,
-            dict(zip(BADGE_BUCKETS, counts)),
+            dict(zip(BADGE_BUCKETS, counts, strict=False)),
             composed,
         )
 
@@ -915,7 +915,7 @@ class Store:
         cols = [c[0] for c in cur.description]
         rows = []
         for r in cur.fetchall():
-            d = dict(zip(cols, r))
+            d = dict(zip(cols, r, strict=False))
             d["isolates"] = None if d["isolates"] is None else bool(d["isolates"])
             rows.append(d)
         return rows

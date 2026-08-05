@@ -67,6 +67,7 @@ class ConsoleTransport(Transport):
     async def deliver(self, msg: Message) -> None:
         if msg.kind == MessageKind.HUMAN and msg.sender == self.user:
             return  # already on screen as typed input
+        # Local time on purpose: printed next to the reader's own clock.
         ts = datetime.fromtimestamp(msg.ts).strftime("%H:%M")
         style = (
             "italic ansibrightblack"

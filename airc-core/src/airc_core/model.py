@@ -32,7 +32,7 @@ from langchain.chat_models import init_chat_model
 # from, in place of GCE metadata ADC (which the sandbox netfilter blocks). Set by
 # the sandbox profile in token+vertex mode; unset everywhere else, so the daemon
 # and any non-sandboxed caller keep normal ADC. See _vertex_file_credentials.
-_VERTEX_TOKEN_ENV = "AIRC_VERTEX_TOKEN_FILE"
+_VERTEX_TOKEN_ENV = "AIRC_VERTEX_TOKEN_FILE"  # noqa: S105 -- a var NAME
 
 # Env var naming a loopback endpoint that fronts Vertex for a sandboxed caller.
 # The successor to _VERTEX_TOKEN_ENV above: there the box holds a short-lived
@@ -324,12 +324,15 @@ def _vertex_file_credentials(path: str):
         now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         try:
             t = datetime.datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            pass
+        else:
             if t.tzinfo is not None:
                 t = t.astimezone(datetime.UTC).replace(tzinfo=None)
             return t
-        except (ValueError, TypeError):
-            pass
         try:
+            # google.auth compares expiry as naive UTC (see above), so attaching
+            # a tzinfo would make every comparison raise.
             return datetime.datetime.strptime(
                 " ".join(s.split()), "%a %b %d %H:%M:%S UTC %Y"
             )

@@ -87,7 +87,6 @@ async def test_deliver_wake_translates_stable_key_before_respond(monkeypatch):
 
     async def _fake_guarded_turn(name, thread_id, **kw):
         calls.append((name, thread_id, kw))
-        return None  # nothing to add -> no post
 
     monkeypatch.setattr(orch, "_guarded_turn", _fake_guarded_turn)
 

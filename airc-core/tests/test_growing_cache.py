@@ -239,7 +239,7 @@ async def test_threads_get_independent_caches():
     mw, state = _mw()
     await _run(mw, _Req(_history(0), thread="A"))
     await _run(mw, _Req(_history(0), thread="B"))
-    assert {k for k in mw._states} == {"A", "B"}
+    assert set(mw._states) == {"A", "B"}
     assert mw._states["A"].name != mw._states["B"].name
     assert len(state["created"]) == 2  # one cache per conversation
 
@@ -384,7 +384,7 @@ async def test_window_guard_serves_uncached_when_prefix_plus_tail_too_big():
     # must step aside and send the full request uncached for that call.
     mw, _ = _mw(tools_tokens=500_000)  # prefix ~500k, under the 0.6*1M cap
     await _run(mw, _Req(_history(0)))  # creates cache (prefix_tokens ~500k)
-    big_tail = _history(0) + [HumanMessage("x" * 1_600_000)]  # ~400k-token tail
+    big_tail = [*_history(0), HumanMessage("x" * 1_600_000)]  # ~400k-token tail
     seen = await _run(mw, _Req(big_tail))
     assert seen["model"] == "BASE"  # served uncached, not via the cache
     assert seen["messages"] == big_tail
@@ -406,7 +406,7 @@ async def test_window_guard_does_not_double_count_the_prefix():
             "total_tokens": 550_001,
         },
     )
-    seen = await _run(mw, _Req(_history(0) + [tail_msg]))
+    seen = await _run(mw, _Req([*_history(0), tail_msg]))
     # ~550k total is under the 0.9M window, so the cache must serve it -- not step
     # aside to BASE as the double-counted 500k+550k would have forced.
     assert seen["model"] != "BASE"

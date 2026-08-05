@@ -222,7 +222,7 @@ def _print_token_report(args: argparse.Namespace) -> None:
             f"  #{tid:<5} {_fmt_tokens(i):>8} in  {_fmt_tokens(o):>8} out  {title[:48]}"
         )
     print("\nheaviest turns (calls / max-per-call flags context accumulation):")
-    for tid, agent, kind, i, calls, mx, o in tokens.heaviest_turns(n=10):
+    for tid, agent, kind, i, calls, mx, _o in tokens.heaviest_turns(n=10):
         per = f"{calls} calls" if calls else "? calls"
         print(
             f"  #{tid:<5} {_fmt_tokens(i):>8} in over {per:>9}"
@@ -507,8 +507,9 @@ async def amain(args: argparse.Namespace) -> None:
         from .memory import MEMORY_GROUP, make_memory_tools
 
         local_tool_groups[MEMORY_GROUP] = make_memory_tools(cfg.memory.path)
-    async with MCPToolset(cfg.mcp_servers, cfg.tool_groups) as toolset:
-        async with AgentRunner(
+    async with (
+        MCPToolset(cfg.mcp_servers, cfg.tool_groups) as toolset,
+        AgentRunner(
             cfg,
             personas,
             toolset,
@@ -517,83 +518,80 @@ async def amain(args: argparse.Namespace) -> None:
             room_prompt=room_prompt,
             timer_scheduler=scheduler,
             local_tool_groups=local_tool_groups,
-        ) as runner:
-            if console:
-                # Console listed all personas above; narrow to the usable ones.
-                console.agents = runner.agents
-            # The app plugin (resolved from config) supplies the announcement
-            # response handlers; the room dispatches to them by follow_up key and
-            # stays domain-blind. A bare room (no plugin) registers none.
-            follow_ups = (
-                plugin.build_follow_ups(cfg, store, agents_dir=agents_dir)
-                if plugin
-                else {}
-            )
-            orchestrator = Orchestrator(cfg, room, runner, store, follow_ups=follow_ups)
-            scheduler.deliver = orchestrator.deliver_wake
-            # Rebuild pending timers from the store before run() starts, so a
-            # timer set before the restart still fires (one immediately if it came
-            # due while the daemon was down). deliver is wired just above, so a
-            # due timer has a live path the moment run() ticks.
-            scheduler.restore()
-            # The orchestrator must be the FIRST task created: its synchronous
-            # recovery pass then runs before any transport/watcher coroutine,
-            # which is what excludes double-processing of recovered messages.
-            tasks = [asyncio.create_task(orchestrator.run(), name="orchestrator")]
-            tasks.append(asyncio.create_task(scheduler.run(), name="timers"))
-            tasks.append(
-                asyncio.create_task(_token_log_loop(store, tokens), name="tokens")
-            )
-            # A non-console transport runs its inbound loop as a background task
-            # (the console owns the foreground, below); its aux services (gchat's
-            # space-subscription renewal) join as peers.
-            if transport is not None:
-                tasks.append(asyncio.create_task(transport.run(), name=transport.name))
-                for i, svc in enumerate(aux_tasks):
-                    tasks.append(
-                        asyncio.create_task(svc(), name=f"{transport.name}-aux{i}")
-                    )
-            subscribers = (
-                plugin.build_subscribers(cfg, room, store, toolset)
-                if plugin and not args.no_watch
-                else []
-            )
-            # Background services the plugin supervises: periodic/clock loops with
-            # no bus topic (e.g. grocery's memory compaction). Gated by --no-watch
-            # alongside subscribers, since both are the plugin's autonomous work.
-            services = (
-                plugin.build_services(cfg, room, store)
-                if plugin and not args.no_watch and hasattr(plugin, "build_services")
-                else []
-            )
-            # One startup line stating what was actually wired: the transport and
-            # the bus subscribers. A silently-ignored config section (e.g. a flat
-            # [chat]/[[commentary]] after the [airc.*] namespacing) shows up here
-            # as transport=console or an empty subscriber list, instead of just
-            # going quiet.
-            log.info(
-                "airc: transport=%s bus_root=%s subscribers=[%s] services=[%s]",
-                kind,
-                cfg.bus_root,
-                ", ".join(s.name for s in subscribers) or "none",
-                ", ".join(s.name for s in services) or "none",
-            )
-            for src in subscribers:
-                tasks.append(asyncio.create_task(src.run(), name=f"source:{src.name}"))
-            for svc in services:
-                tasks.append(asyncio.create_task(svc.run(), name=f"service:{svc.name}"))
-            try:
-                await (console.run() if console else _serve_headless())
-            finally:
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                # Give a transport a chance to resolve outstanding state (gchat
-                # sweeps its "thinking..." cards); duck-typed, so console/matrix
-                # without one are skipped.
-                aclose = getattr(transport, "aclose", None) if transport else None
-                if aclose:
-                    await aclose()
+        ) as runner,
+    ):
+        if console:
+            # Console listed all personas above; narrow to the usable ones.
+            console.agents = runner.agents
+        # The app plugin (resolved from config) supplies the announcement
+        # response handlers; the room dispatches to them by follow_up key and
+        # stays domain-blind. A bare room (no plugin) registers none.
+        follow_ups = (
+            plugin.build_follow_ups(cfg, store, agents_dir=agents_dir) if plugin else {}
+        )
+        orchestrator = Orchestrator(cfg, room, runner, store, follow_ups=follow_ups)
+        scheduler.deliver = orchestrator.deliver_wake
+        # Rebuild pending timers from the store before run() starts, so a
+        # timer set before the restart still fires (one immediately if it came
+        # due while the daemon was down). deliver is wired just above, so a
+        # due timer has a live path the moment run() ticks.
+        scheduler.restore()
+        # The orchestrator must be the FIRST task created: its synchronous
+        # recovery pass then runs before any transport/watcher coroutine,
+        # which is what excludes double-processing of recovered messages.
+        tasks = [asyncio.create_task(orchestrator.run(), name="orchestrator")]
+        tasks.append(asyncio.create_task(scheduler.run(), name="timers"))
+        tasks.append(asyncio.create_task(_token_log_loop(store, tokens), name="tokens"))
+        # A non-console transport runs its inbound loop as a background task
+        # (the console owns the foreground, below); its aux services (gchat's
+        # space-subscription renewal) join as peers.
+        if transport is not None:
+            tasks.append(asyncio.create_task(transport.run(), name=transport.name))
+            for i, svc in enumerate(aux_tasks):
+                tasks.append(
+                    asyncio.create_task(svc(), name=f"{transport.name}-aux{i}")
+                )
+        subscribers = (
+            plugin.build_subscribers(cfg, room, store, toolset)
+            if plugin and not args.no_watch
+            else []
+        )
+        # Background services the plugin supervises: periodic/clock loops with
+        # no bus topic (e.g. grocery's memory compaction). Gated by --no-watch
+        # alongside subscribers, since both are the plugin's autonomous work.
+        services = (
+            plugin.build_services(cfg, room, store)
+            if plugin and not args.no_watch and hasattr(plugin, "build_services")
+            else []
+        )
+        # One startup line stating what was actually wired: the transport and
+        # the bus subscribers. A silently-ignored config section (e.g. a flat
+        # [chat]/[[commentary]] after the [airc.*] namespacing) shows up here
+        # as transport=console or an empty subscriber list, instead of just
+        # going quiet.
+        log.info(
+            "airc: transport=%s bus_root=%s subscribers=[%s] services=[%s]",
+            kind,
+            cfg.bus_root,
+            ", ".join(s.name for s in subscribers) or "none",
+            ", ".join(s.name for s in services) or "none",
+        )
+        for src in subscribers:
+            tasks.append(asyncio.create_task(src.run(), name=f"source:{src.name}"))
+        for svc in services:
+            tasks.append(asyncio.create_task(svc.run(), name=f"service:{svc.name}"))
+        try:
+            await (console.run() if console else _serve_headless())
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Give a transport a chance to resolve outstanding state (gchat
+            # sweeps its "thinking..." cards); duck-typed, so console/matrix
+            # without one are skipped.
+            aclose = getattr(transport, "aclose", None) if transport else None
+            if aclose:
+                await aclose()
     store.close()
 
 
@@ -620,10 +618,8 @@ def main() -> None:
         return
     log_file = _setup_logging(args.verbose)
     print(f"airc {__version__} (logs: {log_file})")
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(amain(args))
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":

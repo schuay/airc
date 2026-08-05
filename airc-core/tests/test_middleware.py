@@ -8,6 +8,8 @@ stripping, retry, and Anthropic caching from base_middleware; the explicit
 context cache is the caller-appended growing-prefix overlay, gated to Vertex.
 """
 
+import contextlib
+
 from airc_core.agent import (
     CallBudgetMiddleware,
     EmptyCandidateError,
@@ -298,12 +300,10 @@ async def _retry_over_empty(responses):
         return type("R", (), {"result": [AIMessage(**box.pop(0))]})()
 
     agent._empty_retry.set(0)
-    try:
+    with contextlib.suppress(EmptyCandidateError):
         await retry.awrap_model_call(
             _Req(0, [HumanMessage("go")]), lambda r: empty.awrap_model_call(r, inner)
         )
-    except EmptyCandidateError:
-        pass
     return seen
 
 
@@ -493,7 +493,7 @@ def test_growing_cache_omitted_when_disabled():
 def test_context_budget_is_outermost():
     # Both builders compose base_middleware + (cache?) + governor; the crash-fix
     # guarantee is that _ContextBudget leads regardless of the appended tail.
-    composed = base_middleware(_VERTEX, "sys", []) + ["governor"]
+    composed = [*base_middleware(_VERTEX, "sys", []), "governor"]
     assert type(composed[0]).__name__ == "_ContextBudget"
 
 

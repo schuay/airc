@@ -52,7 +52,7 @@ def test_missing_system_md(tmp_path):
     folder = tmp_path / "y"
     folder.mkdir()
     (folder / "agent.toml").write_text('description = "y"')
-    with pytest.raises(PersonaError, match="system.md"):
+    with pytest.raises(PersonaError, match=r"system\.md"):
         load_persona(folder)
 
 

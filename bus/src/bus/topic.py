@@ -25,6 +25,7 @@ per-topic seq is purely the on-disk position and cursor unit.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -116,10 +117,8 @@ class Subscription:
                 # namespace and keep going; the cursor advances past it when a
                 # later message is acked. Loud (ERROR:) so the bug still surfaces.
                 bad = p.parent / (p.name + ".bad")
-                try:
+                with contextlib.suppress(OSError):
                     p.rename(bad)
-                except OSError:
-                    pass
                 log.error("ERROR: bus: unparseable %s; quarantined: %s", p.name, e)
                 continue
             out.append((seq, env))

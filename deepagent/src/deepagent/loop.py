@@ -156,7 +156,7 @@ async def _resume_notice(workdir: Path) -> str:
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except (OSError, asyncio.TimeoutError):
+    except (TimeoutError, OSError):
         return ""
     status = out.decode(errors="replace").strip()
     return (

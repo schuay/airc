@@ -12,6 +12,7 @@ itself instead of us wrapping read/list/grep.
 """
 
 import asyncio
+import contextlib
 import os
 import re
 import signal
@@ -202,10 +203,8 @@ _TIMEOUT_HINT = (
 
 
 def _killpg(proc):
-    try:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 async def run_shell(
@@ -260,7 +259,7 @@ async def run_shell(
     timed_out = False
     try:
         await asyncio.wait_for(drain(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         timed_out = True
     except BaseException:
         # External cancellation (an embedder's turn timeout or daemon shutdown)

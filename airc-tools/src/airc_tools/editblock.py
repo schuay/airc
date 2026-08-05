@@ -40,13 +40,14 @@ def perfect_replace(whole_lines, part_lines, replace_lines):
         if tuple(whole_lines[i : i + part_len]) == part_tup:
             res = whole_lines[:i] + replace_lines + whole_lines[i + part_len :]
             return "".join(res)
+    return None
 
 
 def match_but_for_leading_whitespace(whole_lines, part_lines):
     num = len(whole_lines)
     # The non-whitespace of every line must agree...
     if not all(whole_lines[i].lstrip() == part_lines[i].lstrip() for i in range(num)):
-        return
+        return None
     # ...and every non-blank line must be offset by the same leading prefix.
     # A search line LONGER than the file line has no prefix to lift -- the
     # length delta goes negative and the slice below would cut real content
@@ -57,14 +58,14 @@ def match_but_for_leading_whitespace(whole_lines, part_lines):
         for i in range(num)
         if whole_lines[i].strip()
     ):
-        return
+        return None
     add = {
         whole_lines[i][: len(whole_lines[i]) - len(part_lines[i])]
         for i in range(num)
         if whole_lines[i].strip()
     }
     if len(add) != 1:
-        return
+        return None
     return add.pop()
 
 
@@ -122,7 +123,7 @@ def try_dotdotdots(whole, part, replace):
     if len(part_pieces) != len(replace_pieces):
         raise ValueError("Unpaired ... in SEARCH/REPLACE block")
     if len(part_pieces) == 1:
-        return
+        return None
 
     # The `...` separators themselves (odd indices) must match on both sides.
     if not all(
@@ -130,10 +131,13 @@ def try_dotdotdots(whole, part, replace):
     ):
         raise ValueError("Unmatched ... in SEARCH/REPLACE block")
 
+    # Drop the odd indices (the `...` separators), keeping the content pieces.
+    # Rebinding the parameters is deliberate: the split form is what every line
+    # below means by these names, and a second pair would invite using the wrong one.
     part_pieces = [part_pieces[i] for i in range(0, len(part_pieces), 2)]
     replace_pieces = [replace_pieces[i] for i in range(0, len(replace_pieces), 2)]
 
-    for part, replace in zip(part_pieces, replace_pieces):
+    for part, replace in zip(part_pieces, replace_pieces, strict=False):  # noqa: PLR1704
         if not part and not replace:
             continue
         if not part and replace:

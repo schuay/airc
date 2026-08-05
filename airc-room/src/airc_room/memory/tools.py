@@ -103,6 +103,7 @@ def _git_sync(root: Path, *args: str) -> tuple[int, str]:
         capture_output=True,
         text=True,
         timeout=_GIT_TIMEOUT_S,
+        check=False,  # the caller inspects returncode; a raise would hide it
     )
     return proc.returncode, (proc.stdout + proc.stderr)
 

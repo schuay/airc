@@ -62,6 +62,7 @@ def _build(root: Path) -> str:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_S,
+            check=False,  # a grep miss is an empty index, not an error
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

@@ -23,7 +23,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -47,7 +47,6 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import get_buffer_string
 from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.constants import TAG_NOSTREAM
-from typing_extensions import NotRequired
 
 from .model import _VERTEX_PROXY_ENV, make_model
 
@@ -378,6 +377,7 @@ def retrying(model):
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * _RETRY_BACKOFF_FACTOR, _RETRY_MAX_DELAY)
+        return None
 
     return RunnableLambda(_call)
 
@@ -1042,11 +1042,10 @@ def _seed_vertex_cache_globals() -> str:
     initializer.global_config._location = location
     if project := os.environ.get("GOOGLE_CLOUD_PROJECT"):
         initializer.global_config._project = project
-    if tok := os.environ.get("AIRC_VERTEX_TOKEN_FILE"):
-        if os.path.exists(tok):
-            from .model import _vertex_file_credentials
+    if (tok := os.environ.get("AIRC_VERTEX_TOKEN_FILE")) and os.path.exists(tok):
+        from .model import _vertex_file_credentials
 
-            initializer.global_config._credentials = _vertex_file_credentials(tok)
+        initializer.global_config._credentials = _vertex_file_credentials(tok)
     return location
 
 

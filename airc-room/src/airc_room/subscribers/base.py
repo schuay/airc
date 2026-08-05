@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -61,8 +61,8 @@ def age_seconds(iso: str) -> float | None:
     except ValueError:
         return None
     if t.tzinfo is None:
-        t = t.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - t).total_seconds()
+        t = t.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - t).total_seconds()
 
 
 def fmt_age(seconds: float) -> str:

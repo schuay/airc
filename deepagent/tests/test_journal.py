@@ -72,7 +72,7 @@ def test_concurrent_appends_do_not_tear(tmp_path):
 
     def writer(tid: int) -> None:
         barrier.wait()  # maximize overlap
-        for k in range(per_thread):
+        for _k in range(per_thread):
             # A payload well past pipe-atomic size, so an unlocked write would
             # interleave visibly.
             j.emit(EventKind.MESSAGE, agent=f"t{tid}", text="x" * 3000)

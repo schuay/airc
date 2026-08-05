@@ -36,6 +36,7 @@ def _commit_count(root) -> int:
         ["git", "-C", str(root), "rev-list", "--count", "HEAD"],
         capture_output=True,
         text=True,
+        check=False,  # unborn HEAD errors; the docstring says that returns 0
     )
     return int(r.stdout.strip()) if r.returncode == 0 else 0
 

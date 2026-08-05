@@ -285,8 +285,13 @@ class _JournalCallback(BaseCallbackHandler):
                 msg = getattr(gen, "message", None)
                 content = getattr(msg, "content", gen.text if gen else "")
                 self._emit_content(content)
-        except Exception:  # defensive: callback errors must not fail the turn
-            pass
+        except Exception as e:
+            # A callback must not fail the turn -- it only feeds the journal, and
+            # losing one event is far cheaper than losing the model call that
+            # produced it. But swallowing it silently means a systematically
+            # broken emitter looks like a model that never says anything, so it
+            # is logged at debug rather than dropped on the floor.
+            log.debug("journal callback: on_llm_end: %s: %s", type(e).__name__, e)
 
     def _emit_content(self, content) -> None:
         if isinstance(content, str):
@@ -356,8 +361,11 @@ class _StopReasonCallback(BaseCallbackHandler):
                 tool_calls = getattr(msg, "tool_calls", None) or []
                 content = str(getattr(msg, "content", "") or "").strip()
                 self.empty = not tool_calls and not content
-        except Exception:  # defensive: callback errors must not fail the turn
-            pass
+        except Exception as e:
+            # Same trade as on_llm_end above: never fail the turn, but do not go
+            # silent -- `empty` drives the dead-turn detection, so an emitter
+            # that always raises here would make every turn look non-empty.
+            log.debug("empty-check callback: %s: %s", type(e).__name__, e)
 
 
 async def _thread_live(graph, thread_id: str) -> bool:
@@ -784,7 +792,7 @@ class LangGraphHarness:
                         reason or "(none)",
                         " (empty candidate)" if stop_cb.empty else "",
                     )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("%s: turn timed out after %.0fs", agent or "turn", timeout_s)
             code = -1
         except EmptyCandidateError:

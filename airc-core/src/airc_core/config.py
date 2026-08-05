@@ -83,7 +83,7 @@ def load_common(raw: Mapping) -> CommonConfig:
         spec = dict(server)
         enabled = spec.pop("enable_in_sandbox", False)
         if not isinstance(enabled, bool):
-            raise ValueError(f"mcp.servers.{name}.enable_in_sandbox must be a boolean")
+            raise TypeError(f"mcp.servers.{name}.enable_in_sandbox must be a boolean")
         cfg.mcp_servers[name] = spec
         cfg.mcp_enable_in_sandbox[name] = enabled
     if groups := raw.get("tool_groups"):
@@ -116,6 +116,7 @@ def apply_gcp_env_defaults(gcp: Mapping[str, str]) -> None:
     ):
         if env not in os.environ and (val := gcp.get(key)):
             os.environ[env] = str(val)  # a TOML int/float would crash os.environ
-    if "GOOGLE_CLOUD_QUOTA_PROJECT" not in os.environ:
-        if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
-            os.environ["GOOGLE_CLOUD_QUOTA_PROJECT"] = proj
+    if "GOOGLE_CLOUD_QUOTA_PROJECT" not in os.environ and (
+        proj := os.environ.get("GOOGLE_CLOUD_PROJECT")
+    ):
+        os.environ["GOOGLE_CLOUD_QUOTA_PROJECT"] = proj
