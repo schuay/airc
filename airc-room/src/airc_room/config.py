@@ -338,6 +338,19 @@ class HandoverConfig:
     enabled: bool = False
     autonomy: str = "draft-only"  # draft-only | upload-wip | upload-cq-pinpoint
     bus_root: Path = field(default_factory=lambda: DATA_DIR / "bus")
+    # Emit no fix jobs: the deployment gathers verified repros and leaves the
+    # fixing to humans. Read here as well as by the processor because there are
+    # TWO producers of a fix -- the processor's per-finding handover, and the
+    # results consumer's fix-from-a-verified-repro. Core dropped this key
+    # silently, so the second one kept uploading CLs under a config that
+    # promised none.
+    #
+    # TODO(jgruber): replace with per-kind gates ([handover.kinds.<kind>]
+    # enabled), which is the shape this actually wants: a bool per job kind,
+    # opaque to core, instead of one domain-named boolean that has to be taught
+    # to every producer as they appear. See the same TODO in
+    # airc_processors.config.
+    repro_only: bool = False
 
 
 @dataclass
@@ -578,6 +591,7 @@ def load_config(path: Path | None = None) -> Config:
         bus_root=Path(h["bus_root"]).expanduser()
         if h.get("bus_root")
         else cfg.bus_root,
+        repro_only=bool(h.get("repro_only", False)),
     )
     if "plugin_module" in own:
         cfg.plugin_module = str(own["plugin_module"])

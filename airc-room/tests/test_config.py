@@ -202,6 +202,16 @@ def test_handover_bus_root_defaults_to_suite_bus_root(tmp_path):
     assert str(cfg.handover.bus_root) == "/tmp/icu-bus"
 
 
+def test_handover_repro_only_round_trips(tmp_path):
+    # Core dropped this key silently, which left the app's second fix producer
+    # (the results consumer's fix-from-a-verified-repro) uploading CLs under a
+    # config that promised none. Core does not act on it -- it carries it, so
+    # every producer reads the same policy.
+    assert not load_config(_write(tmp_path, "[handover]\n")).handover.repro_only
+    body = "[handover]\nenabled = true\nrepro_only = true\n"
+    assert load_config(_write(tmp_path, body)).handover.repro_only
+
+
 def test_core_default_tool_groups_are_empty():
     # The core substrate ships no tool groups: every app supplies its own. The
     # coding v8-utils/gdb groups (and their content tests) live in airc-coding.
