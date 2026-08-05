@@ -8,7 +8,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from airc_room.memory import (
     MEMORY_GROUP,
     MEMORY_RULES,

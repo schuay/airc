@@ -4,7 +4,6 @@
 """Token report formatting (cli helpers)."""
 
 from airc_core import TokenLog
-
 from airc_room.cli import _fmt_tokens, _pct, _token_summary_line
 from airc_room.store import Store
 

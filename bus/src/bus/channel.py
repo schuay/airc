@@ -47,7 +47,7 @@ class Channel:
             p.name for p in (self.root / "incoming").iterdir() if p.suffix == ".json"
         )
 
-    def claim(self) -> "Claim | None":
+    def claim(self) -> Claim | None:
         for name in self.pending():  # ulid-sorted: oldest first
             src = self.root / "incoming" / name
             dst = self.root / "in-progress" / name
@@ -58,7 +58,7 @@ class Channel:
             return Claim(self, dst, Envelope.from_bytes(dst.read_bytes()))
         return None
 
-    def adopt(self, env: Envelope) -> "Claim":
+    def adopt(self, env: Envelope) -> Claim:
         """Publish a message straight into in-progress, skipping incoming.
 
         For seeding a job a consumer should *resume* (via in_progress()) rather
@@ -72,7 +72,7 @@ class Channel:
         os.rename(tmp, dst)  # atomic within the fs
         return Claim(self, dst, env)
 
-    def in_progress(self) -> list["Claim"]:
+    def in_progress(self) -> list[Claim]:
         """Re-adopt messages left in in-progress/ by a prior run (crash recovery).
 
         A claim moves a message to in-progress/ and only leaves on complete/fail,

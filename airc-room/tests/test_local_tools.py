@@ -9,11 +9,10 @@ this tests the gating logic in isolation: the same set operations _build_agent
 performs over persona.tool_groups and the runner's local_tool_groups.
 """
 
-from langchain_core.tools import tool
-
 from airc_room.config import Config
 from airc_room.personas import Persona
 from airc_room.runner import AgentRunner
+from langchain_core.tools import tool
 
 
 @tool

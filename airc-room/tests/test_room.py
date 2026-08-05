@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-
 from airc_room.room import Room, UndeliveredError
 from airc_room.store import MessageKind, Store
 

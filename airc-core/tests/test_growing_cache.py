@@ -9,16 +9,15 @@ real create_agent graph end to end. tools_tokens is set above the 4096 floor so
 caching engages without padding the message content.
 """
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-
 from airc_core.agent import (
     _GrowingPrefixCache,
     _is_cache_gone,
     _last_step_boundary,
     _recache_pays,
 )
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 
 async def _noop(r):
@@ -258,7 +257,7 @@ async def test_new_run_shrink_resets_and_drops_prior_cache():
 
 
 async def test_mid_run_cache_gone_degrades_and_rebuilds():
-    mw, state = _mw()
+    mw, _state = _mw()
     await _run(mw, _Req(_history(0)))  # cache c1
     calls = []
 
@@ -293,7 +292,7 @@ async def test_permanent_create_failure_cools_down_instance_wide():
 
 
 async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     # Collapse the transient cooldown to zero so the next turn is immediately
     # eligible to retry -- the regression this guards: a prefill overload used to
@@ -326,12 +325,12 @@ async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatc
 
 
 async def test_empty_candidate_retry_serves_uncached():
-    import airc_core.agent as agent
+    from airc_core import agent
 
     # _EmptyCandidateRetry sets this for its one mutated retry: the cache must
     # stop serving the prefix that may be producing the empty, so the retry
     # tests a genuinely different input.
-    mw, state = _mw()
+    mw, _state = _mw()
     first = await _run(mw, _Req(_history(2)))
     assert first["model"] == "M:c1"  # cached normally
     agent._empty_retry.set(1)
@@ -352,7 +351,7 @@ async def test_one_empty_candidate_flake_does_not_cost_the_cache():
     prefix: on a long conversation that repurchases the whole thing at full
     input rate on every later call in the turn.
     """
-    import airc_core.agent as agent
+    from airc_core import agent
 
     mw, state = _mw()
     empty = agent._EmptyCandidateRetry()
@@ -442,7 +441,7 @@ async def test_prefix_size_corrected_from_reported_cache_read():
 
 
 async def test_lru_eviction_deletes_the_evicted_cache(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent, "_GROWING_MAX_STATES", 2)
     mw, state = _mw()
@@ -475,11 +474,10 @@ class _ScriptModel(BaseChatModel):
 
 
 async def test_end_to_end_graph_grows_cache_and_sends_tail():
+    from airc_core.agent import CallBudgetMiddleware, base_middleware
     from langchain.agents import create_agent
     from langchain.agents.middleware import ModelCallLimitMiddleware
     from langchain_core.tools import tool
-
-    from airc_core.agent import CallBudgetMiddleware, base_middleware
 
     @tool
     def look(x: str) -> str:
@@ -541,8 +539,9 @@ def test_seed_vertex_cache_globals_seeds_location_project_and_file_creds(
     monkeypatch, tmp_path
 ):
     import json
-    from google.cloud.aiplatform import initializer
+
     from airc_core.agent import _seed_vertex_cache_globals
+    from google.cloud.aiplatform import initializer
 
     tok = tmp_path / "vertex.json"
     tok.write_text(json.dumps({"token": "t", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}))
@@ -558,8 +557,8 @@ def test_seed_vertex_cache_globals_seeds_location_project_and_file_creds(
 
 
 def test_seed_vertex_cache_globals_skips_creds_when_token_absent(monkeypatch, tmp_path):
-    from google.cloud.aiplatform import initializer
     from airc_core.agent import _seed_vertex_cache_globals
+    from google.cloud.aiplatform import initializer
 
     sentinel = "ORIGINAL_SENTINEL"
     initializer.global_config._credentials = sentinel
@@ -577,10 +576,11 @@ async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_tok
     monkeypatch, tmp_path
 ):
     import json
-    from google.cloud.aiplatform import initializer
+
     import langchain_google_vertexai as lgv
-    from vertexai.preview import caching
     from airc_core.agent import _growing_cache_fns
+    from google.cloud.aiplatform import initializer
+    from vertexai.preview import caching
 
     captured_create = {}
     captured_delete = {}

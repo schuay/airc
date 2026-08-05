@@ -114,7 +114,7 @@ async def test_turn_semaphore_bounds_parallelism(tmp_path, monkeypatch):
 
 
 async def test_watermark_advances_through_replies(tmp_path, monkeypatch):
-    store, room, runner, orch = make_env(tmp_path, monkeypatch, agents=("perf",))
+    store, room, _runner, orch = make_env(tmp_path, monkeypatch, agents=("perf",))
     t = room.create_thread("main")
     await room.post(t.id, "alice", "human", "perf: go")
     await drive(orch, lambda: len(replies(store, t.id)) == 1)
@@ -153,7 +153,7 @@ async def test_recovery_skips_pre_upgrade_threads(tmp_path, monkeypatch):
 
 async def test_idle_worker_exits_and_revives(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "_IDLE_S", 0.05)
-    store, room, runner, orch = make_env(
+    store, room, _runner, orch = make_env(
         tmp_path, monkeypatch, agents=("perf",), delay=0.01
     )
     t = room.create_thread("main")
@@ -201,7 +201,7 @@ async def test_room_post_enqueues_in_id_order(tmp_path, monkeypatch):
 async def test_turn_timeout_cuts_off_stuck_turn(tmp_path, monkeypatch):
     cfg = Config()
     cfg.orchestrator = OrchestratorConfig(turn_timeout=0.05)
-    store, room, runner, orch = make_env(
+    store, room, _runner, orch = make_env(
         tmp_path, monkeypatch, agents=("perf",), cfg=cfg, delay=10.0
     )
     t = room.create_thread("main")

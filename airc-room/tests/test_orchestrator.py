@@ -6,7 +6,6 @@ from airc_room.config import Config, OrchestratorConfig
 from airc_room.orchestrator import Orchestrator, parse_mentions
 from airc_room.store import Message
 
-
 KNOWN = {"perf", "compiler", "security"}
 
 

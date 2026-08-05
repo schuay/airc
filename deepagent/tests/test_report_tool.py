@@ -12,10 +12,10 @@ threads it through the prompts; these tests lock both halves together.
 
 import re
 
+from deepagent.langgraph_harness import _DEFAULT_SYSTEM, _HARD_NUDGE, _SOFT_NUDGE
 from langchain.agents.structured_output import OutputToolBinding, ToolStrategy
 
 from deepagent import REPORT_TOOL_NAME, Report
-from deepagent.langgraph_harness import _DEFAULT_SYSTEM, _HARD_NUDGE, _SOFT_NUDGE
 
 
 class _StageReport(Report):

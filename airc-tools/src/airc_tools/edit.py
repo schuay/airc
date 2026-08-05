@@ -121,8 +121,10 @@ def apply_edits(path: str, edits: list[tuple[str, str]]) -> str:
 def _failure_text(path, failures, content) -> str:
     n = len(failures)
     parts = [
-        f"{n} SEARCH block{'s' if n != 1 else ''} failed to match in {path}."
-        " No changes were written.\n"
+        (
+            f"{n} SEARCH block{'s' if n != 1 else ''} failed to match in {path}."
+            " No changes were written.\n"
+        )
     ]
     for idx, search, replace in failures:
         parts.append(

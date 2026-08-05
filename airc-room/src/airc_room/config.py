@@ -54,10 +54,10 @@ from __future__ import annotations
 import logging
 import math
 import os
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import tomllib
 from airc_core import DEFAULT_TOOL_GROUPS, load_common
 from airc_core import apply_gcp_env_defaults as _apply_gcp_env
 from platformdirs import user_config_path, user_data_path

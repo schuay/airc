@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-
 from airc_room.config import Config, load_config, write_template_config
 
 

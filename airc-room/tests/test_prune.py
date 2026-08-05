@@ -19,7 +19,6 @@ import sqlite3
 import time
 
 import pytest
-
 from airc_room.prune import (
     Counts,
     aged_threads,

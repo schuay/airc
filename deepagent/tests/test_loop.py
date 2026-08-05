@@ -3,6 +3,8 @@
 
 from dataclasses import dataclass, field
 
+from deepagent.journal import EventKind
+
 from deepagent import (
     AgentResult,
     Disposition,
@@ -12,7 +14,6 @@ from deepagent import (
     MockHarness,
     run_agent_loop,
 )
-from deepagent.journal import EventKind
 
 
 async def _run(results, *, max_iters=20, tmp):

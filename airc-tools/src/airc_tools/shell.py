@@ -41,7 +41,7 @@ _BUILD_TRAP = re.compile(
     r"(?:(?:\S*/)?(?:v?python3?)\s+)?"
     r"(?:\S*/)?"
     r"(?:ninja|siso\s+ninja|gn\s+clean|gm\.py|gclient)\b",
-    re.I,
+    re.IGNORECASE,
 )
 _BUILD_TRAP_MSG = (
     "error: raw `ninja` / `siso ninja` / `gn clean` / `gm.py` / `gclient` is"
@@ -120,7 +120,7 @@ _TEE = re.compile(r"(?:^|[;&|]+)\s*tee\b([^;&|<>]*)")
 _INPLACE = re.compile(
     r"(?:^|[;&|]+)\s*(?:sed\s+(?:-[^\s]*\s+)*-i|perl\s+(?:-[^\s]*\s+)*-i"
     r"|git\s+apply|patch\b)",
-    re.I,
+    re.IGNORECASE,
 )
 # `git apply --check` / `--stat` / `--summary` only inspect a patch; they write
 # nothing, and refusing them would block a legitimate way to test whether a diff

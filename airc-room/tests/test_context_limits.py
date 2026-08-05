@@ -7,25 +7,24 @@ import asyncio
 import logging
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, LLMResult
-from langchain_core.tools import StructuredTool
-
+from airc_core.agent import (
+    _ELIDED_TOOL_RESULT,
+    _MAX_KEPT_RESULT_CHARS,
+    _CallTrace,
+    _estimate_input_tokens,
+    compact_for_budget,
+    prune_to_recent_tool_results,
+    truncate_oversized_tool_results,
+)
 from airc_core.mcptools import (
     _MAX_TOOL_RESULT_CHARS,
     _fix_tool,
     _result_chars,
     _truncated,
 )
-from airc_core.agent import (
-    _CallTrace,
-    _ELIDED_TOOL_RESULT,
-    _MAX_KEPT_RESULT_CHARS,
-    _estimate_input_tokens,
-    compact_for_budget,
-    prune_to_recent_tool_results,
-    truncate_oversized_tool_results,
-)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
+from langchain_core.tools import StructuredTool
 
 
 def test_tool_results_are_capped():

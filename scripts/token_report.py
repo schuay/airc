@@ -21,8 +21,9 @@ Usage:
 import argparse
 import sqlite3
 import time
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 CONFIG_PATH = Path("~/.config/airc/config.toml").expanduser()
 DEFAULT_DB = Path("~/.local/share/airc/tokens.db").expanduser()

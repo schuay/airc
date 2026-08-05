@@ -4,7 +4,6 @@
 import sqlite3
 
 import pytest
-
 from airc_room.store import MessageKind, Store
 
 
@@ -265,7 +264,7 @@ def test_headline_compose_guard(tmp_path):
     s.record_headline(1, "spaces/A/messages/M1", "*v8* ▸ thing")
     row = s.headline_for_compose(1)
     assert row is not None
-    name, base, tag, badge, regress, improve, counts, composed = row
+    name, base, tag, badge, regress, improve, _counts, composed = row
     # composed is seeded with base_text at record time: a recompose with no
     # parts yet is a no-op, so no redundant Chat edit is issued.
     assert (name, base, tag, badge, regress, improve) == (

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-
 from airc_room.config import MatrixConfig
 from airc_room.room import Room
 from airc_room.store import Message, MessageKind, Store
@@ -117,7 +116,7 @@ def _msg(thread_id, sender, kind, text):
 
 
 async def test_deliver_renders_plain_and_html(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, room, _store, client = _make(tmp_path, monkeypatch)
     tid = room.default_thread().id
     await t.deliver(_msg(tid, "gc", MessageKind.AGENT, "look at <T>"))
     (room_id, content) = client.sent[0]
@@ -134,7 +133,7 @@ async def test_deliver_renders_plain_and_html(tmp_path, monkeypatch):
 async def test_deliver_converts_markdown_to_html(tmp_path, monkeypatch):
     # Personas write markdown; the formatted_body must carry the HTML a Matrix
     # client renders, not raw asterisks/pipes. The body stays the raw text.
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, room, _store, client = _make(tmp_path, monkeypatch)
     tid = room.default_thread().id
     md = "the **best** deal on ~~old~~ *fresh* eggs"
     await t.deliver(_msg(tid, "hawk", MessageKind.AGENT, md))
@@ -150,7 +149,7 @@ async def test_deliver_converts_markdown_to_html(tmp_path, monkeypatch):
 async def test_deliver_renders_list_and_code_and_table(tmp_path, monkeypatch):
     # The block constructs the personas actually use -- a shopping list, a code
     # fence, a price table -- must reach the client as real HTML blocks.
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, room, _store, client = _make(tmp_path, monkeypatch)
     tid = room.default_thread().id
     body = "prices:\n\n| item | eur |\n|---|---|\n| eggs | 1.99 |\n\n- milk\n- bread"
     await t.deliver(_msg(tid, "hawk", MessageKind.AGENT, body))
@@ -164,7 +163,7 @@ async def test_deliver_renders_list_and_code_and_table(tmp_path, monkeypatch):
 async def test_deliver_multiline_system_announcement_converts(tmp_path, monkeypatch):
     # A multi-line SYSTEM/NOTICE body (headline + detail) is markdown-rendered so
     # its structure survives; a one-line notice stays a plain italic aside.
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, room, _store, client = _make(tmp_path, monkeypatch)
     tid = room.default_thread().id
     await t.deliver(_msg(tid, "airc", MessageKind.NOTICE, "**heads up**\n\n- a\n- b"))
     html = client.sent[0][1]["formatted_body"]
@@ -176,7 +175,7 @@ async def test_deliver_multiline_system_announcement_converts(tmp_path, monkeypa
 
 
 async def test_deliver_skips_human(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, room, _store, client = _make(tmp_path, monkeypatch)
     tid = room.default_thread().id
     await t.deliver(_msg(tid, "someone", MessageKind.HUMAN, "hi"))
     assert client.sent == []
@@ -218,7 +217,7 @@ async def test_deliver_threaded_first_send_becomes_root(tmp_path, monkeypatch):
 
 
 async def test_deliver_unmapped_thread_falls_back_to_first_room(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, room, _store, client = _make(tmp_path, monkeypatch)
     # A thread with no chat_threads link (a proactive post) still sends, to the
     # first configured room.
     thread = room.create_thread("proactive")
@@ -230,7 +229,7 @@ async def test_deliver_unmapped_thread_falls_back_to_first_room(tmp_path, monkey
 
 
 async def test_inbound_posts_human_message(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, _room, store, _client = _make(tmp_path, monkeypatch)
     fr = _FakeRoom("!fam:example.org", names={"@bob:example.org": "bob"})
     ev = _FakeEvent("@bob:example.org", "hello airc", "$in1:example.org")
     await t._on_message(fr, ev)
@@ -243,7 +242,7 @@ async def test_inbound_posts_human_message(tmp_path, monkeypatch):
 
 
 async def test_inbound_ignores_own_echo(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, _room, store, _client = _make(tmp_path, monkeypatch)
     fr = _FakeRoom("!fam:example.org")
     ev = _FakeEvent("@airc:example.org", "my own reply", "$mine:example.org")
     await t._on_message(fr, ev)
@@ -253,7 +252,7 @@ async def test_inbound_ignores_own_echo(tmp_path, monkeypatch):
 
 
 async def test_inbound_ignores_unserved_room(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, _room, store, _client = _make(tmp_path, monkeypatch)
     fr = _FakeRoom("!stranger:example.org")
     ev = _FakeEvent("@bob:example.org", "hi", "$s:example.org")
     await t._on_message(fr, ev)
@@ -261,7 +260,7 @@ async def test_inbound_ignores_unserved_room(tmp_path, monkeypatch):
 
 
 async def test_inbound_dedups_by_event_id(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, _room, store, _client = _make(tmp_path, monkeypatch)
     fr = _FakeRoom("!fam:example.org")
     ev = _FakeEvent("@bob:example.org", "twice", "$dup:example.org")
     await t._on_message(fr, ev)
@@ -271,7 +270,7 @@ async def test_inbound_dedups_by_event_id(tmp_path, monkeypatch):
 
 
 async def test_inbound_flat_routes_all_to_one_thread(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch, use_threads=False)
+    t, _room, store, _client = _make(tmp_path, monkeypatch, use_threads=False)
     fr = _FakeRoom("!fam:example.org")
     await t._on_message(fr, _FakeEvent("@bob:example.org", "one", "$a:example.org"))
     await t._on_message(fr, _FakeEvent("@ann:example.org", "two", "$b:example.org"))
@@ -279,7 +278,7 @@ async def test_inbound_flat_routes_all_to_one_thread(tmp_path, monkeypatch):
 
 
 async def test_inbound_threaded_routes_by_relation(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch, use_threads=True)
+    t, _room, store, _client = _make(tmp_path, monkeypatch, use_threads=True)
     fr = _FakeRoom("!fam:example.org")
     # A root message (no relation) and a reply in its thread land in the SAME
     # airc thread; an unrelated root opens a second.
@@ -343,7 +342,7 @@ async def test_typing_refcounts_concurrent_agents(tmp_path, monkeypatch):
 
 
 async def test_aclose_closes_client(tmp_path, monkeypatch):
-    t, room, store, client = _make(tmp_path, monkeypatch)
+    t, _room, _store, client = _make(tmp_path, monkeypatch)
     await t.aclose()
     assert getattr(client, "closed", False) is True
 

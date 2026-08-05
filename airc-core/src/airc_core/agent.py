@@ -25,10 +25,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated, Any
 
-from langgraph.channels.untracked_value import UntrackedValue
-from langgraph.constants import TAG_NOSTREAM
-from typing_extensions import NotRequired
-
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
@@ -49,6 +45,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.utils import get_buffer_string
+from langgraph.channels.untracked_value import UntrackedValue
+from langgraph.constants import TAG_NOSTREAM
+from typing_extensions import NotRequired
 
 from .model import _VERTEX_PROXY_ENV, make_model
 

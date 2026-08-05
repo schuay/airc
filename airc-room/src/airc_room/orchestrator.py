@@ -51,8 +51,9 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from .config import Config
 from airc_core import TokenLog, make_model, retrying, usage_counts
+
+from .config import Config
 from .room import Room
 from .runner import AgentRunner
 from .store import Message, MessageKind, Store
@@ -283,7 +284,7 @@ class TurnContext:
 
     def __init__(
         self,
-        orch: "Orchestrator",
+        orch: Orchestrator,
         *,
         responder: str,
         thread_id: int,

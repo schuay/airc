@@ -18,8 +18,9 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from bus import Envelope, Subscription
 from pydantic import ValidationError
+
+from bus import Envelope, Subscription
 
 from ..store import MessageKind
 
@@ -74,7 +75,7 @@ def fmt_age(seconds: float) -> str:
 
 
 async def post_caught_up(
-    room: "Room", noun: str, skipped: int, oldest: float, window: float
+    room: Room, noun: str, skipped: int, oldest: float, window: float
 ) -> None:
     """A single operational notice after a restart drained a stale backlog, so
     the room shows the gap was handled rather than going eerily silent. Its own

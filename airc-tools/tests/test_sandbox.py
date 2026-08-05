@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-
 from airc_tools.sandbox import Sandbox
 from airc_tools.shell import run_shell
 
@@ -71,7 +70,6 @@ def test_journal_socket_bound_when_present(profile, monkeypatch, tmp_path):
     # needs /run/systemd/journal/stdout; bind it (when it exists) so the connect
     # succeeds instead of spraying "Failed to create stream fd" into every result.
     import socket as _socket
-
     from pathlib import Path
 
     from airc_tools import sandbox as sb

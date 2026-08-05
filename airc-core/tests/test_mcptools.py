@@ -4,10 +4,9 @@
 import asyncio
 from dataclasses import dataclass
 
-from langchain_core.tools import ToolException
-
 from airc_core import mcptools
 from airc_core.mcptools import MCPToolset, _clean_schema, _fix_tool
+from langchain_core.tools import ToolException
 
 # The default read/active groups, mirrored from airc's config so the filtering
 # tests exercise the real patterns without depending on the airc package.

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-
 from airc_room.personas import PersonaError, discover_personas, load_persona
 
 

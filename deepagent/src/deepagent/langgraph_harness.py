@@ -31,9 +31,6 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
 
-from langchain_core.callbacks import BaseCallbackHandler
-from pydantic import BaseModel, Field
-
 from airc_core import (
     CommonConfig,
     EmptyCandidateError,
@@ -48,6 +45,8 @@ from airc_tools.edit import apply_edits as _apply_edits
 from airc_tools.edit import write_file as _write_file
 from airc_tools.read import read_file as _read_file
 from airc_tools.shell import run_shell as _run_shell
+from langchain_core.callbacks import BaseCallbackHandler
+from pydantic import BaseModel, Field
 
 from .harness import REPORT_TOOL_NAME, AgentResult, HarnessRun, Report, to_result
 from .journal import EventKind, Journal
@@ -578,14 +577,13 @@ class LangGraphHarness:
             self._graphs.move_to_end(thread_id)
             return self._graphs[thread_id]
 
-        from langchain.agents import create_agent
-        from langchain.agents.middleware import ModelCallLimitMiddleware
-        from langchain.agents.structured_output import OutputToolBinding, ToolStrategy
-
         from airc_core import (
             CallBudgetMiddleware,
             RequireStructuredResultMiddleware,
         )
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import ModelCallLimitMiddleware
+        from langchain.agents.structured_output import OutputToolBinding, ToolStrategy
 
         tools = [
             *self._v8_tools,
@@ -720,9 +718,8 @@ class LangGraphHarness:
         log_path = result_path.with_suffix(".log")
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        from langchain_core.callbacks import UsageMetadataCallbackHandler
-
         from airc_core.agent import _CallTrace
+        from langchain_core.callbacks import UsageMetadataCallbackHandler
 
         usage_cb = UsageMetadataCallbackHandler()
         trace_cb = _CallTrace(agent or "turn", "turn")

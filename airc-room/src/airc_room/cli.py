@@ -17,10 +17,10 @@ import signal
 import sys
 from pathlib import Path
 
+from airc_core import MCPToolset, TokenLog
 from platformdirs import user_state_path
 
 from . import __version__
-from airc_core import MCPToolset, TokenLog
 from .config import CONFIG_DIR, apply_gcp_env_defaults, load_config
 from .orchestrator import Orchestrator
 from .personas import discover_personas, load_room_prompt
@@ -89,8 +89,9 @@ def _validate_models(cfg, personas) -> None:
 
 def _print_models(args: argparse.Namespace) -> None:
     """Handle --list-models: print available models per configured provider."""
-    from .config import apply_gcp_env_defaults, load_config
     from airc_core import list_models
+
+    from .config import apply_gcp_env_defaults, load_config
 
     cfg = load_config(args.config)
     apply_gcp_env_defaults(cfg)

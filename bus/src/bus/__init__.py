@@ -21,12 +21,12 @@ from .topic import Subscription, Topic
 
 # The permanent, domain-neutral surface. Only these belong to `bus`.
 __all__ = [
+    "SCHEMA_VERSION",
     "BlobStore",
     "Channel",
     "Claim",
     "Envelope",
-    "SCHEMA_VERSION",
-    "Topic",
     "Subscription",
+    "Topic",
     "ulid",
 ]

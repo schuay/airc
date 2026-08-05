@@ -8,10 +8,6 @@ stripping, retry, and Anthropic caching from base_middleware; the explicit
 context cache is the caller-appended growing-prefix overlay, gated to Vertex.
 """
 
-from langchain.agents.middleware import ModelRetryMiddleware, SummarizationMiddleware
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-
 from airc_core.agent import (
     CallBudgetMiddleware,
     EmptyCandidateError,
@@ -22,6 +18,9 @@ from airc_core.agent import (
     growing_cache_middleware,
     retrying,
 )
+from langchain.agents.middleware import ModelRetryMiddleware, SummarizationMiddleware
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
 
 _NON_VERTEX = "google_genai:gemini-3.1-flash-lite"
 _VERTEX = "google_vertexai:gemini-2.5-flash"
@@ -50,7 +49,7 @@ class _FlakyModel:
 
 
 async def test_retrying_retries_transient_then_succeeds(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     model = _FlakyModel([RuntimeError("429 resource_exhausted"), RuntimeError("503")])
@@ -60,7 +59,7 @@ async def test_retrying_retries_transient_then_succeeds(monkeypatch):
 
 
 async def test_retrying_does_not_retry_non_transient(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     model = _FlakyModel([ValueError("malformed request")])
@@ -74,7 +73,7 @@ async def test_retrying_does_not_retry_non_transient(monkeypatch):
 
 
 async def test_retrying_propagates_after_exhausting(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     # Always transient: exhausts the budget and re-raises the last error.
@@ -207,7 +206,7 @@ _EMPTY_STOP = {"content": "", "response_metadata": {"finish_reason": "STOP"}}
 
 
 async def test_empty_candidate_retries_then_succeeds(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     # A zero-part STOP (the silent-dead-turn shape) is a flake, not an answer:
@@ -220,7 +219,7 @@ async def test_empty_candidate_retries_then_succeeds(monkeypatch):
 
 
 async def test_empty_candidate_exhausts_and_raises_by_type(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     # A deterministic empty (a cache-fault or history poison, not a flake)
@@ -239,7 +238,7 @@ async def test_empty_candidate_exhausts_and_raises_by_type(monkeypatch):
 
 
 async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypatch):
-    import airc_core.agent as agent
+    from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     # The discrimination the detection scope rests on: a SAFETY/RECITATION block
@@ -278,7 +277,7 @@ async def _retry_over_empty(responses):
     to the middleware NESTED inside the retry (the cache), which shares this
     context.
     """
-    import airc_core.agent as agent
+    from airc_core import agent
 
     empty = agent._EmptyCandidateRetry()
     retry = ModelRetryMiddleware(
@@ -318,7 +317,7 @@ async def test_a_repeated_empty_is_retried_once_uncached_with_a_nudge():
 
 
 async def test_a_non_empty_response_resets_the_retry_counter():
-    import airc_core.agent as agent
+    from airc_core import agent
 
     # One empty then a real reply: the episode is over, so a later empty in the
     # same turn starts fresh against a warm cache rather than stepping aside
@@ -329,7 +328,7 @@ async def test_a_non_empty_response_resets_the_retry_counter():
 
 
 async def test_an_empty_candidate_is_never_handed_back_to_the_retry_layer():
-    import airc_core.agent as agent
+    from airc_core import agent
 
     # _is_retryable must reject EmptyCandidateError by TYPE. The raise embeds
     # the provider's finish_reason, so a reason naming an overload or an
@@ -344,7 +343,7 @@ async def test_an_empty_candidate_is_never_handed_back_to_the_retry_layer():
 
 
 async def test_the_nudge_is_not_reappended_on_an_empty_candidate_retry():
-    import airc_core.agent as agent
+    from airc_core import agent
 
     # after_model never runs when _EmptyCandidateRetry raises, so model_calls
     # freezes and the threshold would re-fire on every retry of the same call --
@@ -419,7 +418,11 @@ class _RaisingModel:
 
 async def test_summary_failure_keeps_history_instead_of_replacing_it():
     # A tiny trigger so a couple of messages force summarization.
-    cfg = dict(model=_RaisingModel(), trigger=("tokens", 5), keep=("tokens", 1))
+    cfg = {
+        "model": _RaisingModel(),
+        "trigger": ("tokens", 5),
+        "keep": ("tokens", 1),
+    }
     msgs = [
         HumanMessage("hello there " * 20),
         AIMessage("general kenobi " * 20),
@@ -603,12 +606,11 @@ class _ScriptedToolModel(BaseChatModel):
 
 
 def _verdict_agent(scripted, max_reasks=3, with_governors=False):
-    from pydantic import BaseModel
-
     from langchain.agents import create_agent
     from langchain.agents.middleware import ModelCallLimitMiddleware
     from langchain.agents.structured_output import ToolStrategy
     from langchain_core.tools import tool
+    from pydantic import BaseModel
 
     @tool
     def read(x: str) -> str:
@@ -667,7 +669,7 @@ async def test_require_result_gives_up_bounded_when_never_complies():
     # A model that only ever answers in prose is re-asked exactly max_reasks
     # times, then the turn ends verdict-less (None -> the caller's incomplete,
     # never a clean pass). The bound is what keeps it off the recursion limit.
-    model, agent = _verdict_agent([{"content": "always prose"}], max_reasks=3)
+    _model, agent = _verdict_agent([{"content": "always prose"}], max_reasks=3)
     state = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert state.get("structured_response") is None
     assert _reminders(state) == 3
@@ -689,14 +691,14 @@ async def test_require_result_composes_with_the_review_governors():
     # owner). Its jump back to the model must still fire there, and the bound must
     # still terminate -- otherwise a prose-forever turn spins to the recursion
     # limit even though the isolated middleware is correct.
-    model, agent = _verdict_agent(
+    _model, agent = _verdict_agent(
         [{"content": "prose"}, _TOOL_TURN], with_governors=True
     )
     state = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert state.get("structured_response").verdict == "rejected"
     assert _reminders(state) == 1
 
-    model, agent = _verdict_agent(
+    _model, agent = _verdict_agent(
         [{"content": "always prose"}], max_reasks=3, with_governors=True
     )
     state = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})

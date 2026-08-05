@@ -532,8 +532,10 @@ def main(argv: list[str] | None = None) -> int:
                 (
                     "prune",
                     time.time(),
-                    f"swept {counts.summary()} (window {days:.0f}d,"
-                    f" threads {_compact_ids(targets)})",
+                    (
+                        f"swept {counts.summary()} (window {days:.0f}d,"
+                        f" threads {_compact_ids(targets)})"
+                    ),
                 ),
             )
             db.commit()

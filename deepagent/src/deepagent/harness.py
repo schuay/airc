@@ -116,7 +116,7 @@ class Harness(Protocol):
         resume: bool = False,
         resume_prompt: str = "",
         casefile: Path | None = None,
-        journal: "Journal | None" = None,
+        journal: Journal | None = None,
     ) -> HarnessRun: ...
 
 

@@ -4,9 +4,8 @@
 """compact_for_budget only sheds at the hard threshold; below it, intact (so the
 prefix cache is never poisoned by a preemptive strip)."""
 
-from langchain_core.messages import HumanMessage, ToolMessage
-
 from airc_core.agent import _ELIDED_TOOL_RESULT, compact_for_budget
+from langchain_core.messages import HumanMessage, ToolMessage
 
 
 def _tool(text: str, i: int) -> ToolMessage:

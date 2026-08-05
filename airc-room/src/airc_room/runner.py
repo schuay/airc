@@ -17,11 +17,18 @@ import asyncio
 import contextlib
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Awaitable, Callable
 
-
+from airc_core import MCPToolset, TokenLog, make_model, missing_key
+from airc_core.agent import (
+    CallBudgetMiddleware,
+    TimeBudgetMiddleware,
+    _CallTrace,
+    base_middleware,
+    growing_cache_middleware,
+)
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
@@ -31,14 +38,6 @@ from langchain_core.messages import (
 )
 
 from .config import Config
-from airc_core import MCPToolset, TokenLog, make_model, missing_key
-from airc_core.agent import (
-    CallBudgetMiddleware,
-    TimeBudgetMiddleware,
-    _CallTrace,
-    base_middleware,
-    growing_cache_middleware,
-)
 from .personas import Persona
 from .store import Message, MessageKind, Store
 

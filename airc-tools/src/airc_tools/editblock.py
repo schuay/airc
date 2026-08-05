@@ -58,11 +58,11 @@ def match_but_for_leading_whitespace(whole_lines, part_lines):
         if whole_lines[i].strip()
     ):
         return
-    add = set(
+    add = {
         whole_lines[i][: len(whole_lines[i]) - len(part_lines[i])]
         for i in range(num)
         if whole_lines[i].strip()
-    )
+    }
     if len(add) != 1:
         return
     return add.pop()

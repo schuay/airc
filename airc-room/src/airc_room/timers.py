@@ -79,7 +79,7 @@ class TimerScheduler:
     restart (call `restore()` once before `run()`); without one the scheduler is
     in-memory only."""
 
-    def __init__(self, store: "Store | None" = None) -> None:
+    def __init__(self, store: Store | None = None) -> None:
         self._store = store
         self._heap: list[_Wake] = []
         self._seq = 0

@@ -7,10 +7,10 @@ Report -> AgentResult flattening, and the skill-index renderer."""
 import inspect
 
 import pytest
-
-from deepagent import Disposition, Report, render_skill_index, to_result
 from deepagent.harness import REPORT_TOOL_NAME
 from deepagent.langgraph_harness import _abs, _worktree_tools
+
+from deepagent import Disposition, Report, render_skill_index, to_result
 
 
 class _DemoReport(Report):
@@ -104,6 +104,7 @@ def test_report_tool_is_in_the_cached_tool_list(tmp_path, monkeypatch):
     structured_response unset.
     """
     from airc_core import CommonConfig
+
     from deepagent import langgraph_harness as lh
 
     seen: dict[str, list] = {}

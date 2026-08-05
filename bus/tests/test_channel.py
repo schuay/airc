@@ -9,8 +9,9 @@ airc_coding, and bus must not depend on a plugin -- a correlation_id on a plain
 Envelope is all the channel semantics need.
 """
 
-from bus import BlobStore, Channel, Envelope
 from bus.channel import Claim
+
+from bus import BlobStore, Channel, Envelope
 
 
 def _job(i: int) -> Envelope:

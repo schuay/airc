@@ -4,7 +4,6 @@
 import logging
 
 import pytest
-
 from airc_core import SUPPORTED_PROVIDERS, check_model_id, list_models, make_model
 from airc_core.model import _silence_vertex_noise
 

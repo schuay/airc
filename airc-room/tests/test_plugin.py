@@ -8,13 +8,12 @@ loudly at startup rather than mysteriously at first use."""
 from types import SimpleNamespace
 
 import pytest
-
 from airc_room.plugin import PLUGIN_API_VERSION, validate_plugin
 
 
 def _ok_module(**extra):
     # A module with the three required factories present and callable.
-    base = dict(
+    base = dict(  # noqa: C408 -- kwargs form mirrors the module attrs it fakes
         build_subscribers=lambda *a, **k: [],
         build_follow_ups=lambda *a, **k: {},
         build_transport=lambda *a, **k: None,

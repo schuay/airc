@@ -38,5 +38,5 @@ class Envelope(BaseModel):
         return self.model_dump_json().encode()
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "Envelope":
+    def from_bytes(cls, data: bytes) -> Envelope:
         return cls.model_validate_json(data)

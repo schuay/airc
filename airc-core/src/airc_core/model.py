@@ -274,7 +274,7 @@ class _RetryNoiseFilter(logging.Filter):
         status = self._STATUS_RE.search(msg)
         if m:
             reason = status.group(0) if status else m.group(2)
-            record.msg = "vertex retry in %ss (%s)" % (m.group(1), reason)
+            record.msg = f"vertex retry in {m.group(1)}s ({reason})"
             record.args = ()
         return True
 
@@ -347,7 +347,7 @@ def _vertex_file_credentials(path: str):
             self.token = data.get("token")
             self.expiry = _parse_expiry(data.get("expiry"))
 
-        def refresh(self, request) -> None:  # noqa: ARG002 -- no network; re-read
+        def refresh(self, request) -> None:
             self._load()
 
     return _FileToken(path)

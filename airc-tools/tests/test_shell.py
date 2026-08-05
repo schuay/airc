@@ -5,7 +5,6 @@ import asyncio
 import time
 
 import pytest
-
 from airc_tools.limits import MAX_SHELL_CAPTURE
 from airc_tools.shell import _BUILD_TRAP_MSG, _WRITE_TRAP_MSG, run_shell
 

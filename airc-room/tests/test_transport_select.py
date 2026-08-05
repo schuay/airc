@@ -14,7 +14,6 @@ import argparse
 from types import SimpleNamespace
 
 import pytest
-
 from airc_room.cli import _resolve_transport_kind
 
 

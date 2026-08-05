@@ -5,9 +5,8 @@
 
 from types import SimpleNamespace
 
-from langchain_core.messages import AIMessageChunk
-
 from airc_room.runner import AgentRunner
+from langchain_core.messages import AIMessageChunk
 
 
 def _chunk(
