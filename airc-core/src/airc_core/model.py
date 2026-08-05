@@ -34,6 +34,40 @@ from langchain.chat_models import init_chat_model
 # and any non-sandboxed caller keep normal ADC. See _vertex_file_credentials.
 _VERTEX_TOKEN_ENV = "AIRC_VERTEX_TOKEN_FILE"
 
+# Env var naming a loopback endpoint that fronts Vertex for a sandboxed caller.
+# The successor to _VERTEX_TOKEN_ENV above: there the box holds a short-lived
+# token, here it holds NO credential at all and a host-side proxy attaches the
+# real one. Set only by the sandbox profile, so every other caller is untouched.
+#
+# This has to live here rather than at the call sites: make_model's callers pass
+# no kwargs, and the endpoint must reach the ChatVertexAI constructor.
+_VERTEX_PROXY_ENV = "AIRC_VERTEX_PROXY_ENDPOINT"
+
+
+def _proxy_kwargs(endpoint: str) -> dict:
+    """Client settings for talking to the sandbox's Vertex proxy.
+
+    Two of these are not free choices:
+
+    - `rest_asyncio`, not the default. With a custom endpoint langchain skips its
+      "rest" -> "grpc_asyncio" upgrade (_client_utils.py checks the HOSTNAME), and
+      plain "rest" resolves to a SYNCHRONOUS transport class whose methods return
+      non-awaitables. airc drives models via astream, so that path fails with
+      "object ResponseIterator can't be used in 'await' expression".
+    - an aio credential. rest_asyncio validates the credential TYPE, so a
+      google.auth.credentials instance is rejected outright. It carries no
+      authority: the proxy replaces the header. The box holding a credential that
+      authenticates nothing is the entire point.
+    """
+    from google.auth.aio.credentials import AnonymousCredentials
+
+    return {
+        "api_endpoint": endpoint,
+        "api_transport": "rest_asyncio",
+        "credentials": AnonymousCredentials(),
+    }
+
+
 # OpenRouter: an OpenAI-compatible endpoint. Served through the openai provider
 # (no langchain-openrouter package exists), so make_model rewrites an
 # "openrouter:<model>" id to the openai provider pointed at this base_url with
@@ -357,9 +391,15 @@ def make_model(model_id: str, **kwargs):
         # and the file existing, so a missing/not-yet-minted token falls back to
         # ADC rather than crashing model construction. An explicit caller-passed
         # credentials wins.
-        tok = os.environ.get(_VERTEX_TOKEN_ENV)
-        if tok and "credentials" not in kwargs and os.path.exists(tok):
-            kwargs = {**kwargs, "credentials": _vertex_file_credentials(tok)}
+        # The proxy supersedes the token file: with it set the box holds no
+        # credential at all, so it wins and the token branch is skipped. Both are
+        # sandbox-only and an explicit caller value still wins over either.
+        if (proxy := os.environ.get(_VERTEX_PROXY_ENV)) and "credentials" not in kwargs:
+            kwargs = {**_proxy_kwargs(proxy), **kwargs}
+        else:
+            tok = os.environ.get(_VERTEX_TOKEN_ENV)
+            if tok and "credentials" not in kwargs and os.path.exists(tok):
+                kwargs = {**kwargs, "credentials": _vertex_file_credentials(tok)}
         # Never surface the model's thought summaries. We consume only text
         # blocks, so thoughts are pure liability: on a degraded turn (prefill
         # overload, thrashed context) a thinking model can emit its reasoning as

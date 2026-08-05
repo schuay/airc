@@ -351,3 +351,58 @@ def test_make_model_shallows_vertex_sdk_retries(monkeypatch):
 
     m.make_model("anthropic:claude-fable-5")
     assert "max_retries" not in captured  # non-vertex untouched
+
+
+def test_vertex_proxy_env_configures_the_client_for_the_loopback_seam(monkeypatch):
+    """The sandbox proxy hook: no credential, async REST transport, our endpoint.
+
+    Both settings are forced rather than chosen. With a custom endpoint langchain
+    skips its "rest" -> "grpc_asyncio" upgrade and plain "rest" resolves to a
+    SYNC transport whose methods return non-awaitables -- and airc drives models
+    via astream, so that path fails at runtime, not at construction. The aio
+    credential is required by type and carries no authority; the proxy supplies
+    the real one.
+    """
+    from airc_core.model import _VERTEX_PROXY_ENV, _proxy_kwargs
+
+    monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:9999")
+    kw = _proxy_kwargs("http://127.0.0.1:9999")
+    assert kw["api_endpoint"] == "http://127.0.0.1:9999"
+    assert kw["api_transport"] == "rest_asyncio"
+    # An aio credential, not a sync one: rest_asyncio validates the TYPE.
+    from google.auth.aio.credentials import Credentials as AioCredentials
+
+    assert isinstance(kw["credentials"], AioCredentials)
+
+
+def test_vertex_proxy_supersedes_the_token_file(monkeypatch, tmp_path):
+    """With the proxy set the box holds NO credential, so it wins outright.
+
+    Both are sandbox-only and they are mutually exclusive by design: the proxy
+    replaces the brokered token, it does not supplement it. If the token branch
+    could still fire, a half-configured box would authenticate itself and the
+    'no credential in the sandbox' claim would quietly stop being true.
+    """
+    import json
+
+    from airc_core.model import _VERTEX_PROXY_ENV, _VERTEX_TOKEN_ENV
+
+    tok = tmp_path / "vertex.json"
+    tok.write_text(json.dumps({"token": "brokered", "expiry": "2099-01-01T00:00:00Z"}))
+    monkeypatch.setenv(_VERTEX_TOKEN_ENV, str(tok))
+    monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:9999")
+
+    captured = {}
+
+    def fake_init(model_id, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("airc_core.model.init_chat_model", fake_init)
+    from airc_core.model import make_model
+
+    make_model("google_vertexai:gemini-3.1-pro-preview")
+    assert captured["api_endpoint"] == "http://127.0.0.1:9999"
+    assert captured["api_transport"] == "rest_asyncio"
+    # The brokered-token credential must NOT have been used.
+    assert type(captured["credentials"]).__name__ != "_FileToken"
