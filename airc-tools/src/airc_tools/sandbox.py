@@ -135,6 +135,16 @@ class Sandbox:
     # config and hooks/ listed here -- a poisoned shared checkout is a
     # host-code-exec vector, writable refs/objects are only repo state.
     ro_over_rw_paths: tuple[Path, ...] = ()
+    # (source, destination) pairs bound ro at a DIFFERENT path than they live
+    # at. Every other bind here is src -> same path, which cannot express "put
+    # my file where the box expects to find theirs" -- the sandbox equivalent of
+    # a config override. Bound last, so they shadow anything underneath (bwrap
+    # mounts in order and a later mount wins; verified).
+    #
+    # Deliberately narrow: the destination is still subject to the leak check
+    # below, so a mapped bind can no more shadow a tmpfs or the rw root than any
+    # other. What it adds is only the freedom to choose the source.
+    bind_over_paths: tuple[tuple[Path, Path], ...] = ()
     # (mount point, size in bytes). Mounted before the binds so a bind under a
     # tmpfs (the worktree under the blanked $HOME) lands on top of it.
     tmpfs: tuple[tuple[str, int], ...] = ()
@@ -203,6 +213,15 @@ class Sandbox:
             if not p.exists():
                 raise FileNotFoundError(f"ro-over bind source missing: {p}")
             argv += ["--ro-bind", str(p), str(p)]
+        # Last, so a mapped bind wins over every same-path bind above it -- that
+        # is the whole point (e.g. a per-job /etc/hosts over the system /etc).
+        # A missing source raises for the same reason ro_over does: silently
+        # skipping it would leave the box reading the ORIGINAL file, which is
+        # the misconfiguration this bind exists to prevent.
+        for src, dst in self.bind_over_paths:
+            if not src.exists():
+                raise FileNotFoundError(f"bind-over source missing: {src}")
+            argv += ["--ro-bind", str(src), str(dst)]
         # Guarantee: no later mount may cover (be an ancestor-or-equal of) an
         # earlier tmpfs or the rw root. A violation is a silent sandbox leak --
         # the home-tmpfs shadow above if the phasing ever regresses, or a

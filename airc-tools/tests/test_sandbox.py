@@ -413,3 +413,74 @@ def test_assert_no_leak_raises_on_a_later_bind_of_the_exact_path(tmp_path):
     ]
     with pytest.raises(ValueError, match="leaks"):
         boxed._assert_no_leak(bad_root)
+
+
+def test_bind_over_places_a_file_at_a_different_path(tmp_path):
+    """The one bind that is not src -> same path.
+
+    Everything else here answers "let the box see this"; this answers "let the
+    box see THIS where it expects THAT" -- a config override, which is how a
+    per-job /etc/hosts or a build config reaches a checkout the job does not own.
+    """
+    src = tmp_path / "my-hosts"
+    src.write_text("127.0.0.1 example\n")
+    root = tmp_path / "wt"
+    root.mkdir()
+    box = Sandbox(root=root, bind_over_paths=((src, Path("/etc/hosts")),))
+    argv = box.wrapper()
+    i = argv.index(str(src))
+    assert argv[i - 1] == "--ro-bind"
+    assert argv[i + 1] == "/etc/hosts"
+
+
+def test_bind_over_lands_after_the_system_binds_so_it_wins(tmp_path):
+    """Order is the mechanism: bwrap mounts in sequence and a later mount wins.
+
+    If this bind were emitted before `--ro-bind /etc /etc`, the system file
+    would shadow the override and the box would silently read the wrong config
+    -- the exact failure the bind exists to prevent, and an invisible one.
+    """
+    src = tmp_path / "my-hosts"
+    src.write_text("x\n")
+    root = tmp_path / "wt"
+    root.mkdir()
+    # Assert against the LAST bind of any kind, not just /etc: the requirement
+    # is that nothing can be mounted after a mapped bind, and an assertion
+    # naming one earlier mount passes even when the bind is emitted far too
+    # early. (Measured: it did.)
+    ro = tmp_path / "dep"
+    ro.mkdir()
+    argv = Sandbox(
+        root=root,
+        ro_paths=(ro,),
+        bind_over_paths=((src, Path("/etc/hosts")),),
+    ).wrapper()
+    binds = [i for i, a in enumerate(argv) if a in ("--ro-bind", "--bind", "--tmpfs")]
+    assert argv.index(str(src)) > max(binds[:-1])
+
+
+def test_bind_over_source_must_exist(tmp_path):
+    # Skipping a missing source would leave the box reading the ORIGINAL file,
+    # which is the misconfiguration this bind exists to prevent -- so it raises
+    # rather than degrading, exactly as ro_over_rw_paths does.
+    root = tmp_path / "wt"
+    root.mkdir()
+    box = Sandbox(root=root, bind_over_paths=((tmp_path / "gone", Path("/etc/x")),))
+    with pytest.raises(FileNotFoundError, match="bind-over source missing"):
+        box.wrapper()
+
+
+def test_bind_over_cannot_shadow_the_rw_root(tmp_path):
+    """The new freedom is the SOURCE, not the destination.
+
+    A mapped bind is still a mount, so it stays under the leak check: being able
+    to choose where a file lands must not become a way to remount the rw root
+    read-only, or to cover a tmpfs.
+    """
+    src = tmp_path / "f"
+    src.write_text("x\n")
+    root = tmp_path / "wt"
+    root.mkdir()
+    box = Sandbox(root=root, bind_over_paths=((src, root),))
+    with pytest.raises(ValueError, match="leaks"):
+        box.wrapper()
