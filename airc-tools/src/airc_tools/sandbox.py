@@ -135,7 +135,24 @@ class Sandbox:
     # commit print a harmless-but-misleading "Read-only file system") with
     # config and hooks/ listed here -- a poisoned shared checkout is a
     # host-code-exec vector, writable refs/objects are only repo state.
+    #
+    # A directory listed here is sealed against CREATION too, which is the point
+    # for .git/worktrees: pinning only the files that exist at assembly time
+    # leaves the box free to add new ones. See rw_over_ro_paths for the matching
+    # hole when one entry inside such a directory must stay writable.
     ro_over_rw_paths: tuple[Path, ...] = ()
+    # rw holes punched back through a ro-over: bound AFTER ro_over_rw_paths so
+    # they win where they overlap. The shape this exists for is a directory that
+    # must be ro as a whole (so nothing new can be CREATED in it) while one entry
+    # inside it stays writable -- the main .git/worktrees, pinned so a box cannot
+    # plant a worktree config that steers host-side git, with this job's own
+    # private dir kept rw because git needs to create index.lock there.
+    #
+    # A missing source raises, like ro_over: these are not optional. Skipping one
+    # leaves the path read-only under its ro parent, which does not leak but does
+    # break every commit in the box -- the packed-refs.lock failure mode this
+    # module already documents, in a new place.
+    rw_over_ro_paths: tuple[Path, ...] = ()
     # (source, destination) pairs bound ro at a DIFFERENT path than they live
     # at. Every other bind here is src -> same path, which cannot express "put
     # my file where the box expects to find theirs" -- the sandbox equivalent of
@@ -233,6 +250,14 @@ class Sandbox:
             if not p.exists():
                 raise FileNotFoundError(f"ro-over bind source missing: {p}")
             argv += ["--ro-bind", str(p), str(p)]
+        # After the ro-over binds, so an rw hole wins over the ro parent that
+        # covers it. Order is the whole mechanism: emitted before them instead,
+        # the ro parent shadows the hole and the box gets a read-only path where
+        # git wants to write (verified both ways).
+        for p in self.rw_over_ro_paths:
+            if not p.exists():
+                raise FileNotFoundError(f"rw-over bind source missing: {p}")
+            argv += ["--bind", str(p), str(p)]
         # Last, so a mapped bind wins over every same-path bind above it -- that
         # is the whole point (e.g. a per-job /etc/hosts over the system /etc).
         # A missing source raises for the same reason ro_over does: silently

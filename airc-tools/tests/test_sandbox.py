@@ -291,6 +291,79 @@ def test_wrapper_refuses_missing_ro_over_source(tmp_path):
         boxed.wrapper()
 
 
+def _rw_over_box(tmp_path, use_cgroup=False):
+    """A sealed directory with one rw entry inside it, mirroring .git/worktrees
+    pinned ro while this job's own private worktree dir stays writable."""
+    root = tmp_path / "wt"
+    root.mkdir()
+    gitdir = tmp_path / "gitdir"
+    wts = gitdir / "worktrees"
+    private = wts / "mine"
+    (private).mkdir(parents=True)
+    (wts / "sibling").mkdir()
+    (wts / "sibling" / "config.worktree").write_text("[core]\n")
+    return (
+        gitdir,
+        private,
+        Sandbox(
+            root=root,
+            rw_paths=(gitdir,),
+            ro_over_rw_paths=(wts,),
+            rw_over_ro_paths=(private,),
+            tmpfs=(("/tmp", 1 << 20),),
+            env=(("HOME", str(tmp_path)),),
+            use_cgroup=use_cgroup,
+        ),
+    )
+
+
+def test_rw_over_binds_land_after_the_ro_over_parent(tmp_path):
+    # Order IS the mechanism: emitted before the ro-over parent, the seal
+    # shadows the hole and the box gets a read-only private worktree dir, where
+    # git then cannot create index.lock -- breaking every in-box commit.
+    gitdir, private, boxed = _rw_over_box(tmp_path)
+    argv = boxed.wrapper()
+    wts_ro = next(
+        i
+        for i in range(len(argv))
+        if argv[i] == "--ro-bind" and argv[i + 1] == str(gitdir / "worktrees")
+    )
+    private_rw = next(
+        i
+        for i in range(len(argv))
+        if argv[i] == "--bind" and argv[i + 1] == str(private)
+    )
+    assert private_rw > wts_ro
+
+
+@needs_bwrap
+async def test_rw_over_hole_writable_inside_sealed_parent_end_to_end(tmp_path):
+    # The two halves that matter together: nothing NEW can appear in the sealed
+    # directory (a planted worktree config is a host-code-exec vector, since
+    # host-side git runs core.fsmonitor from it), while the job's own dir stays
+    # writable for index.lock.
+    gitdir, private, boxed = _rw_over_box(tmp_path)
+    wts = gitdir / "worktrees"
+    out = await run_shell(
+        f"mkdir {wts}/planted 2>&1; "
+        f"echo x > {wts}/sibling/config.worktree 2>&1; "
+        f"touch {private}/index.lock && echo wrote_private",
+        sandbox=boxed,
+    )
+    assert "wrote_private" in out  # the hole is genuinely writable
+    assert out.count("Read-only file system") >= 2  # no plant, no sibling edit
+
+
+def test_wrapper_refuses_missing_rw_over_source(tmp_path):
+    # Same reasoning as ro-over, opposite failure: a skipped rw hole leaves the
+    # path read-only under its sealed parent, which does not leak but silently
+    # breaks in-box git. Fail at assembly instead.
+    _, private, boxed = _rw_over_box(tmp_path)
+    private.rmdir()
+    with pytest.raises(FileNotFoundError, match="mine"):
+        boxed.wrapper()
+
+
 def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
     # The prod bug: a ro bind that is an ANCESTOR of a tmpfs mount must land
     # BEFORE the tmpfs, or it shadows the tmpfs read-only ($HOME/.cache, where
