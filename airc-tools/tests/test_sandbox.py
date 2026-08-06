@@ -354,6 +354,44 @@ async def test_rw_over_hole_writable_inside_sealed_parent_end_to_end(tmp_path):
     assert out.count("Read-only file system") >= 2  # no plant, no sibling edit
 
 
+@needs_bwrap
+async def test_ro_over_pins_inside_an_rw_hole_survive_it(tmp_path):
+    # An rw hole re-opens everything under it, so a ro-over pin INSIDE the hole
+    # is shadowed by it unless re-emitted on top. That combination is the real
+    # .git shape -- the private worktree dir must be writable for index.lock,
+    # while the commondir and config.worktree inside it steer host-side git and
+    # must not be -- so the hole must not silently un-pin them.
+    root = tmp_path / "wt"
+    root.mkdir()
+    gitdir = tmp_path / "gitdir"
+    wts = gitdir / "worktrees"
+    private = wts / "mine"
+    private.mkdir(parents=True)
+    (private / "commondir").write_text("../..\n")
+    (private / "config.worktree").write_text("")
+    boxed = Sandbox(
+        root=root,
+        rw_paths=(gitdir,),
+        ro_over_rw_paths=(
+            private / "commondir",
+            private / "config.worktree",
+            wts,
+        ),
+        rw_over_ro_paths=(private,),
+        tmpfs=(("/tmp", 1 << 20),),
+        env=(("HOME", str(tmp_path)),),
+        use_cgroup=False,
+    )
+    out = await run_shell(
+        f"touch {private}/index.lock && echo wrote_lock; "
+        f"echo x > {private}/config.worktree 2>&1; "
+        f"echo x > {private}/commondir 2>&1",
+        sandbox=boxed,
+    )
+    assert "wrote_lock" in out  # the hole still works
+    assert out.count("Read-only file system") >= 2  # ...without un-pinning these
+
+
 def test_wrapper_refuses_missing_rw_over_source(tmp_path):
     # Same reasoning as ro-over, opposite failure: a skipped rw hole leaves the
     # path read-only under its sealed parent, which does not leak but silently

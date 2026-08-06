@@ -258,6 +258,16 @@ class Sandbox:
             if not p.exists():
                 raise FileNotFoundError(f"rw-over bind source missing: {p}")
             argv += ["--bind", str(p), str(p)]
+        # An rw hole re-opens everything under it, including any ro-over pin that
+        # lives INSIDE the hole -- and those pins are exactly the ones a caller
+        # punching a hole is most likely to still want (the .git case: the job's
+        # own private worktree dir must be writable for index.lock, while the
+        # commondir and config.worktree inside it must not be). Re-emit them on
+        # top rather than making every caller notice: the ordering is a property
+        # of this argv, so the fix belongs where the argv is built.
+        for p in self.ro_over_rw_paths:
+            if any(_strict_ancestor(h, p) for h in self.rw_over_ro_paths):
+                argv += ["--ro-bind", str(p), str(p)]
         # Last, so a mapped bind wins over every same-path bind above it -- that
         # is the whole point (e.g. a per-job /etc/hosts over the system /etc).
         # A missing source raises for the same reason ro_over does: silently
