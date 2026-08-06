@@ -194,8 +194,10 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     async def shell(command: str, timeout: float = shell_timeout_s) -> str:
         return await _run_shell(command, cwd=str(wt), timeout=timeout)
 
-    def read_file(path: str, offset: int = 1, limit: int = 2000) -> str:
-        return _read_file(_abs(wt, path), offset, limit)
+    def read_file(
+        path: str, offset: int = 1, limit: int = 2000, line_numbers: bool = False
+    ) -> str:
+        return _read_file(_abs(wt, path), offset, limit, line_numbers)
 
     def edit_file(path: str, edits: list[_Edit]) -> str:
         return _apply_edits(_abs(wt, path), [(e.search, e.replace) for e in edits])
@@ -225,7 +227,9 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
                 "Read a file verbatim from 1-based line `offset` for `limit`"
                 " lines. Relative paths resolve in the worktree; other paths are"
                 " absolute. No line-number gutter, so output pastes into an edit"
-                " search."
+                " search. Pass line_numbers=True when you need to CITE a location"
+                " (a report, a review comment, an argument to another tool);"
+                " that output carries a gutter and is not edit-safe."
             ),
         ),
         StructuredTool.from_function(
