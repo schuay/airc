@@ -684,3 +684,61 @@ async def test_a_bound_unix_socket_crosses_the_network_namespace(profile, tmp_pa
         assert "HOST" in out
     finally:
         srv.close()
+
+
+def test_tmp_overlay_source_must_exist(tmp_path):
+    # Skipping it would leave the box with no cache where it expects a warm one.
+    # For vpython that is not a degradation but a HANG (it tries to rebuild the
+    # venv and, with no network, never finishes), so this fails at assembly.
+    root = tmp_path / "wt"
+    root.mkdir()
+    box = Sandbox(root=root, tmp_overlay_paths=(tmp_path / "gone",))
+    with pytest.raises(FileNotFoundError, match="tmp-overlay source missing"):
+        box.wrapper()
+
+
+def test_tmp_overlay_cannot_shadow_a_tmpfs(tmp_path):
+    # An overlay covers its mount point exactly as a bind does, so it is subject
+    # to the leak rule too -- one over $HOME would shadow the blanked home just
+    # as silently as the ro bind that caused that bug.
+    src = tmp_path / "cache"
+    src.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    box = Sandbox(
+        root=root,
+        tmpfs=((str(src), 1 << 20),),
+        tmp_overlay_paths=(src,),
+    )
+    with pytest.raises(ValueError, match="leaks"):
+        box.wrapper()
+
+
+@needs_bwrap
+async def test_tmp_overlay_is_warm_to_read_and_writes_go_nowhere(profile, tmp_path):
+    """The two halves that make a shared tool cache safe to expose.
+
+    A cache the box must be able to WRITE to (vpython takes a lock file even to
+    read) but must never actually CHANGE: it is 4 GB of interpreters that every
+    `git cl` run executes, so a writable bind would let one box rewrite the
+    python every other box -- and the host -- then runs.
+
+    Both halves are asserted against a real box, because either alone is
+    useless: a cache that cannot be written fails the lock, and one whose writes
+    escape is the vulnerability.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "warm.txt").write_text("from the host\n")
+    boxed = dataclasses.replace(
+        profile, tmp_overlay_paths=(cache,), ro_paths=(*profile.ro_paths, cache)
+    )
+    out = await run_shell(
+        f"cat {cache}/warm.txt; echo poison > {cache}/evil.txt && echo WROTE",
+        sandbox=boxed,
+    )
+    assert "from the host" in out  # warm: the host's contents are there
+    assert "WROTE" in out  # writable: the box's own writes succeed
+    # ...and none of it reached the host.
+    assert not (cache / "evil.txt").exists()
+    assert (cache / "warm.txt").read_text() == "from the host\n"

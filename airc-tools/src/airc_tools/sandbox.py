@@ -153,6 +153,24 @@ class Sandbox:
     # break every commit in the box -- the packed-refs.lock failure mode this
     # module already documents, in a new place.
     rw_over_ro_paths: tuple[Path, ...] = ()
+    # Directories the box sees WARM and may write to, whose writes go nowhere:
+    # an overlayfs whose lower layer is the host path and whose upper layer is a
+    # per-box tmpfs (bwrap --tmp-overlay). Reads come from the host copy, writes
+    # land in the box and die with it.
+    #
+    # The shape this exists for is a shared tool cache the box must be able to
+    # write to but must never actually change -- vpython's, which is 4 GB of
+    # interpreters and ~21k Python files that every `git cl` execution runs. It
+    # needs a lock file even to READ, so a ro bind fails ("failed to acquire read
+    # lock ... read-only file system") and an absent one makes vpython try to
+    # rebuild the venv, which with no network HANGS. Binding it rw would be worse
+    # than either: one box could rewrite the interpreter every other box (and the
+    # host) then executes.
+    #
+    # Not a general substitute for ro: an overlay is writable from inside, so
+    # anything the box must not be able to change EVEN LOCALLY (a pinned git
+    # config, a credential) still belongs in ro_over_rw_paths.
+    tmp_overlay_paths: tuple[Path, ...] = ()
     # (source, destination) pairs bound ro at a DIFFERENT path than they live
     # at. Every other bind here is src -> same path, which cannot express "put
     # my file where the box expects to find theirs" -- the sandbox equivalent of
@@ -236,6 +254,16 @@ class Sandbox:
         # nothing uses that.
         for p in late:
             argv += ["--ro-bind", str(p), str(p)]
+        # With the other late binds: an overlay is a mount like any other, so it
+        # must not precede the tmpfs it might cover, and it is emitted before the
+        # rw root so it can never shadow the worktree. A missing source raises
+        # rather than degrading -- silently skipping it leaves the box with no
+        # cache at all, which for vpython is the HANG this field exists to avoid,
+        # and a hang is the worst way to learn about a bad bind.
+        for p in self.tmp_overlay_paths:
+            if not p.is_dir():
+                raise FileNotFoundError(f"tmp-overlay source missing: {p}")
+            argv += ["--overlay-src", str(p), "--tmp-overlay", str(p)]
         argv += ["--bind", str(self.root), str(self.root)]
         for p in self.rw_paths:
             if _bindable(p):
@@ -341,6 +369,12 @@ class Sandbox:
                 d = Path(argv[i + 1]).resolve()
                 mounts.append((i, d))
                 protected.append((i, d))
+                i += 2
+            elif a == "--tmp-overlay" and i + 1 < len(argv):
+                # Covers its mount point exactly as a bind does, so it is subject
+                # to the same rule -- an overlay over $HOME would shadow the
+                # tmpfs just as silently.
+                mounts.append((i, Path(argv[i + 1]).resolve()))
                 i += 2
             elif a in ("--ro-bind", "--bind") and i + 2 < len(argv):
                 d = Path(argv[i + 2]).resolve()
