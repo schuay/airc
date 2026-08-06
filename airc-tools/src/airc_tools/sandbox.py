@@ -16,8 +16,9 @@ so they get the same boundary as a realpath check against the declared mounts
 document that flows out to chat, no network needed.
 
 Known give-ups of this tier, documented rather than papered over:
-- Network stays the host's (no --unshare-net): the build needs RBE egress and
-  the credential-helper socket + netns allowlist is a follow-up step.
+- Network is the host's unless `unshare_net` is set. With it set the box has
+  no route off the machine at all; host-side proxies then reach it only through
+  a bind-mounted UNIX socket, which is what the Vertex and RBE proxies do.
 - Build credentials bound via `opaque_ro_paths` (the luci token cache) are
   readable by in-sandbox code even though the read tool refuses them; the
   token broker replaces the bind later.
@@ -161,6 +162,17 @@ class Sandbox:
     # so a host firewall rule can match every sandbox scope (e.g. drop the GCE
     # metadata IP from this slice's cgroup); empty leaves systemd's default.
     slice_unit: str = ""
+    # Give the box its OWN network namespace: no route off the machine, and a
+    # fresh loopback of its own. This is the real isolation the slice/nftables
+    # rules above only approximate -- an L3 allowlist cannot separate RBE from
+    # the rest of Google, because they share one frontend IP range.
+    #
+    # It also redefines what "127.0.0.1" means in here. The box's loopback is
+    # NOT the host's, so a host-side listener on a port is unreachable and any
+    # such proxy needs its in-box half (a relay onto a bind-mounted UNIX socket,
+    # which crosses the boundary because it is a filesystem object). Turning
+    # this on without that half is what silently takes remote builds away.
+    unshare_net: bool = False
 
     def wrapper(self) -> list[str]:
         """The argv prefix: [systemd-run ...] bwrap ... -- ready to have the
@@ -172,6 +184,14 @@ class Sandbox:
             raise FileNotFoundError(f"sandbox root missing: {self.root}")
         argv = list(self._cgroup_args())
         argv += ["bwrap", *_SYSTEM_ARGS, *self._resolv_conf_args()]
+        if self.unshare_net:
+            # Before the binds, with the other namespace flags conceptually --
+            # bwrap applies namespace options irrespective of argv position, but
+            # keeping it adjacent to the network-related binds above is what
+            # makes the resolv.conf line readable (that bind is inert with no
+            # route, and harmless: DNS inside the box simply has nothing to
+            # reach).
+            argv += ["--unshare-net"]
         argv += self._journal_socket_args()
         # ro/opaque binds split into two phases around the tmpfs. bwrap mounts in
         # argv order and a later mount shadows an earlier one on overlap, so a ro

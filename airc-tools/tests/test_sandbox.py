@@ -1,7 +1,10 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
+import dataclasses
 import shutil
+import socket
+import threading
 from pathlib import Path
 
 import pytest
@@ -484,3 +487,89 @@ def test_bind_over_cannot_shadow_the_rw_root(tmp_path):
     box = Sandbox(root=root, bind_over_paths=((src, root),))
     with pytest.raises(ValueError, match="leaks"):
         box.wrapper()
+
+
+def test_unshare_net_is_off_by_default(profile):
+    assert "--unshare-net" not in profile.wrapper()
+
+
+def test_unshare_net_is_passed_when_set(profile):
+    boxed = dataclasses.replace(profile, unshare_net=True)
+    assert "--unshare-net" in boxed.wrapper()
+
+
+@needs_bwrap
+async def test_unshare_net_gives_the_box_its_own_loopback(profile):
+    """The two properties the RBE/Vertex proxies are designed around.
+
+    Asserted by running real processes, not by inspecting argv: what matters is
+    not that the flag is present but that a host listener becomes unreachable
+    while an in-box one still works. A relay that binds in-box depends on the
+    second being true, and every host-side proxy port depends on the first being
+    false -- so both are pinned here rather than left to bwrap's semantics.
+    """
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    boxed = dataclasses.replace(profile, unshare_net=True)
+    try:
+        # The host's loopback is a different loopback now.
+        out = await run_shell(
+            f'python3 -c "'
+            f"import socket;s=socket.socket();s.settimeout(3);"
+            f"print('rc=%d' % s.connect_ex(('127.0.0.1',{port})))\"",
+            sandbox=boxed,
+        )
+        # ECONNREFUSED: the port exists on the HOST's loopback, not this one.
+        assert "rc=111" in out, out
+        # But the box still HAS a loopback, so its own relay can bind and serve.
+        out = await run_shell(
+            'python3 -c "'
+            "import socket,threading;"
+            "srv=socket.socket();srv.bind(('127.0.0.1',0));srv.listen(1);"
+            "threading.Thread(target=lambda: srv.accept().sendall(b'ok'),daemon=True).start();"
+            "c=socket.socket();c.settimeout(3);c.connect(srv.getsockname());"
+            'print(c.recv(8).decode())"',
+            sandbox=boxed,
+        )
+        assert "ok" in out
+    finally:
+        srv.close()
+
+
+@needs_bwrap
+async def test_a_bound_unix_socket_crosses_the_network_namespace(profile, tmp_path):
+    """The seam every host-side proxy reaches the isolated box through.
+
+    A UNIX socket is a filesystem object, so a bind mount carries it across a
+    boundary that no port survives. This is the whole reason proxy mode can keep
+    working with the network taken away, so it is pinned by connecting to a real
+    host listener from inside a real netns-isolated box.
+    """
+    sock_dir = tmp_path / "sock"
+    sock_dir.mkdir()
+    sock = sock_dir / "s.sock"
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(str(sock))
+    srv.listen(1)
+
+    def _serve():
+        conn, _ = srv.accept()
+        conn.sendall(b"HOST")
+        conn.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    boxed = dataclasses.replace(
+        profile, unshare_net=True, ro_paths=(*profile.ro_paths, sock_dir)
+    )
+    try:
+        out = await run_shell(
+            f'python3 -c "'
+            f"import socket;c=socket.socket(socket.AF_UNIX);c.settimeout(3);"
+            f"c.connect('{sock}');print(c.recv(8).decode())\"",
+            sandbox=boxed,
+        )
+        assert "HOST" in out
+    finally:
+        srv.close()
