@@ -10,7 +10,7 @@ from airc_room.timers import (
     TimerScheduler,
     make_timer_tools,
 )
-from airc_room.turn_context import turn_config, turn_context
+from airc_room.turn_context import AGENT_KEY, THREAD_KEY, turn_config, turn_context
 
 
 def _timer_tools(scheduler):
@@ -51,7 +51,69 @@ def test_turn_context_refuses_a_turn_with_no_identity():
     assert turn_context(None) == (None, "")
 
 
-def test_name_for_key_translates_stable_key_to_live_name(tmp_path):
+def test_turn_context_refuses_a_half_populated_identity():
+    # All or nothing. Returning the half that is present is how this breaks
+    # quietly: an empty agent still reads as "present" to timer_create (which
+    # only checks the thread id), so it would report success, persist a timer no
+    # persona can own, and have the wake dropped at fire time -- the exact
+    # signature of the bug this module was written to kill.
+    assert turn_context({"configurable": {THREAD_KEY: 7}}) == (None, "")
+    assert turn_context({"configurable": {AGENT_KEY: "perf"}}) == (None, "")
+    assert turn_context({"configurable": {THREAD_KEY: 7, AGENT_KEY: ""}}) == (None, "")
+    # bool is an int subclass; True must not read as thread 1.
+    assert turn_context({"configurable": {THREAD_KEY: True, AGENT_KEY: "perf"}}) == (
+        None,
+        "",
+    )
+
+
+async def test_run_turn_builds_a_config_its_own_tools_can_read(tmp_path, monkeypatch):
+    """The contract, end to end: the config the REAL run_turn builds must be
+    readable by the REAL turn_context.
+
+    This is the test the original bug needed and did not have. Every other test
+    here checks one side against a fixture, so the two halves could drift apart
+    (the runner folded ":g<n>" into the composite id, the parser kept splitting
+    on the first colon) with all of them still green. Asserting on the parsed
+    identity rather than on the config's shape is the point -- it stays true
+    however the runner chooses to key its checkpoints next.
+    """
+    from airc_room.config import Config
+    from airc_room.personas import Persona
+    from airc_room.runner import AgentRunner, _AgentEntry, _TurnUsage
+
+    store = Store(tmp_path / "airc.db")
+    thread = store.create_thread("t")
+    store.add_message(thread.id, "human", "human", "perf: have a look")
+    # A compacted thread, which is what exposed the bug: the generation is
+    # non-zero and folds into the composite checkpoint id.
+    store.bump_context_generation(thread.id)
+    store.bump_context_generation(thread.id)
+
+    cfg = Config()
+    cfg.token_db_path = tmp_path / "tokens.db"
+    runner = AgentRunner(cfg, {}, object(), store)
+    persona = Persona(
+        name="Sonic",  # addressable name differs from the stable key
+        display_name="Sonic",
+        description="d",
+        system_prompt="",
+        key="perf",
+    )
+    runner._agents = {"Sonic": _AgentEntry(persona=persona, graph=object())}
+
+    seen: dict = {}
+
+    async def _fake_stream(graph, agent_name, payload, config):
+        seen.update(config)
+        return "ok", _TurnUsage()
+
+    monkeypatch.setattr(runner, "_stream", _fake_stream)
+    await runner.run_turn("Sonic", thread.id, addressed=True)
+    store.close()
+
+    # The identity a local tool would recover, from what the runner actually built.
+    assert turn_context(seen) == (thread.id, "perf")
     # Under use_nicknames the addressable name is the nickname while the stable
     # key stays the folder handle; a timer stores the key, so the wake path must
     # translate key -> name. The key is never the name, and a dead persona is None.

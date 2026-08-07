@@ -54,10 +54,22 @@ def turn_config(thread_id: int, agent_key: str, generation: int) -> dict:
 def turn_context(config: RunnableConfig | None) -> tuple[int | None, str]:
     """The (thread id, persona stable key) a tool was called in, or (None, "")
     when the turn carries no identity. Tools treat that as a refusal, not a
-    default -- acting on a guessed thread is worse than declining."""
+    default -- acting on a guessed thread is worse than declining.
+
+    ALL OR NOTHING: a config carrying only one of the two parts yields no
+    identity at all. Returning the half that is present reproduces the exact
+    failure this module exists to prevent -- an empty agent still reads as
+    "present" to a caller that only checks the thread id, so timer_create would
+    report success, persist a timer no persona can own, and have its wake
+    dropped at fire time. A partial identity is a bug upstream; the only safe
+    reading of it is none.
+    """
     configurable = (config or {}).get("configurable") or {}
     thread_id = configurable.get(THREAD_KEY)
-    agent = configurable.get(AGENT_KEY) or ""
-    if not isinstance(thread_id, int) or not isinstance(agent, str):
+    agent = configurable.get(AGENT_KEY)
+    # bool is an int subclass, and True would sail through as thread 1.
+    if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+        return None, ""
+    if not isinstance(agent, str) or not agent:
         return None, ""
     return thread_id, agent
