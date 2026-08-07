@@ -133,6 +133,81 @@ def test_plugin_sections_passed_through_raw(tmp_path):
     assert pc["commentary"] == [{"repo": "v8"}]
 
 
+@pytest.mark.parametrize(
+    "body,where",
+    [
+        ("[airc.orchestrator]\nmax_responder = 2\n", r"\[airc\.orchestrator\]"),
+        (
+            '[airc.memory]\nenabled = true\npath = "/m"\nenable = true\n',
+            r"\[airc\.memory\]",
+        ),
+        ('[transport]\nkind = "console"\nknd = "x"\n', r"\[transport\]"),
+        ('[handover]\nenabled = true\nautonmy = "draft-only"\n', r"\[handover\]"),
+        ("[caching]\nttl_minute = 30\n", r"\[caching\]"),
+        ('[gcp]\nprojekt = "p"\n', r"\[gcp\]"),
+        ("[mcp]\nserver = {}\n", r"\[mcp\]"),
+    ],
+)
+def test_a_typo_in_any_section_errors(tmp_path, body, where):
+    """Every section is strict, not just the top level.
+
+    A key the loader silently ignores reads back to the operator as a setting
+    that was applied. Usually that costs an unwanted default; once it cost a
+    security boundary (a misspelled allowlist key left it empty, i.e.
+    unrestricted). The two are indistinguishable at the point of the typo.
+    """
+    with pytest.raises(SystemExit, match=f"unknown {where} key"):
+        load_config(_write(tmp_path, body))
+
+
+def test_allowed_keys_track_the_dataclass_not_a_hand_written_list():
+    """The strict check derives its key set from the dataclass that models the
+    section, so a new setting is one field and nothing else.
+
+    Pinned because the failure of a hand-written copy is silent and backwards: a
+    field added without its key would reject config that legitimately sets it.
+    Adding a field HERE (not touching any parser) must make the key acceptable.
+    """
+    import dataclasses
+
+    from airc_core.config import reject_unknown_fields
+
+    @dataclasses.dataclass
+    class _Spec:
+        alpha: int = 1
+
+    reject_unknown_fields({"alpha": 1}, _Spec, "[x]")  # a field is accepted
+    with pytest.raises(SystemExit, match="unknown \\[x\\] key"):
+        reject_unknown_fields({"beta": 1}, _Spec, "[x]")
+
+    _WithBeta = dataclasses.make_dataclass("_WithBeta", [("alpha", int), ("beta", int)])
+    reject_unknown_fields({"beta": 1}, _WithBeta, "[x]")  # now it is
+
+
+def test_a_legacy_alias_stays_accepted(tmp_path):
+    """turn_budget is the old spelling of soft_turn_budget and is still honoured,
+    so strictness must not break a config that predates the rename."""
+    cfg = load_config(_write(tmp_path, "[airc.orchestrator]\nturn_budget = 3\n"))
+    assert cfg.orchestrator.soft_turn_budget == 3
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[repos]\nanything_goes = "/src/x"\n',
+        "[tool_groups]\nmy_own_group = []\n",
+        '[models]\nsome_role = "provider:m"\n',
+        '[mcp.servers.whatever]\ncommand = "x"\nargs = []\n',
+    ],
+)
+def test_open_sections_stay_open(tmp_path, body):
+    """User-named maps and role maps have no fixed key set: [repos] names
+    checkouts, [tool_groups] names groups, [models] names roles a persona may
+    select, and an [mcp.servers.*] spec is passed verbatim to a third-party
+    client whose schema is not ours. Strictness there would be a category error."""
+    load_config(_write(tmp_path, body))
+
+
 def test_unknown_toplevel_section_errors(tmp_path):
     # A mis-namespaced or typo'd top-level section is a silent-misconfig footgun,
     # so the loader rejects it rather than ignoring it.

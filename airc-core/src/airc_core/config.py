@@ -19,8 +19,8 @@ airc-watchers) -- the dependency only ever points inward, into core.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from platformdirs import user_data_path
@@ -45,6 +45,60 @@ DEFAULT_TOKEN_DB = DATA_DIR / "tokens.db"
 # v8-utils/gdb groups live in airc_coding.tool_groups, written into airc.toml).
 # The keys stay present so a config that sets only one group still has the other.
 DEFAULT_TOOL_GROUPS: dict[str, list[str]] = {"read": [], "active": []}
+
+
+def reject_unknown_fields(
+    table: Mapping, spec: type, where: str, *, aliases: Iterable[str] = ()
+) -> None:
+    """Strict-check `table` against the dataclass that models it.
+
+    The allowed keys ARE `spec`'s field names -- the dataclass is the single
+    source of truth, so adding a setting means adding a field and nothing else.
+    Hand-written key sets were the obvious alternative and the wrong one: they
+    restate the fields a few lines below their definition, and the copy drifts
+    silently in the direction that matters (a field added without its key gets
+    rejected in config that legitimately sets it).
+
+    `aliases` covers keys a section accepts that are not fields -- deliberate
+    back-compat spellings, e.g. [airc.orchestrator] still honouring the old
+    `turn_budget` for `soft_turn_budget`. Naming them here keeps each one visible
+    as a decision rather than a leftover.
+
+    Sections with no dataclass of their own (a flattened one like [caching], whose
+    keys land on differently-named fields of a larger config) call reject_unknown
+    with an explicit set instead. There is no source of truth to derive from
+    there, and inventing one would be a worse lie than writing the keys down.
+    """
+    known = {f.name for f in fields(spec)} | set(aliases)
+    reject_unknown(table, known, where)
+
+
+def reject_unknown(
+    table: Mapping, known: set[str] | frozenset[str], where: str
+) -> None:
+    """Raise on any key in `table` that is not in `known`. `where` names the
+    section, e.g. "[airc.perf]".
+
+    Config is the one input a running daemon cannot argue with, and a key it
+    silently ignores is indistinguishable from one it honoured -- the operator
+    reads their own file back as proof of a setting that was never applied. Most
+    of the time that costs a default nobody wanted; at least once it cost a
+    security boundary (a misspelled `spaces` left a publish-to-gerrit allowlist
+    empty, which means unrestricted). Since the two are indistinguishable at the
+    point of the typo, every section is strict.
+
+    SystemExit rather than an exception: this runs during startup config parsing,
+    where a traceback buries the one line the operator needs.
+
+    Sections that are open by design -- user-named maps like [repos],
+    [tool_groups], [mcp.servers], and role maps like [models] -- do not call this,
+    and each says why at its parse site.
+    """
+    if unknown := set(table) - set(known):
+        raise SystemExit(
+            f"unknown {where} key(s): {', '.join(sorted(unknown))}"
+            f" (known: {', '.join(sorted(known))})"
+        )
 
 
 @dataclass
@@ -78,7 +132,15 @@ def load_common(raw: Mapping) -> CommonConfig:
     hands the same mapping here and to its own overlay parser.
     """
     cfg = CommonConfig()
+    # [models] is deliberately OPEN: it is a role map, and a persona's `model =`
+    # may name any role in it (resolve_model). Only default/filter are read here,
+    # but constraining the table would reject a role a persona legitimately uses.
     cfg.models = {k: str(v) for k, v in raw.get("models", {}).items()}
+    if mcp := raw.get("mcp"):
+        reject_unknown(mcp, {"servers"}, "[mcp]")
+    # A server spec is passed verbatim to MultiServerMCPClient, whose key set is
+    # that library's, not ours -- so only our own added key is checked, by the
+    # explicit pop and type check below.
     for name, server in raw.get("mcp", {}).get("servers", {}).items():
         spec = dict(server)
         enabled = spec.pop("enable_in_sandbox", False)
@@ -88,6 +150,8 @@ def load_common(raw: Mapping) -> CommonConfig:
         cfg.mcp_enable_in_sandbox[name] = enabled
     if groups := raw.get("tool_groups"):
         cfg.tool_groups = {k: list(v) for k, v in groups.items()}
+    if gcp := raw.get("gcp"):
+        reject_unknown(gcp, {"project", "location", "quota_project"}, "[gcp]")
     cfg.gcp = {k: str(v) for k, v in raw.get("gcp", {}).items()}
     if v := raw.get("bus_root"):
         cfg.bus_root = Path(v).expanduser()
@@ -95,6 +159,7 @@ def load_common(raw: Mapping) -> CommonConfig:
         cfg.token_db_path = Path(v).expanduser()
     cfg.repos = {k: str(Path(v).expanduser()) for k, v in raw.get("repos", {}).items()}
     if caching := raw.get("caching"):
+        reject_unknown(caching, {"explicit", "ttl_minutes"}, "[caching]")
         cfg.caching_explicit = bool(caching.get("explicit", True))
         cfg.cache_ttl_minutes = int(caching.get("ttl_minutes", 30))
     return cfg

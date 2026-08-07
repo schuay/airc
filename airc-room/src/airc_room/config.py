@@ -60,6 +60,7 @@ from pathlib import Path
 import tomllib
 from airc_core import DEFAULT_TOOL_GROUPS, load_common
 from airc_core import apply_gcp_env_defaults as _apply_gcp_env
+from airc_core.config import reject_unknown, reject_unknown_fields
 from platformdirs import user_config_path, user_data_path
 
 log = logging.getLogger(__name__)
@@ -516,6 +517,11 @@ def load_config(path: Path | None = None) -> Config:
     # [handover] stays top-level: it is suite policy, read by airc and processors.
     own = raw.get("airc", {})
     if orch := own.get("orchestrator"):
+        # turn_budget is the legacy spelling honoured just below, so it is an
+        # accepted alias rather than a field.
+        reject_unknown_fields(
+            orch, OrchestratorConfig, "[airc.orchestrator]", aliases=["turn_budget"]
+        )
         # Accept legacy `turn_budget` as an alias for the soft threshold.
         soft = int(orch.get("soft_turn_budget", orch.get("turn_budget", 8)))
         max_turns = int(orch.get("max_turns", max(24, soft)))
@@ -527,6 +533,7 @@ def load_config(path: Path | None = None) -> Config:
             turn_timeout=float(orch.get("turn_timeout", 900)),
         )
     if mem := own.get("memory"):
+        reject_unknown_fields(mem, MemoryConfig, "[airc.memory]")
         enabled = bool(mem.get("enabled", MemoryConfig.enabled))
         raw_path = mem.get("path")
         path = Path(str(raw_path)).expanduser() if raw_path else None
@@ -547,6 +554,7 @@ def load_config(path: Path | None = None) -> Config:
     # (matching every other room section) is accepted too so it is not silently
     # ignored; the namespaced form wins when both are present.
     if transport := (own.get("transport") or raw.get("transport")):
+        reject_unknown(transport, {"kind"}, "[transport]")
         cfg.transport_kind = str(transport.get("kind", ""))
     # Matrix is a core transport, so its config is parsed here into a typed
     # dataclass (top-level [matrix], or the namespaced [airc.matrix]; the
@@ -555,6 +563,7 @@ def load_config(path: Path | None = None) -> Config:
     # it. The three connection fields are required: a partial section is an
     # operator error, caught here rather than as an opaque nio auth failure.
     if mx := (own.get("matrix") or raw.get("matrix")):
+        reject_unknown_fields(mx, MatrixConfig, "[matrix]")
         # access_token is a secret, so it may come from $MATRIX_ACCESS_TOKEN
         # instead of the file: a deployment (e.g. a container) can then ship a
         # config with no token baked into an image layer or mounted file. The
@@ -585,6 +594,7 @@ def load_config(path: Path | None = None) -> Config:
     # hardcoded DATA_DIR fallback: a suite configured onto a non-default bus
     # must not have its handover publish to a bus nothing polls.
     h = raw.get("handover", {})
+    reject_unknown_fields(h, HandoverConfig, "[handover]")
     cfg.handover = HandoverConfig(
         enabled=bool(h.get("enabled", False)),
         autonomy=h.get("autonomy", "draft-only"),
