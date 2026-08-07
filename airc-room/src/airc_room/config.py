@@ -96,6 +96,11 @@ _KNOWN_TOPLEVEL = frozenset(
         "watchers",
         "processors",
         "icompleteu",
+        # Sibling daemons' own sections. The suite shares ONE file, so every
+        # component must tolerate the sections it does not own -- a component
+        # added without its name here makes the room refuse to start on a
+        # perfectly valid suite config.
+        "discovery",
     }
 )
 
@@ -594,7 +599,13 @@ def load_config(path: Path | None = None) -> Config:
     # hardcoded DATA_DIR fallback: a suite configured onto a non-default bus
     # must not have its handover publish to a bus nothing polls.
     h = raw.get("handover", {})
-    reject_unknown_fields(h, HandoverConfig, "[handover]")
+    # [handover] is ONE table read by two components with different supersets of
+    # it: the processor also honours `repro`, which core does not model. Strict
+    # against core's fields alone would refuse a perfectly valid suite config at
+    # room startup, so the known set is the union. Kept as an explicit extra
+    # rather than by importing the processor's dataclass -- core must not depend
+    # on a component package (see airc_core's module docstring).
+    reject_unknown_fields(h, HandoverConfig, "[handover]", aliases=["repro"])
     cfg.handover = HandoverConfig(
         enabled=bool(h.get("enabled", False)),
         autonomy=h.get("autonomy", "draft-only"),
