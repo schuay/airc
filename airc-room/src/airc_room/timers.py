@@ -48,6 +48,8 @@ from typing import TYPE_CHECKING
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
+from .turn_context import turn_context
+
 if TYPE_CHECKING:
     from .store import Store
 
@@ -215,17 +217,6 @@ class TimerScheduler:
             )
 
 
-def _ctx_from_config(config: RunnableConfig | None) -> tuple[int | None, str]:
-    """The (thread_id, agent) a turn runs under, from the config the runner sets
-    as configurable.thread_id = "<thread_id>:<agent>"."""
-    try:
-        raw = (config or {}).get("configurable", {}).get("thread_id", "")
-        tid, _, agent = str(raw).partition(":")
-        return int(tid), agent
-    except (ValueError, AttributeError):
-        return None, ""
-
-
 def _fmt_eta(fire_at: float) -> str:
     """A short human ETA for a fire time ("in ~12 min", "in ~2.0 h", "now")."""
     secs = fire_at - time.time()
@@ -256,7 +247,7 @@ def make_timer_tools(scheduler: TimerScheduler) -> list:
         a check later would not add real value, do not schedule one. Prefer
         answering now over deferring. Pick a realistic delay. Example: minutes=60,
         note="check pinpoint job 1234 and summarize the result"."""
-        thread_id, agent = _ctx_from_config(config)
+        thread_id, agent = turn_context(config)
         if thread_id is None:
             return "could not schedule: missing turn context."
         secs = float(minutes) * 60.0
@@ -280,7 +271,7 @@ def make_timer_tools(scheduler: TimerScheduler) -> list:
         """List this chat's pending timers (id, when it fires, and its note), so
         you can tell the person what is scheduled or find an id to cancel. Only
         this chat's timers are visible."""
-        thread_id, _ = _ctx_from_config(config)
+        thread_id, _ = turn_context(config)
         if thread_id is None:
             return "could not list: missing turn context."
         pending = scheduler.list_for(thread_id)
@@ -294,7 +285,7 @@ def make_timer_tools(scheduler: TimerScheduler) -> list:
     async def timer_cancel(timer_id: int, config: RunnableConfig) -> str:
         """Cancel a pending timer in this chat by its id (from timer_create or
         timer_list). Only this chat's timers can be cancelled."""
-        thread_id, _ = _ctx_from_config(config)
+        thread_id, _ = turn_context(config)
         if thread_id is None:
             return "could not cancel: missing turn context."
         if scheduler.cancel(thread_id, int(timer_id)):

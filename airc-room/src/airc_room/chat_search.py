@@ -29,6 +29,8 @@ import regex  # re with a per-search timeout, to bound a runaway pattern
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
+from .turn_context import turn_context
+
 # Bytes of matches returned per call, so a broad grep over a long history cannot
 # dominate the turn; the caller narrows the query for the rest.
 _MAX_OUTPUT = 100_000
@@ -39,12 +41,10 @@ _SEARCH_TIMEOUT_S = 10.0
 
 
 def _thread_from_config(config: RunnableConfig | None) -> int | None:
-    """The caller's thread id, from configurable.thread_id = "<thread_id>:<agent>"."""
-    try:
-        raw = (config or {}).get("configurable", {}).get("thread_id", "")
-        return int(str(raw).partition(":")[0])
-    except (ValueError, AttributeError):
-        return None
+    """The caller's thread id (see turn_context), or None when the turn carries
+    no identity -- which widens the search to the whole db rather than scoping it
+    to a space, the same as a console thread that has no space."""
+    return turn_context(config)[0]
 
 
 def _parse_since(s: str) -> float | None:

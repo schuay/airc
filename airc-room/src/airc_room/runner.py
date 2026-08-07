@@ -41,6 +41,7 @@ from typing_extensions import Self
 from .config import Config
 from .personas import Persona
 from .store import Message, MessageKind, Store
+from .turn_context import turn_config
 
 log = logging.getLogger(__name__)
 
@@ -589,7 +590,7 @@ class AgentRunner:
         # turn. Race-free: an in-flight turn keeps writing to the old id; only the
         # next turn reads the bumped one.
         gen = self._store.context_generation(thread_id)
-        config = {"configurable": {"thread_id": f"{thread_id}:{skey}:g{gen}"}}
+        config = {"configurable": turn_config(thread_id, skey, gen)}
         text, usage = await self._stream(
             entry.graph,
             agent_name,

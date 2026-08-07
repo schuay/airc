@@ -3,6 +3,7 @@
 
 from airc_room.chat_search import make_search_chat_tool
 from airc_room.store import Store
+from airc_room.turn_context import turn_config
 
 
 def _db(tmp_path):
@@ -20,7 +21,9 @@ def _db(tmp_path):
 
 
 def _cfg(thread_id):
-    return {"configurable": {"thread_id": f"{thread_id}:perf"}}
+    # Built the way the runner builds it, never hand-written: the composite
+    # thread_id is its private checkpoint key (see turn_context).
+    return {"configurable": turn_config(thread_id, "perf", 0)}
 
 
 async def test_basic_match(tmp_path):

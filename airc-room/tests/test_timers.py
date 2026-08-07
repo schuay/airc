@@ -8,9 +8,9 @@ from airc_room.store import Store
 from airc_room.timers import (
     _MAX_PENDING_PER_THREAD,
     TimerScheduler,
-    _ctx_from_config,
     make_timer_tools,
 )
+from airc_room.turn_context import turn_config, turn_context
 
 
 def _timer_tools(scheduler):
@@ -18,16 +18,37 @@ def _timer_tools(scheduler):
     return {t.name: t for t in make_timer_tools(scheduler)}
 
 
-def test_ctx_from_config_parses_thread_and_agent():
-    assert _ctx_from_config({"configurable": {"thread_id": "7:perf"}}) == (7, "perf")
-    # Nickname handles have no colon; still parses.
-    assert _ctx_from_config({"configurable": {"thread_id": "42:sonic"}}) == (
-        42,
-        "sonic",
+def _cfg(thread_id=7, agent="perf", generation=0):
+    """A turn config built the way the runner builds it. Tests must never hand-
+    write this dict: the composite thread_id is the runner's private checkpoint
+    key, and tests that spelled it out by hand are exactly why a change to its
+    shape went unnoticed while every timer wake was being dropped in prod."""
+    return {"configurable": turn_config(thread_id, agent, generation)}
+
+
+def test_turn_context_reads_identity_from_the_runners_config():
+    assert turn_context(_cfg(7, "perf")) == (7, "perf")
+    # Nickname handles: the STABLE key travels, whatever the addressable name is.
+    assert turn_context(_cfg(42, "sonic")) == (42, "sonic")
+
+
+def test_turn_context_survives_a_bumped_context_generation():
+    # The regression. A memory compaction bumps the generation, which folds into
+    # the composite checkpoint id; the persona identity must be unaffected. The
+    # old parser split the composite on its first colon and returned "perf:g3"
+    # here, which matches no live persona, so every wake was dropped.
+    assert turn_context(_cfg(7, "perf", generation=3)) == (7, "perf")
+
+
+def test_turn_context_refuses_a_turn_with_no_identity():
+    # The forced-JSON structured turn sets a bare thread_id and holds no local
+    # tools. Reparsing it would invent a thread; refusing is the honest answer.
+    assert turn_context({"configurable": {"thread_id": "structured:perf"}}) == (
+        None,
+        "",
     )
-    # Missing/malformed context degrades to (None, "").
-    assert _ctx_from_config({}) == (None, "")
-    assert _ctx_from_config(None) == (None, "")
+    assert turn_context({}) == (None, "")
+    assert turn_context(None) == (None, "")
 
 
 def test_name_for_key_translates_stable_key_to_live_name(tmp_path):
@@ -198,7 +219,7 @@ async def test_scheduler_decrements_cap_after_firing():
 async def test_timer_create_schedules_and_reads_context():
     sch = TimerScheduler()
     create = _timer_tools(sch)["timer_create"]
-    cfg = {"configurable": {"thread_id": "7:perf"}}
+    cfg = _cfg()
     out = await create.ainvoke({"minutes": 60, "note": "check job 5"}, config=cfg)
     assert "scheduled timer 0" in out  # the id is surfaced for cancel
     # The wake was enqueued for the config's (thread, agent).
@@ -208,7 +229,7 @@ async def test_timer_create_schedules_and_reads_context():
 
 async def test_timer_create_guardrails():
     create = _timer_tools(TimerScheduler())["timer_create"]
-    cfg = {"configurable": {"thread_id": "7:perf"}}
+    cfg = _cfg()
     assert "declined" in await create.ainvoke({"minutes": -1, "note": "x"}, config=cfg)
     assert "declined" in await create.ainvoke(
         {"minutes": 9_999_999, "note": "x"}, config=cfg
@@ -221,7 +242,7 @@ async def test_timer_create_guardrails():
 async def test_timer_create_reports_cap_decline():
     sch = TimerScheduler()
     create = _timer_tools(sch)["timer_create"]
-    cfg = {"configurable": {"thread_id": "7:perf"}}
+    cfg = _cfg()
     for _ in range(_MAX_PENDING_PER_THREAD):
         await create.ainvoke({"minutes": 5, "note": "x"}, config=cfg)
     assert "declined" in await create.ainvoke({"minutes": 5, "note": "x"}, config=cfg)
@@ -230,7 +251,7 @@ async def test_timer_create_reports_cap_decline():
 async def test_timer_list_and_cancel_tools_roundtrip():
     sch = TimerScheduler()
     tools = _timer_tools(sch)
-    cfg = {"configurable": {"thread_id": "7:perf"}}
+    cfg = _cfg()
     assert "no pending timers" in await tools["timer_list"].ainvoke({}, config=cfg)
     await tools["timer_create"].ainvoke({"minutes": 30, "note": "stir"}, config=cfg)
     listed = await tools["timer_list"].ainvoke({}, config=cfg)
