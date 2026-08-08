@@ -213,10 +213,10 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
             description=(
                 "Run a command in a fresh `bash -lc` in the worktree (stateless:"
                 " no cd/env persists): builds, test binaries, git state, and"
-                " listing/searching files. NOT for writing file content -- author"
-                " files with write_file/edit_file; a shell write into a source"
-                " file is refused. Redirecting a command's output to a log is"
-                f" fine. The default timeout is {shell_timeout_s:g}s: raise it for"
+                " listing/searching files. Not the tool for writing file"
+                " content -- write_file/edit_file apply an exact edit and tell"
+                " you when it did not match, which a redirect cannot."
+                f" The default timeout is {shell_timeout_s:g}s: raise it for"
                 " work that is honestly long (a build, a test suite, a benchmark),"
                 " and lower it for a command that may hang (e.g. a repro)."
             ),
@@ -242,7 +242,7 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
                 " rewrite, use write_file instead. If a SEARCH does not match,"
                 " read_file that region again and retry with the exact bytes --"
                 " a failed match is a stale search, not a reason to fall back to"
-                " a shell rewrite (which is refused anyway)."
+                " a shell rewrite, which silently loses your other edits."
             ),
         ),
         StructuredTool.from_function(
