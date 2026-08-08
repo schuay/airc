@@ -526,7 +526,6 @@ async def amain(args: argparse.Namespace) -> None:
     # (or a bare room) contributes none.
     local_tool_groups: dict = {}
     if plugin and hasattr(plugin, "build_local_tools"):
-        # `room` reaches only a hook that declares it -- see _call_local_tools.
         local_tool_groups = _call_local_tools(plugin, cfg, room) or {}
     # Long-term memory is a CORE feature (config + per-turn injection live in
     # core), so core -- not a plugin -- provides its tool_group. On when

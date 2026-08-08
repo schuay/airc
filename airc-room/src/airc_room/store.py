@@ -1101,10 +1101,12 @@ class Store:
     def list_plugin_state(
         self, namespace: str, thread_id: int
     ) -> list[tuple[str, str]]:
-        """(key, json) for a thread's rows, oldest first."""
+        """(key, json) for a thread's rows, oldest first. Ordered by rowid, not
+        ts: the upsert above rewrites ts on every mutation, so a record the
+        plugin edits would otherwise jump to the end of its own listing."""
         rows = self._db.execute(
             "SELECT key, json FROM plugin_state"
-            " WHERE namespace = ? AND thread_id = ? ORDER BY ts, key",
+            " WHERE namespace = ? AND thread_id = ? ORDER BY rowid",
             (namespace, thread_id),
         ).fetchall()
         return [(r[0], r[1]) for r in rows]

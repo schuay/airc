@@ -419,6 +419,18 @@ def test_plugin_state_is_namespaced_and_thread_scoped(tmp_path):
     assert s.list_plugin_state("ns1", t2.id) == [("other", "3")]
 
 
+def test_plugin_state_listing_keeps_insertion_order_across_an_edit(tmp_path):
+    # Editing a row must not reorder it. A plugin's usual mutation (marking a
+    # record spent) rewrites ts, so ordering on ts would jump the edited row to
+    # the end and a thread's proposals would list in an order nobody caused.
+    s = make_store(tmp_path)
+    t = s.create_thread("x")
+    s.put_plugin_state("ns", "first", t.id, "1")
+    s.put_plugin_state("ns", "second", t.id, "2")
+    s.put_plugin_state("ns", "first", t.id, "1-edited")
+    assert s.list_plugin_state("ns", t.id) == [("first", "1-edited"), ("second", "2")]
+
+
 def test_plugin_state_appears_in_a_deployed_db_without_losing_rows(tmp_path):
     # The migration property that matters: the table comes from _SCHEMA, which is
     # executescript'd on every open and is all CREATE TABLE IF NOT EXISTS. A store
