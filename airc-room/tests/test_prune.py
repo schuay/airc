@@ -288,6 +288,7 @@ async def test_side_tables_are_dropped(store):
     store.add_pending_card(t.id, "compiler", "spaces/A", "spaces/A/messages/P1")
     store.add_timer(1, t.id, "compiler", time.time() + 60, "wake")
     store.bump_context_generation(t.id)
+    store.put_plugin_state("some_plugin", "k", t.id, "{}")
 
     redact_threads(store._db, [t.id])
 
@@ -295,6 +296,24 @@ async def test_side_tables_are_dropped(store):
     assert store.get_pending_card(t.id, "compiler") is None
     assert store.all_timers() == []
     assert store.context_generation(t.id) == 0
+    # Without a _DROP_TABLES entry a plugin's state would accumulate forever, in
+    # a table core cannot even interpret -- exactly the "swept by nothing" bug.
+    assert store.get_plugin_state("some_plugin", "k") is None
+
+
+async def test_plugin_state_of_another_thread_survives_the_sweep(store):
+    # The DELETE is thread-keyed. A shared table across plugins and threads makes
+    # an over-broad delete cheap to write and invisible until someone else's
+    # record is gone.
+    old, live = store.create_thread("old"), store.create_thread("live")
+    await _populate(store, old.id)
+    store.put_plugin_state("some_plugin", "a", old.id, "{}")
+    store.put_plugin_state("some_plugin", "b", live.id, "{}")
+
+    redact_threads(store._db, [old.id])
+
+    assert store.get_plugin_state("some_plugin", "a") is None
+    assert store.get_plugin_state("some_plugin", "b") == (live.id, "{}")
 
 
 # ── the offsets: the silent failure this design exists to avoid ────────────────
@@ -477,6 +496,7 @@ _LATE_TABLES = (
     "announcement_meta",
     "orchestrated",
     "source_notes",
+    "plugin_state",
 )
 
 

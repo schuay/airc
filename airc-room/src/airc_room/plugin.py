@@ -41,7 +41,7 @@ Optional (duck-typed; absent means the room's default behavior):
   valid TOML *after* core's half: core already opens [airc], and TOML forbids
   declaring a table twice, so contribute [airc.<name>] sub-tables (plus any
   top-level sections in _KNOWN_TOPLEVEL) rather than reopening [airc].
-- build_local_tools(cfg) -> dict[str, list[BaseTool]]  -- local (non-MCP)
+- build_local_tools(cfg, *, room=None) -> dict[str, list[BaseTool]]  -- local (non-MCP)
   langchain tools the plugin contributes, keyed by tool_group name. The room
   grants a persona the tools under a group iff that group is in the persona's
   tool_groups -- the SAME gate MCP tools use, so a persona's grants stay in its
@@ -49,6 +49,12 @@ Optional (duck-typed; absent means the room's default behavior):
   dict (not in the [tool_groups] config), so a persona may name one without it
   being a configured MCP group. Used for tools that need in-process wiring an MCP
   server cannot get (e.g. the grocery memory tools jailed to an akbase path).
+  `room` is passed by keyword for a tool that must POST rather than only compute
+  -- e.g. one whose integrity property is that the ROOM, not the model's prose,
+  puts the text in the thread. Keyword-OPTIONAL deliberately: an older plugin
+  declaring `build_local_tools(cfg)` keeps working, so this stays a compatible
+  addition and needs no PLUGIN_API_VERSION bump. The room inspects the hook and
+  passes `room` only to one that accepts it, by name or through `**kwargs`.
 - build_services(cfg, room, store) -> list  -- long-running background services
   the room supervises as tasks (each a `.name` and an async `.run()`, like a
   Subscriber but not bus-driven). For periodic/clock work with no bus topic: e.g.
@@ -111,7 +117,7 @@ class Plugin(Protocol):
 
     def config_template(self) -> str | None: ...
 
-    def build_local_tools(self, cfg) -> dict: ...
+    def build_local_tools(self, cfg, *, room=None) -> dict: ...
 
     def build_services(self, cfg, room, store) -> list: ...
 

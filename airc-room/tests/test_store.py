@@ -379,3 +379,64 @@ def test_result_delivery_is_recorded_after_the_fact_and_survives_reopen(tmp_path
     # Durable, because the redelivery it guards against is the one a restart
     # causes -- an in-memory set would be empty exactly when it is needed.
     assert Store(tmp_path / "test.db").result_delivered("v8-abc-repro-1")
+
+
+# ── plugin_state: thread-scoped state a plugin owns ──────────────────────────
+
+
+def test_plugin_state_round_trips_and_upserts(tmp_path):
+    s = make_store(tmp_path)
+    t = s.create_thread("x")
+    s.put_plugin_state("icu_task_proposals", "7c3f", t.id, '{"submitted": false}')
+    assert s.get_plugin_state("icu_task_proposals", "7c3f") == (
+        t.id,
+        '{"submitted": false}',
+    )
+    # Mutable by design: single-use flags and other small edits are the point.
+    s.put_plugin_state("icu_task_proposals", "7c3f", t.id, '{"submitted": true}')
+    assert s.get_plugin_state("icu_task_proposals", "7c3f") == (
+        t.id,
+        '{"submitted": true}',
+    )
+    assert s.list_plugin_state("icu_task_proposals", t.id) == [
+        ("7c3f", '{"submitted": true}')
+    ]
+    assert s.get_plugin_state("icu_task_proposals", "nope") is None
+
+
+def test_plugin_state_is_namespaced_and_thread_scoped(tmp_path):
+    # Two plugins (or two features of one) must not see each other's keys, and a
+    # per-thread listing must not leak another thread's rows -- the authorization
+    # check that reads this table compares on the thread.
+    s = make_store(tmp_path)
+    t1, t2 = s.create_thread("a"), s.create_thread("b")
+    s.put_plugin_state("ns1", "k", t1.id, "1")
+    s.put_plugin_state("ns2", "k", t1.id, "2")
+    s.put_plugin_state("ns1", "other", t2.id, "3")
+    assert s.get_plugin_state("ns1", "k") == (t1.id, "1")
+    assert s.get_plugin_state("ns2", "k") == (t1.id, "2")
+    assert s.list_plugin_state("ns1", t1.id) == [("k", "1")]
+    assert s.list_plugin_state("ns1", t2.id) == [("other", "3")]
+
+
+def test_plugin_state_appears_in_a_deployed_db_without_losing_rows(tmp_path):
+    # The migration property that matters: the table comes from _SCHEMA, which is
+    # executescript'd on every open and is all CREATE TABLE IF NOT EXISTS. A store
+    # written before the table existed picks it up on the next open with its
+    # existing content intact, and a second open is a no-op.
+    path = tmp_path / "deployed.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "CREATE TABLE threads (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " title TEXT NOT NULL, created REAL NOT NULL)"
+    )
+    raw.execute("INSERT INTO threads (title, created) VALUES ('old', 0)")
+    raw.commit()
+    raw.close()
+
+    s = Store(path)
+    s.put_plugin_state("ns", "k", 1, "payload")
+    s.close()
+    reopened = Store(path)
+    assert reopened.get_plugin_state("ns", "k") == (1, "payload")
+    assert reopened.get_thread(1).title == "old"

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import logging
 import signal
 import sys
@@ -298,6 +299,32 @@ def _resolve_agents_dir(args: argparse.Namespace, plugin) -> Path:
     return CONFIG_DIR / "agents"
 
 
+def _call_local_tools(plugin, cfg, room) -> dict:
+    """Call the plugin's build_local_tools, passing `room` only if it takes one.
+
+    `room` is a compatible addition to the hook (see plugin.py), so a plugin
+    written against build_local_tools(cfg) must keep contributing its tools.
+    Dispatch by inspecting the signature rather than calling with the keyword and
+    catching TypeError: the fallback would also swallow a TypeError raised inside
+    the hook's own body, silently reporting "this plugin ships no local tools"
+    for what is really a crash in it -- and would run the body twice.
+    """
+    hook = plugin.build_local_tools
+    try:
+        params = inspect.signature(hook).parameters.values()
+    except (TypeError, ValueError):
+        # A builtin or C-implemented callable has no introspectable signature.
+        # Not expected for a plugin module function; fall back to the old form
+        # rather than refusing to load any local tools at all.
+        return hook(cfg)
+    # **kwargs counts: it is the forward-compat idiom, so a plugin that wrote it
+    # to receive exactly this kind of later addition must actually receive it.
+    takes_room = any(
+        p.name == "room" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params
+    )
+    return hook(cfg, room=room) if takes_room else hook(cfg)
+
+
 def _resolve_transport_kind(args: argparse.Namespace, cfg, plugin) -> str:
     """The effective transport kind: config-selected ([transport] kind), with the
     legacy flags still honored and a plugin-declared default for a headless deploy
@@ -499,7 +526,8 @@ async def amain(args: argparse.Namespace) -> None:
     # (or a bare room) contributes none.
     local_tool_groups: dict = {}
     if plugin and hasattr(plugin, "build_local_tools"):
-        local_tool_groups = plugin.build_local_tools(cfg) or {}
+        # `room` reaches only a hook that declares it -- see _call_local_tools.
+        local_tool_groups = _call_local_tools(plugin, cfg, room) or {}
     # Long-term memory is a CORE feature (config + per-turn injection live in
     # core), so core -- not a plugin -- provides its tool_group. On when
     # [airc.memory].enabled; a persona opts in by listing "memory" in tool_groups.

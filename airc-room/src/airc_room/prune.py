@@ -52,16 +52,23 @@ _RETAINED_KIND = "system"
 # Thread-keyed tables with no content worth an audit trail and no dedup role:
 # a persona's context generation, the Chat headline annotations and their
 # per-finding dedup rows, an unresolved "thinking..." placeholder, a pending
-# timer. All are live-thread working state, meaningless once a thread is aged
-# out, and all are safe to lose (the headline's Chat message is not edited again
-# once nothing posts to the thread; a timer for a month-old thread has no one to
-# wake). Ordered parent-last so a future FK cannot trip.
+# timer, and every plugin's own thread state. All are live-thread working state,
+# meaningless once a thread is aged out, and all are safe to lose (the
+# headline's Chat message is not edited again once nothing posts to the thread;
+# a timer for a month-old thread has no one to wake; plugin_state holds
+# working state for a conversation whose content is being redacted anyway).
+# Ordered parent-last so a future FK cannot trip.
+#
+# plugin_state deliberately does NOT feed live_threads: its payload is opaque to
+# core, so core cannot tell an open record from a spent one, and treating any row
+# as liveness would make a thread with one stale row permanently unprunable.
 _DROP_TABLES = (
     "context_generation",
     "chat_headline_findings",
     "chat_headlines",
     "chat_pending",
     "timers",
+    "plugin_state",
 )
 
 _DURATION_RE = re.compile(r"^(\d+)([dwh])$")

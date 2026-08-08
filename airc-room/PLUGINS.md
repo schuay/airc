@@ -78,7 +78,7 @@ def personas_dir() -> Path | None:
     the room: --agents-dir, then ./agents in the cwd, then this hook, then
     ~/.config/airc/agents."""
 
-def build_local_tools(cfg) -> dict[str, list]:
+def build_local_tools(cfg, *, room=None) -> dict[str, list]:
     """Local (non-MCP) langchain tools this plugin contributes, keyed by
     tool_group name. The room grants a persona a group's tools iff the group is in
     its tool_groups -- the SAME gate MCP tools use, so a persona's grants live in
@@ -87,7 +87,14 @@ def build_local_tools(cfg) -> dict[str, list]:
     list one without it being a configured MCP group. Use for tools needing
     in-process wiring an MCP server cannot get -- e.g. grocery's memory tools,
     which close over an akbase path and a jail. Absent means the plugin ships no
-    local tools."""
+    local tools.
+
+    `room` is for a tool that must POST, not just compute: the coding app's
+    task-proposal tool posts the spec itself so what a human reads is what was
+    stored, rather than the model's paraphrase of it. Keyword-optional, so a
+    plugin declaring the older build_local_tools(cfg) keeps working unchanged --
+    the room inspects the signature and passes `room` only to a hook that accepts
+    it, by name or through **kwargs."""
 
 def parse_config(cfg) -> object:
     """Validate and type this app's own [airc] sub-table. Core parses only the

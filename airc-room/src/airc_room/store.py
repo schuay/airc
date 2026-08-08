@@ -200,6 +200,28 @@ CREATE TABLE IF NOT EXISTS timers (
     fire_at REAL NOT NULL,
     note TEXT NOT NULL
 );
+-- Thread-scoped durable state a PLUGIN owns, with core blind to its shape. The
+-- namespace is the plugin's own (e.g. "icu_task_proposals"), key its own id, and
+-- json its own payload -- so a plugin gets mutable, thread-queryable state in
+-- the same connection and ordering domain as `messages` without a domain table
+-- in core's schema. (pending_bugs/handover_jobs above predate the core/plugin
+-- split and are the shape this exists to stop adding to.) One _DROP_TABLES entry
+-- in airc-prune then covers every plugin's state, present and future, so a
+-- plugin adding state needs no core change at all. Not an unconditional
+-- retention guarantee: prune only selects threads still holding unredacted
+-- content, so a row written into an already-swept thread outlives later sweeps.
+-- Tiny and bounded, but do not treat this as self-cleaning for a record a
+-- plugin keeps writing long after its thread went quiet.
+CREATE TABLE IF NOT EXISTS plugin_state (
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    json TEXT NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (namespace, key)
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_state_thread
+    ON plugin_state(namespace, thread_id);
 """
 
 
@@ -1043,3 +1065,46 @@ class Store:
             (source, limit),
         ).fetchall()
         return [r[0] for r in reversed(rows)]
+
+    # ── plugin-owned thread state ────────────────────────────────────────────
+    #
+    # Core stores and returns the payload as opaque JSON text: it never parses
+    # it, so the schema inside stays entirely with the plugin that wrote it.
+    # Encoding is the caller's too -- a plugin serializes its own model (pydantic
+    # or otherwise) rather than having core guess at a dict.
+
+    def put_plugin_state(
+        self, namespace: str, key: str, thread_id: int, json: str
+    ) -> None:
+        """Insert or replace one row. Upsert rather than insert-only because the
+        natural use is a small mutable record (a proposal marked submitted), and
+        read-modify-write through the owning plugin is the only writer."""
+        self._db.execute(
+            "INSERT INTO plugin_state (namespace, key, thread_id, json, ts)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(namespace, key) DO UPDATE SET"
+            " thread_id = excluded.thread_id, json = excluded.json, ts = excluded.ts",
+            (namespace, key, thread_id, json, time.time()),
+        )
+        self._db.commit()
+
+    def get_plugin_state(self, namespace: str, key: str) -> tuple[int, str] | None:
+        """(thread_id, json) for one row, or None. thread_id comes back because
+        the caller's usual next question is "was this recorded in THIS thread",
+        which it must not have to take on trust from the payload."""
+        row = self._db.execute(
+            "SELECT thread_id, json FROM plugin_state WHERE namespace = ? AND key = ?",
+            (namespace, key),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def list_plugin_state(
+        self, namespace: str, thread_id: int
+    ) -> list[tuple[str, str]]:
+        """(key, json) for a thread's rows, oldest first."""
+        rows = self._db.execute(
+            "SELECT key, json FROM plugin_state"
+            " WHERE namespace = ? AND thread_id = ? ORDER BY ts, key",
+            (namespace, thread_id),
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
