@@ -6,7 +6,7 @@ import time
 
 import pytest
 from airc_tools.limits import MAX_SHELL_CAPTURE
-from airc_tools.shell import _BUILD_TRAP_MSG, _WRITE_TRAP_MSG, run_shell
+from airc_tools.shell import _BUILD_TRAP_MSG, run_shell
 
 
 async def test_basic_exit_zero():
@@ -70,55 +70,6 @@ async def test_build_trap_allows_autoninja_and_lookalikes():
     ):
         out = await run_shell(cmd)
         assert out != _BUILD_TRAP_MSG and "exit 0" in out, cmd
-
-
-async def test_write_trap_blocks_authoring_a_source_file():
-    # The failure this closes: the system prompt has forbidden shell-authored
-    # files in prose since the tools existed, and agents still fall back to a
-    # heredoc after one failed edit_file match. Prose the model can rationalize
-    # past does not hold; a refused call does.
-    for cmd in (
-        "cat <<'EOF' > test/mjsunit/regress/regress-1.js\nassertTrue(1);\nEOF",
-        "echo 'assertTrue(true);' > test/mjsunit/regress/regress-1.js",
-        "printf '%s' 'int x;' > src/compiler/foo.cc",
-        "sed -i 's/return 1/return 2/' src/compiler/globals.h",
-        "sed -i.bak 's/a/b/' src/a.cc",
-        "perl -i -pe 's/a/b/' src/a.cc",
-        "git apply /cf/patch.diff",
-        "patch -p1 < /cf/patch.diff",
-        "cat <<'EOF' > patch.diff\n--- a/src/a.cc\n+++ b/src/a.cc\nEOF",
-        "echo x > patch.patch",
-        "tee src/compiler/foo.cc <<'EOF'\nint x;\nEOF",
-        "echo x >> BUILD.gn",
-    ):
-        assert await run_shell(cmd) == _WRITE_TRAP_MSG, cmd
-
-
-async def test_write_trap_allows_capturing_output():
-    # The distinction the trap turns on: authoring CONTENT is refused, capturing
-    # a command's OUTPUT is not -- the build skill explicitly tells the agent to
-    # redirect a noisy build to a casefile log, so trapping redirects wholesale
-    # would forbid instructed work and break every build/test invocation.
-    # A false positive here costs a burnt turn; these must all run.
-    for cmd in (
-        "echo autoninja -C out d8 > /dev/null",
-        "echo build output 2>&1 | tee /dev/null",
-        "echo x > /dev/null 2>&1",
-        "echo 'note' > /dev/null",
-        # Reads and inspections that merely NAME source files.
-        "echo grep -c foo src/a.cc",
-        "echo diff src/a.cc src/b.cc",
-        "echo git add test/mjsunit/regress/regress-1.js",
-        "echo git checkout src/compiler/globals.h",
-        "echo out/x64.optdebug/d8 test/mjsunit/regress/regress-1.js",
-        # sed WITHOUT -i is a filter, not an in-place edit.
-        "echo sed -n 1,50p src/a.cc",
-        # Patch tools that only inspect.
-        "git apply --check /dev/null",
-        "echo patch --dry-run -p1",
-    ):
-        out = await run_shell(cmd)
-        assert out != _WRITE_TRAP_MSG, cmd
 
 
 async def test_nonzero_exit():

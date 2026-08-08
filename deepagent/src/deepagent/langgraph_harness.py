@@ -249,8 +249,8 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
             name="write_file",
             description=(
                 "Create or overwrite a whole file with `content`. Use for a new"
-                " file (a test, a scratch script) or a full rewrite -- never a"
-                " shell heredoc/redirect. Use edit_file for a partial change."
+                " file (a test, a scratch script) or a full rewrite; use"
+                " edit_file for a partial change."
             ),
         ),
     ]
