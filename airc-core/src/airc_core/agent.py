@@ -958,9 +958,10 @@ _GROUNDING_REMINDER_TOKENS = 200_000
 
 
 class GroundingReminderMiddleware(AgentMiddleware):
-    """Insert the grounding rule into the conversation once per `interval` tokens of
+    """Insert a standing rule into the conversation once per `interval` tokens of
     context growth, so a long thread keeps a recent copy near the working tail
-    rather than only at the (increasingly buried) system prompt.
+    rather than only at the (increasingly buried) system prompt. Defaults to the
+    grounding rule; `reminder`/`src` make it reusable for any such rule.
 
     Writes the reminder into graph state via the messages reducer -- a TAIL append,
     never a mid-history insert (which would rewrite and poison the cached prefix).
@@ -971,16 +972,24 @@ class GroundingReminderMiddleware(AgentMiddleware):
     to reset). 0 disables it.
     """
 
-    def __init__(self, interval: int, reminder: str = _GROUNDING_REMINDER) -> None:
+    def __init__(
+        self,
+        interval: int,
+        reminder: str = _GROUNDING_REMINDER,
+        src: str = _GROUNDING_SRC,
+    ) -> None:
         super().__init__()
         self._interval = interval
         self._reminder = reminder
+        # Per-instance, so two reminders on different intervals do not read each
+        # other's inserts as their own and each suppress the other -- silently,
+        # and only in threads long enough for both to fire.
+        self._src = src
 
-    @staticmethod
-    def _is_reminder(m) -> bool:
+    def _is_reminder(self, m) -> bool:
         return (
             isinstance(m, HumanMessage)
-            and m.additional_kwargs.get("lc_source") == _GROUNDING_SRC
+            and m.additional_kwargs.get("lc_source") == self._src
         )
 
     def _due(self, messages: list) -> bool:
@@ -1002,7 +1011,7 @@ class GroundingReminderMiddleware(AgentMiddleware):
                 "messages": [
                     HumanMessage(
                         self._reminder,
-                        additional_kwargs={"lc_source": _GROUNDING_SRC},
+                        additional_kwargs={"lc_source": self._src},
                     )
                 ]
             }

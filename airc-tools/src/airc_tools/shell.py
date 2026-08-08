@@ -88,11 +88,17 @@ _DEFANG_ENV = {
 #
 # The last line closes the escalation loop -- without it, a hang that already
 # survived one raise invites the next one.
+#
+# SLOW spells out the pipeline case because the observed failure was re-running
+# only the tail of a chain: the kill is by process GROUP, so an earlier stage is
+# neither still running nor holding output for the retry to consume.
 _TIMEOUT_HINT = (
     "Which case is this? Look at the output below.\n\n"
     "SLOW -- output was still arriving when it was killed. The budget was just"
-    " too short. Retry the same command with timeout=<seconds> (600 covers an"
-    " incremental build).\n\n"
+    " too short. Retry the WHOLE command with timeout=<seconds> (600 covers an"
+    " incremental build). If it was a pipeline, the whole chain was killed"
+    " together: re-run it entire, first command included -- nothing is still"
+    " running and no earlier stage's output survived.\n\n"
     "HUNG -- no output, or it stopped long before the kill. Something is"
     " waiting forever: a prompt, a pager, a lock, a network call. A longer"
     " timeout waits longer and burns the turn. Do not raise it -- change the"

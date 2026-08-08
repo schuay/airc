@@ -535,6 +535,27 @@ def test_grounding_reminder_in_base_and_disablable():
     assert "GroundingReminderMiddleware" not in off
 
 
+async def test_two_reminders_do_not_suppress_each_other():
+    # The marker used to be a module-level constant matched by a staticmethod, so
+    # a second instance read the FIRST one's inserts as its own and went quiet --
+    # silently, and only in threads long enough for both to fire. Each instance
+    # now carries its own src, so each tracks only its own reminders.
+    from airc_core.agent import _CHARS_PER_TOKEN, GroundingReminderMiddleware
+
+    tools = GroundingReminderMiddleware(1000, "[system reminder] tools", "tools")
+    ground = GroundingReminderMiddleware(1000, "[system reminder] ground", "ground")
+    deep = [HumanMessage("x" * (1500 * _CHARS_PER_TOKEN))]
+
+    inserted = (await tools.abefore_model({"messages": deep}, None))["messages"]
+    assert inserted[0].additional_kwargs["lc_source"] == "tools"
+
+    # The other reminder's insert is content to us, not a reminder: still due.
+    both = [*deep, *inserted]
+    assert await ground.abefore_model({"messages": both}, None) is not None
+    # ...while our own suppresses us.
+    assert await tools.abefore_model({"messages": both}, None) is None
+
+
 # ── RequireStructuredResultMiddleware ────────────────────────────────────────
 #
 # The guard against a silent no-verdict: a ToolStrategy turn that answers in

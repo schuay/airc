@@ -6,6 +6,7 @@
 from .agent import (
     CallBudgetMiddleware,
     EmptyCandidateError,
+    GroundingReminderMiddleware,
     RequireStructuredResultMiddleware,
     TimeBudgetMiddleware,
     base_middleware,
@@ -44,6 +45,7 @@ __all__ = [
     "CallBudgetMiddleware",
     "CommonConfig",
     "EmptyCandidateError",
+    "GroundingReminderMiddleware",
     "MCPToolset",
     "RequireStructuredResultMiddleware",
     "TimeBudgetMiddleware",

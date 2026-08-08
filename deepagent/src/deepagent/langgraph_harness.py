@@ -28,12 +28,13 @@ import logging
 import time
 import zlib
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from airc_core import (
     CommonConfig,
     EmptyCandidateError,
+    GroundingReminderMiddleware,
     MCPToolset,
     TokenLog,
     apply_gcp_env_defaults,
@@ -417,6 +418,7 @@ class LangGraphHarness:
         coding_tool_groups: tuple[str, ...] = ("read", "active"),
         shell_timeout_s: float = 300.0,
         checkpoint_db: Path | str | None = None,
+        reminders: Sequence[tuple[str, str, int]] = (),
     ) -> None:
         self._common = common
         self._model_id = common.models.get(coding_model_key) or common.models.get(
@@ -436,6 +438,10 @@ class LangGraphHarness:
         self._toolset: MCPToolset | None = None
         self._v8_tools: list = []
         self._graphs: OrderedDict[str, object] = OrderedDict()
+        # (src, text, interval_tokens) per standing rule to re-inject near the
+        # working tail. The prose stays with the application: this package is
+        # domain-neutral, and a reminder naming a toolset names a domain.
+        self._reminders = list(reminders)
         self._init_lock = asyncio.Lock()
         self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
         self._saver_obj = None
@@ -637,6 +643,11 @@ class LangGraphHarness:
             summarizer_model_id=self._common.models.get("filter")
             or self._common.models.get("default"),
         )
+        # Before the cache middleware, matching base_middleware's placement of the
+        # grounding reminder: an insert is a tail append via the messages reducer,
+        # so it settles into the growing prefix rather than poisoning it.
+        for src, text, interval in self._reminders:
+            mw.append(GroundingReminderMiddleware(interval, text, src))
         if cache := growing_cache_middleware(
             self._model_id,
             self._system,
