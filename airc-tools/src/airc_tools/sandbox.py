@@ -218,14 +218,8 @@ class Sandbox:
         if not self.root.is_dir():
             raise FileNotFoundError(f"sandbox root missing: {self.root}")
         argv = list(self._cgroup_args())
-        argv += ["bwrap", *_SYSTEM_ARGS, *self._resolv_conf_args()]
+        argv += ["bwrap", *_SYSTEM_ARGS]
         if self.unshare_net:
-            # Before the binds, with the other namespace flags conceptually --
-            # bwrap applies namespace options irrespective of argv position, but
-            # keeping it adjacent to the network-related binds above is what
-            # makes the resolv.conf line readable (that bind is inert with no
-            # route, and harmless: DNS inside the box simply has nothing to
-            # reach).
             argv += ["--unshare-net"]
         argv += self._journal_socket_args()
         # ro/opaque binds split into two phases around the tmpfs. bwrap mounts in
@@ -410,15 +404,6 @@ class Sandbox:
         if self.tasks_max:
             args += ["-p", f"TasksMax={self.tasks_max}"]
         return [*args, "--"]
-
-    @staticmethod
-    def _resolv_conf_args() -> list[str]:
-        # systemd-resolved hosts symlink /etc/resolv.conf into /run, which is
-        # not bound; bind the real file so DNS keeps working under host net.
-        target = Path("/etc/resolv.conf").resolve()
-        if target.exists() and not str(target).startswith("/etc/"):
-            return ["--ro-bind", str(target), str(target)]
-        return []
 
     @staticmethod
     def _journal_socket_args() -> list[str]:
