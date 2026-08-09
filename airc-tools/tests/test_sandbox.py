@@ -1,6 +1,20 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
+"""What the box may touch, asserted as effective mounts rather than as argv
+trivia.
+
+Most of these tests are about ORDER, because order is the whole mechanism: bwrap
+mounts in sequence and a later mount wins where two overlap, so "which mount is
+in effect at this path" is decided by nothing else. That makes them easy to write
+badly. An assertion that merely finds both binds in the list passes whichever way
+round they are, and an assertion phrased against the list a caller PASSED IN is a
+tautology about that list, not a check on what the box gets. Every ordering test
+here therefore reads indices out of the resolved mounts or the emitted argv (what
+bwrap is actually handed), and the end-to-end ones run a real box and ask the
+kernel.
+"""
+
 import dataclasses
 import shutil
 import socket
@@ -8,8 +22,39 @@ import threading
 from pathlib import Path
 
 import pytest
-from airc_tools.sandbox import Sandbox
+from airc_tools.sandbox import (
+    RO,
+    RW,
+    Bind,
+    BindOver,
+    Overlay,
+    Sandbox,
+    Seal,
+)
 from airc_tools.shell import DEFANG_ENV, run_shell
+
+
+def _dest_at(argv: list[str], flag: str, dst: str) -> int:
+    """argv index of the mount spec with this flag and destination.
+
+    Ordering assertions compare these: an index into the list bwrap is handed is
+    the only thing that says which mount wins.
+    """
+    for i in range(len(argv)):
+        if argv[i] != flag:
+            continue
+        # --tmpfs/--remount-ro take one operand (the destination); the bind forms
+        # take two, destination last.
+        n = 1 if flag in ("--tmpfs", "--remount-ro", "--tmp-overlay") else 2
+        if argv[i + n] == dst:
+            return i
+    raise AssertionError(f"no {flag} at {dst} in argv")
+
+
+def _ops(sb: Sandbox) -> list[tuple[str, str]]:
+    """The resolved list as (op, destination) pairs -- the profile's own
+    statement of what it mounts, in order."""
+    return [(m.op, str(m.dst)) for m in sb.resolve()]
 
 
 @pytest.fixture
@@ -17,14 +62,11 @@ def profile(tmp_path):
     root = tmp_path / "wt"
     casefile = tmp_path / "casefile"
     dep = tmp_path / "dep"
-    creds = tmp_path / "creds"
-    for d in (root, casefile, dep, creds):
+    for d in (root, casefile, dep):
         d.mkdir()
     return Sandbox(
         root=root,
-        rw_paths=(casefile,),
-        ro_paths=(dep,),
-        opaque_ro_paths=(creds,),
+        binds=(Bind(dep, RO, optional=True), Bind(casefile, RW, optional=True)),
         tmpfs=(("/tmp", 1 << 20),),
         # As a real caller builds it: the profile carries the whole environment,
         # defang defaults included, because the wrapper adds nothing to it. HOME
@@ -63,11 +105,10 @@ def test_wrapper_shape(profile):
     # bwrap-only (cgroup off); command slots append after the prefix.
     assert argv[0] == "bwrap"
     s = " ".join(argv)
+    dep, casefile = profile.binds[0].path, profile.binds[1].path
     assert f"--bind {profile.root} {profile.root}" in s
-    assert f"--ro-bind {profile.ro_paths[0]} {profile.ro_paths[0]}" in s
-    # Opaque paths are mounted ro like deps; the difference is check() below.
-    assert f"--ro-bind {profile.opaque_ro_paths[0]}" in s
-    assert f"--bind {profile.rw_paths[0]} {profile.rw_paths[0]}" in s
+    assert f"--ro-bind {dep} {dep}" in s
+    assert f"--bind {casefile} {casefile}" in s
     assert "--cap-drop ALL" in s
     assert "--die-with-parent" in s
     assert "--clearenv" in s
@@ -107,11 +148,12 @@ def test_journal_socket_bound_when_present(profile, monkeypatch, tmp_path):
 
 
 def test_missing_optional_binds_skipped(profile):
-    shutil.rmtree(profile.ro_paths[0])
-    shutil.rmtree(profile.opaque_ro_paths[0])
+    dep, casefile = profile.binds[0].path, profile.binds[1].path
+    shutil.rmtree(dep)
+    shutil.rmtree(casefile)
     s = " ".join(profile.wrapper())
-    assert str(profile.ro_paths[0]) not in s
-    assert str(profile.opaque_ro_paths[0]) not in s
+    assert str(dep) not in s
+    assert str(casefile) not in s
 
 
 def test_unreachable_optional_binds_skipped(profile, monkeypatch):
@@ -122,7 +164,8 @@ def test_unreachable_optional_binds_skipped(profile, monkeypatch):
     # the error propagated out of wrapper() and failed the whole job.
     import errno
 
-    gated = profile.ro_paths[0]
+    gated = profile.binds[0].path
+    casefile = profile.binds[1].path
     real_stat = Path.stat
 
     def fake_stat(self, *a, **kw):
@@ -135,19 +178,24 @@ def test_unreachable_optional_binds_skipped(profile, monkeypatch):
     assert str(gated) not in s
     # The rest of the profile is unaffected: one unreachable bind is not fatal.
     assert f"--bind {profile.root} {profile.root}" in s
-    assert f"--ro-bind {profile.opaque_ro_paths[0]}" in s
+    assert f"--bind {casefile} {casefile}" in s
 
 
-def test_unreachable_ro_over_bind_still_raises(profile, monkeypatch):
-    # The inverse of the above, and deliberate: a ro-over source is a guard, not
-    # a convenience. Skipping an unstattable one would leave the path creatable
-    # under its rw parent -- exactly the hole the field closes -- so it must fail
-    # loudly rather than degrade.
+def test_unreachable_mandatory_bind_still_raises(profile, monkeypatch):
+    # The inverse of the above, and the reason `optional` is a property of the
+    # bind rather than of what it happens to point at: a pin is a guard, not a
+    # convenience. Skipping an unstattable one would leave the path writable
+    # under whatever it was pinned on top of -- exactly the hole it closes -- so
+    # it must fail loudly rather than degrade.
     import errno
 
     guard = profile.root / "guarded"
     guard.touch()
-    boxed = Sandbox(root=profile.root, ro_over_rw_paths=(guard,), use_cgroup=False)
+    boxed = Sandbox(
+        root=profile.root,
+        binds=(Bind(guard, RO),),
+        use_cgroup=False,
+    )
     real_stat = Path.stat
 
     def fake_stat(self, *a, **kw):
@@ -203,41 +251,39 @@ async def test_run_shell_sandboxed_end_to_end(profile):
 @needs_bwrap
 async def test_run_shell_sandboxed_ro_enforced(profile):
     out = await run_shell(
-        f"touch {profile.ro_paths[0]}/probe 2>&1; ls /home/*/.* 2>&1 | head -1",
+        f"touch {profile.binds[0].path}/probe 2>&1; ls /home/*/.* 2>&1 | head -1",
         sandbox=profile,
     )
     assert "Read-only file system" in out
 
 
-def test_ro_ancestor_of_root_cannot_shadow_the_worktree(profile, tmp_path):
-    # bwrap mounts in argv order and later mounts shadow earlier ones, so every
-    # ro bind must precede the rw root: an ro path that is an ANCESTOR of the
-    # root (operator extra_ro, editable source root, launcher chain -- all
-    # layout-dependent) would otherwise remount the whole worktree read-only.
+def test_ro_ancestor_of_root_is_hoisted_above_it(profile, tmp_path):
+    # An RO bind that is an ANCESTOR of the rw root (an operator extra_ro, an
+    # editable source root, a resolved launcher chain -- all layout-dependent and
+    # none of them written with the root in mind) would remount the whole
+    # worktree read-only if it landed after it. It is hoisted above the root
+    # instead of being the caller's problem to order.
+    casefile = profile.binds[1].path
     boxed = Sandbox(
         root=profile.root,
-        rw_paths=profile.rw_paths,
-        ro_paths=(tmp_path,),  # ancestor of root
+        binds=(Bind(tmp_path, RO), Bind(casefile, RW, optional=True)),
         use_cgroup=False,
     )
     argv = boxed.wrapper()
-    ro_at = argv.index("--ro-bind")
-    root_at = argv.index("--bind")
+    ro_at = _dest_at(argv, "--ro-bind", str(tmp_path))
+    root_at = _dest_at(argv, "--bind", str(profile.root))
     assert ro_at < root_at
-    # and the rw seams still land after the ro binds (rw-over-ro layering)
-    assert argv.index(str(profile.rw_paths[0])) > ro_at
+    # ...and an rw bind written after it still lands after it: hoisting moves the
+    # ancestor, not everything.
+    assert _dest_at(argv, "--bind", str(casefile)) > ro_at
 
 
 @needs_bwrap
 async def test_root_stays_writable_under_ro_ancestor_end_to_end(profile, tmp_path):
     boxed = Sandbox(
         root=profile.root,
-        rw_paths=(),
-        ro_paths=(tmp_path,),  # ancestor of root
+        binds=(Bind(tmp_path, RO),),  # ancestor of root
         tmpfs=(("/tmp", 1 << 20),),
-        # As a real caller builds it: the profile carries the whole environment,
-        # defang defaults included, because the wrapper adds nothing to it. HOME
-        # stays first -- tests below read env[0] for it.
         env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=False,
     )
@@ -248,9 +294,9 @@ async def test_root_stays_writable_under_ro_ancestor_end_to_end(profile, tmp_pat
     assert "Read-only file system" in out  # the ancestor itself stays ro
 
 
-def _ro_over_box(tmp_path, use_cgroup=False):
-    """A profile with an rw dir that has a ro-over hole punched in it, mirroring
-    the main .git bound rw with config/hooks pinned ro."""
+def _pinned_box(tmp_path, use_cgroup=False):
+    """An rw dir with ro pins written after it, mirroring the main .git bound rw
+    with config/hooks pinned on top."""
     root = tmp_path / "wt"
     gitdir = tmp_path / "gitdir"  # stands in for the common .git
     (gitdir / "hooks").mkdir(parents=True)
@@ -259,39 +305,54 @@ def _ro_over_box(tmp_path, use_cgroup=False):
     root.mkdir()
     return gitdir, Sandbox(
         root=root,
-        rw_paths=(gitdir,),
-        ro_over_rw_paths=(gitdir / "config", gitdir / "hooks"),
+        binds=(
+            Bind(gitdir, RW),
+            Bind(gitdir / "config", RO),
+            Bind(gitdir / "hooks", RO),
+        ),
         tmpfs=(("/tmp", 1 << 20),),
-        # As a real caller builds it: the profile carries the whole environment,
-        # defang defaults included, because the wrapper adds nothing to it. HOME
-        # stays first -- tests below read env[0] for it.
         env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=use_cgroup,
     )
 
 
-def test_ro_over_binds_land_after_the_rw_parent(tmp_path):
-    # ro-over paths must be bound AFTER the rw parent so they win on overlap;
-    # the fixed ro-first/rw-last layering would otherwise let the rw .git bind
-    # shadow them and leave config/hooks writable.
-    gitdir, boxed = _ro_over_box(tmp_path)
+def test_a_pin_written_after_the_rw_parent_is_emitted_after_it(tmp_path):
+    # The list order is the mount order, so a pin written after the rw parent
+    # wins over it. Asserted against the emitted argv rather than against the
+    # list that was passed in: the second would hold no matter what wrapper()
+    # did with it.
+    gitdir, boxed = _pinned_box(tmp_path)
     argv = boxed.wrapper()
-    gitdir_rw = next(
-        i
-        for i in range(len(argv))
-        if argv[i] == "--bind" and argv[i + 1] == str(gitdir)
+    assert _dest_at(argv, "--ro-bind", str(gitdir / "config")) > _dest_at(
+        argv, "--bind", str(gitdir)
     )
-    config_ro = next(
-        i
-        for i in range(len(argv))
-        if argv[i] == "--ro-bind" and argv[i + 1] == str(gitdir / "config")
+
+
+def test_a_pin_written_before_the_rw_parent_does_not_win(tmp_path):
+    # The other half of "later wins", and the reason this model can be read as
+    # policy: the SAME two binds in the other order give the other answer, and
+    # nothing silently repairs it. If wrapper() sorted binds by mode -- the
+    # field-shaped model this replaced -- the pin would survive its own
+    # misplacement and the ordering would stop meaning anything.
+    root = tmp_path / "wt"
+    root.mkdir()
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    (gitdir / "config").write_text("[core]\n")
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(gitdir / "config", RO), Bind(gitdir, RW)),
+        use_cgroup=False,
     )
-    assert config_ro > gitdir_rw  # ro-over shadows the rw parent
+    argv = boxed.wrapper()
+    assert _dest_at(argv, "--ro-bind", str(gitdir / "config")) < _dest_at(
+        argv, "--bind", str(gitdir)
+    )
 
 
 @needs_bwrap
-async def test_ro_over_hole_is_read_only_end_to_end(tmp_path):
-    gitdir, boxed = _ro_over_box(tmp_path)
+async def test_pin_over_an_rw_parent_is_read_only_end_to_end(tmp_path):
+    gitdir, boxed = _pinned_box(tmp_path)
     out = await run_shell(
         f"touch {gitdir}/refs/probe && echo wrote_refs; "
         f"echo x >> {gitdir}/config 2>&1; "
@@ -302,35 +363,35 @@ async def test_ro_over_hole_is_read_only_end_to_end(tmp_path):
     assert out.count("Read-only file system") >= 2  # config and hooks both ro
 
 
-def test_wrapper_refuses_missing_ro_over_source(tmp_path):
-    # A ro-over source that does not exist must fail loud, not skip: the
-    # skipped guard leaves the path creatable under the rw parent (e.g. a
-    # plantable .git/hooks), which is the hole the field exists to close.
-    gitdir, boxed = _ro_over_box(tmp_path)
+def test_wrapper_refuses_a_missing_mandatory_bind_source(tmp_path):
+    # A pin whose source does not exist must fail loud, not skip: the skipped
+    # guard leaves the path writable under the rw parent (e.g. a plantable
+    # .git/hooks), which is the hole it exists to close.
+    gitdir, boxed = _pinned_box(tmp_path)
     (gitdir / "config").unlink()
     with pytest.raises(FileNotFoundError, match="config"):
         boxed.wrapper()
 
 
-def _rw_over_box(tmp_path, use_cgroup=False):
-    """A sealed directory with one rw entry inside it, mirroring .git/worktrees
-    pinned ro while this job's own private worktree dir stays writable."""
+def _sealed_box(tmp_path, use_cgroup=False):
+    """A sealed directory with one rw hole punched back through it, mirroring
+    .git/worktrees with this job's own private worktree dir kept writable."""
     root = tmp_path / "wt"
     root.mkdir()
     gitdir = tmp_path / "gitdir"
     wts = gitdir / "worktrees"
     private = wts / "mine"
-    (private).mkdir(parents=True)
-    (wts / "sibling").mkdir()
-    (wts / "sibling" / "config.worktree").write_text("[core]\n")
+    private.mkdir(parents=True)
+    # A name no path or message can collide with: the assertion below is
+    # "absent", and an accidental substring hit would make it pass vacuously.
+    (wts / "OTHERWT").mkdir()
+    (wts / "OTHERWT" / "config.worktree").write_text("[core]\n")
     return (
         gitdir,
         private,
         Sandbox(
             root=root,
-            rw_paths=(gitdir,),
-            ro_over_rw_paths=(wts,),
-            rw_over_ro_paths=(private,),
+            binds=(Bind(gitdir, RW), Seal(wts), Bind(private, RW)),
             tmpfs=(("/tmp", 1 << 20),),
             env=(("HOME", str(tmp_path)),),
             use_cgroup=use_cgroup,
@@ -338,50 +399,62 @@ def _rw_over_box(tmp_path, use_cgroup=False):
     )
 
 
-def test_rw_over_binds_land_after_the_ro_over_parent(tmp_path):
-    # Order IS the mechanism: emitted before the ro-over parent, the seal
-    # shadows the hole and the box gets a read-only private worktree dir, where
+def test_a_hole_through_a_seal_is_mounted_after_it(tmp_path):
+    # Order IS the mechanism: emitted before the seal, the hole is buried by the
+    # seal's empty tmpfs and the box gets a read-only private worktree dir, where
     # git then cannot create index.lock -- breaking every in-box commit.
-    gitdir, private, boxed = _rw_over_box(tmp_path)
+    gitdir, private, boxed = _sealed_box(tmp_path)
     argv = boxed.wrapper()
-    wts_ro = next(
-        i
-        for i in range(len(argv))
-        if argv[i] == "--ro-bind" and argv[i + 1] == str(gitdir / "worktrees")
+    assert _dest_at(argv, "--bind", str(private)) > _dest_at(
+        argv, "--tmpfs", str(gitdir / "worktrees")
     )
-    private_rw = next(
-        i
-        for i in range(len(argv))
-        if argv[i] == "--bind" and argv[i + 1] == str(private)
-    )
-    assert private_rw > wts_ro
+
+
+def test_a_seal_closes_only_after_every_later_mount(tmp_path):
+    # The seal's ro remount is deferred to the END of the resolved list, not
+    # emitted with its tmpfs. bwrap cannot create a mountpoint inside a
+    # read-only tmpfs, so an atomic seal makes every hole through it die with
+    # "Can't mkdir: Read-only file system" (measured against bwrap 0.11.2) --
+    # which fails the box outright rather than leaking, but takes the .git dance
+    # with it.
+    gitdir, _, boxed = _sealed_box(tmp_path)
+    ops = _ops(boxed)
+    assert ops[-1] == ("seal-ro", str(gitdir / "worktrees"))
+    argv = boxed.wrapper()
+    binds = [i for i, a in enumerate(argv) if a in ("--ro-bind", "--bind", "--tmpfs")]
+    assert _dest_at(argv, "--remount-ro", str(gitdir / "worktrees")) > max(binds)
 
 
 @needs_bwrap
-async def test_rw_over_hole_writable_inside_sealed_parent_end_to_end(tmp_path):
-    # The two halves that matter together: nothing NEW can appear in the sealed
-    # directory (a planted worktree config is a host-code-exec vector, since
-    # host-side git runs core.fsmonitor from it), while the job's own dir stays
-    # writable for index.lock.
-    gitdir, private, boxed = _rw_over_box(tmp_path)
+async def test_seal_hides_siblings_and_forbids_creation_end_to_end(tmp_path):
+    # What a seal buys over pinning each entry: the sealed directory is EMPTY in
+    # the box, so a sibling worktree is not read-only but absent, and nothing new
+    # can be created beside it. Pins are a snapshot of what existed at assembly
+    # time -- a job could otherwise plant a config.worktree in a sibling created
+    # after the scan, and host-side git runs core.fsmonitor out of it.
+    gitdir, private, boxed = _sealed_box(tmp_path)
     wts = gitdir / "worktrees"
     out = await run_shell(
-        f"mkdir {wts}/planted 2>&1; "
-        f"echo x > {wts}/sibling/config.worktree 2>&1; "
+        f"ls {wts}; mkdir {wts}/planted 2>&1; "
         f"touch {private}/index.lock && echo wrote_private",
         sandbox=boxed,
     )
-    assert "wrote_private" in out  # the hole is genuinely writable
-    assert out.count("Read-only file system") >= 2  # no plant, no sibling edit
+    assert "OTHERWT" not in out  # not merely read-only: not there
+    assert "mine" in out  # the hole is still visible
+    assert "Read-only file system" in out  # and nothing new can appear
+    assert "wrote_private" in out  # while the job's own dir is writable
+    # None of it reached the host's copy.
+    assert (wts / "OTHERWT" / "config.worktree").read_text() == "[core]\n"
+    assert not (wts / "planted").exists()
 
 
 @needs_bwrap
-async def test_ro_over_pins_inside_an_rw_hole_survive_it(tmp_path):
-    # An rw hole re-opens everything under it, so a ro-over pin INSIDE the hole
-    # is shadowed by it unless re-emitted on top. That combination is the real
-    # .git shape -- the private worktree dir must be writable for index.lock,
-    # while the commondir and config.worktree inside it steer host-side git and
-    # must not be -- so the hole must not silently un-pin them.
+async def test_a_pin_inside_a_hole_holds_when_written_after_it(tmp_path):
+    # The case that used to need a derived re-emission pass, and the best single
+    # test of whether this model is more expressive than the fields it replaced:
+    # pin, hole, pin again is just three binds in that order. The real .git shape
+    # -- the private worktree dir must be writable for index.lock, while the
+    # commondir and config.worktree inside it steer host-side git and must not be.
     root = tmp_path / "wt"
     root.mkdir()
     gitdir = tmp_path / "gitdir"
@@ -392,17 +465,14 @@ async def test_ro_over_pins_inside_an_rw_hole_survive_it(tmp_path):
     (private / "config.worktree").write_text("")
     boxed = Sandbox(
         root=root,
-        rw_paths=(gitdir,),
-        ro_over_rw_paths=(
-            private / "commondir",
-            private / "config.worktree",
-            wts,
+        binds=(
+            Bind(gitdir, RW),
+            Seal(wts),
+            Bind(private, RW),
+            Bind(private / "commondir", RO),
+            Bind(private / "config.worktree", RO),
         ),
-        rw_over_ro_paths=(private,),
         tmpfs=(("/tmp", 1 << 20),),
-        # As a real caller builds it: the profile carries the whole environment,
-        # defang defaults included, because the wrapper adds nothing to it. HOME
-        # stays first -- tests below read env[0] for it.
         env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=False,
     )
@@ -416,14 +486,59 @@ async def test_ro_over_pins_inside_an_rw_hole_survive_it(tmp_path):
     assert out.count("Read-only file system") >= 2  # ...without un-pinning these
 
 
-def test_wrapper_refuses_missing_rw_over_source(tmp_path):
-    # Same reasoning as ro-over, opposite failure: a skipped rw hole leaves the
-    # path read-only under its sealed parent, which does not leak but silently
-    # breaks in-box git. Fail at assembly instead.
-    _, private, boxed = _rw_over_box(tmp_path)
+@needs_bwrap
+async def test_a_pin_written_before_its_hole_is_re_opened_by_it(tmp_path):
+    # The negative of the test above, and what makes it a claim about ordering
+    # rather than about list membership: the SAME binds with the pins written
+    # BEFORE the rw hole leave commondir writable, because the hole re-opens
+    # everything under it. Nothing in the model repairs that, which is the point
+    # -- the old field model papered over it with a second derived pass, so the
+    # ordering the caller wrote and the ordering the box got were different
+    # things.
+    root = tmp_path / "wt"
+    root.mkdir()
+    gitdir = tmp_path / "gitdir"
+    private = gitdir / "worktrees" / "mine"
+    private.mkdir(parents=True)
+    (private / "commondir").write_text("../..\n")
+    boxed = Sandbox(
+        root=root,
+        binds=(
+            Bind(gitdir, RW),
+            Bind(private / "commondir", RO),  # pinned BEFORE the hole
+            Bind(private, RW),
+        ),
+        tmpfs=(("/tmp", 1 << 20),),
+        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
+        use_cgroup=False,
+    )
+    out = await run_shell(
+        f"echo x > {private}/commondir 2>&1 && echo REOPENED", sandbox=boxed
+    )
+    assert "REOPENED" in out
+    assert "Read-only file system" not in out
+
+
+def test_wrapper_refuses_a_missing_hole_source(tmp_path):
+    # Same reasoning as a pin, opposite failure: a skipped rw hole leaves the
+    # path read-only under its seal, which does not leak but silently breaks
+    # in-box git. Fail at assembly instead.
+    _, private, boxed = _sealed_box(tmp_path)
     private.rmdir()
     with pytest.raises(FileNotFoundError, match="mine"):
         boxed.wrapper()
+
+
+def test_seal_source_must_exist(tmp_path):
+    # bwrap would create the mountpoint on the HOST rather than fail (measured),
+    # so a seal of a path that is not there quietly makes a directory in the
+    # shared checkout as a side effect of building a profile. Refuse instead.
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(root=root, binds=(Seal(tmp_path / "gone"),), use_cgroup=False)
+    with pytest.raises(FileNotFoundError, match="seal source missing"):
+        boxed.wrapper()
+    assert not (tmp_path / "gone").exists()
 
 
 def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
@@ -437,21 +552,38 @@ def test_ro_ancestor_of_tmpfs_phases_before_it(tmp_path):
     root.mkdir()
     boxed = Sandbox(
         root=root,
-        ro_paths=(tmp_path,),  # ro ancestor of the home tmpfs
+        binds=(Bind(tmp_path, RO),),  # ro ancestor of the home tmpfs
         tmpfs=((str(home), 1 << 20),),
         env=(("HOME", str(home)),),
         use_cgroup=False,
     )
     argv = boxed.wrapper()
-    tmpfs_at = next(
-        i for i in range(len(argv)) if argv[i] == "--tmpfs" and argv[i + 1] == str(home)
+    ro_at = _dest_at(argv, "--ro-bind", str(tmp_path))
+    assert ro_at < _dest_at(argv, "--tmpfs", str(home))
+
+
+def test_descendant_of_a_tmpfs_is_not_hoisted(tmp_path):
+    # The inverse, and the reason hoisting is a targeted exception rather than a
+    # sort: depot_tools under $HOME is a DESCENDANT of the tmpfs and must land
+    # AFTER it to stay visible on top of the blanked home. Hoisting it would make
+    # the box's depot_tools vanish.
+    home = tmp_path / "home"
+    home.mkdir()
+    depot = home / "depot_tools"
+    depot.mkdir()
+    root = tmp_path / "wt"
+    root.mkdir()
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(depot, RO),),
+        tmpfs=((str(home), 1 << 20),),
+        env=(("HOME", str(home)),),
+        use_cgroup=False,
     )
-    ro_at = next(
-        i
-        for i in range(len(argv))
-        if argv[i] == "--ro-bind" and argv[i + 1] == str(tmp_path)
+    argv = boxed.wrapper()
+    assert _dest_at(argv, "--ro-bind", str(depot)) > _dest_at(
+        argv, "--tmpfs", str(home)
     )
-    assert ro_at < tmpfs_at  # ancestor phased before the tmpfs -> tmpfs wins
 
 
 @needs_bwrap
@@ -462,7 +594,7 @@ async def test_ro_ancestor_of_tmpfs_tmpfs_wins_end_to_end(tmp_path):
     root.mkdir()
     boxed = Sandbox(
         root=root,
-        ro_paths=(tmp_path,),  # ro ancestor of the home tmpfs
+        binds=(Bind(tmp_path, RO),),  # ro ancestor of the home tmpfs
         tmpfs=((str(home), 1 << 20),),
         env=(("HOME", str(home)), ("PATH", "/usr/bin:/bin")),
         use_cgroup=False,
@@ -479,10 +611,10 @@ async def test_ro_ancestor_of_tmpfs_tmpfs_wins_end_to_end(tmp_path):
 def test_system_ro_root_is_dropped_not_reemitted(tmp_path):
     # /usr is already bound by _SYSTEM_ARGS; re-emitting it (as launcher
     # interpreter-root resolution did on prod) is waste, and after a tmpfs it
-    # covers it is the leak. wrapper() drops it -- exactly one /usr bind.
+    # covers it is the leak. It is dropped -- exactly one /usr bind.
     root = tmp_path / "wt"
     root.mkdir()
-    boxed = Sandbox(root=root, ro_paths=(Path("/usr"),), use_cgroup=False)
+    boxed = Sandbox(root=root, binds=(Bind(Path("/usr"), RO),), use_cgroup=False)
     argv = boxed.wrapper()
     usr_binds = sum(
         1 for i in range(len(argv)) if argv[i] == "--ro-bind" and argv[i + 1] == "/usr"
@@ -501,28 +633,78 @@ def test_symlinked_alias_and_its_target_are_both_bound(tmp_path):
     versioned.mkdir()
     alias = tmp_path / "cpython-3.12"
     alias.symlink_to(versioned)
-    boxed = Sandbox(root=root, ro_paths=(alias, versioned), use_cgroup=False)
-    dests = {
-        argv[i + 2]
-        for argv in (boxed.wrapper(),)
-        for i in range(len(argv))
-        if argv[i] == "--ro-bind"
-    }
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(alias, RO), Bind(versioned, RO)),
+        use_cgroup=False,
+    )
+    dests = {d for op, d in _ops(boxed) if op == "ro"}
     assert str(alias) in dests
     assert str(versioned) in dests
 
 
+def test_a_repeated_bind_is_emitted_once(tmp_path):
+    # Two callers naming the same dep is ordinary (a launcher chain and an
+    # extra_ro often overlap), and re-emitting it is waste at best. Deduped only
+    # while the earlier mount is still in effect -- see the test below for the
+    # case where it is not.
+    root = tmp_path / "wt"
+    root.mkdir()
+    dep = tmp_path / "dep"
+    dep.mkdir()
+    boxed = Sandbox(
+        root=root,
+        binds=(Bind(dep, RO), Bind(dep, RO)),
+        use_cgroup=False,
+    )
+    assert [d for op, d in _ops(boxed) if d == str(dep)] == [str(dep)]
+
+
+def test_a_pin_restated_after_a_hole_is_not_deduped_away(tmp_path):
+    # The dedup must not eat a pin that is re-stated because something was
+    # mounted over it in between -- that is precisely the .git shape, and
+    # dropping the second one silently un-pins a host-code-exec vector. What
+    # makes it correct is that a covering mount invalidates what it covers, so
+    # "already in effect" stops being true.
+    root = tmp_path / "wt"
+    root.mkdir()
+    gitdir = tmp_path / "gitdir"
+    private = gitdir / "worktrees" / "mine"
+    private.mkdir(parents=True)
+    (private / "commondir").write_text("../..\n")
+    boxed = Sandbox(
+        root=root,
+        binds=(
+            Bind(gitdir, RW),
+            Bind(private / "commondir", RO),
+            Bind(private, RW),  # re-opens everything under it
+            Bind(private / "commondir", RO),  # ...so this one must survive
+        ),
+        use_cgroup=False,
+    )
+    emitted = [d for op, d in _ops(boxed) if d == str(private / "commondir")]
+    assert len(emitted) == 2
+
+
 def test_assert_no_leak_raises_on_a_later_ancestor(tmp_path):
-    # The guarantee: a hand-built argv where a ro ancestor lands AFTER a tmpfs it
+    # The guarantee: a bind list where a ro ancestor lands AFTER a tmpfs it
     # covers fails loud at assembly, rather than producing a silently-broken box.
+    # Written as a BindOver because it is the one bind whose destination the
+    # caller picks freely -- a same-path RO ancestor would be hoisted instead.
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "wt"
     root.mkdir()
-    boxed = Sandbox(root=root, tmpfs=((str(home), 1 << 20),), use_cgroup=False)
-    bad = ["bwrap", "--tmpfs", str(home), "--ro-bind", str(tmp_path), str(tmp_path)]
+    src = tmp_path / "src"
+    src.mkdir()
+    boxed = Sandbox(
+        root=root,
+        binds=(BindOver(src, tmp_path),),
+        tmpfs=((str(home), 1 << 20),),
+        use_cgroup=False,
+    )
     with pytest.raises(ValueError, match="leaks"):
-        boxed._assert_no_leak(bad)
+        boxed.wrapper()
 
 
 def test_assert_no_leak_raises_on_a_later_bind_of_the_exact_path(tmp_path):
@@ -534,23 +716,31 @@ def test_assert_no_leak_raises_on_a_later_bind_of_the_exact_path(tmp_path):
     home.mkdir()
     root = tmp_path / "wt"
     root.mkdir()
-    boxed = Sandbox(root=root, tmpfs=((str(home), 1 << 20),), use_cgroup=False)
-    bad = ["bwrap", "--tmpfs", str(home), "--ro-bind", str(home), str(home)]
+    boxed = Sandbox(
+        root=root,
+        binds=(BindOver(home, home),),
+        tmpfs=((str(home), 1 << 20),),
+        use_cgroup=False,
+    )
     with pytest.raises(ValueError, match="leaks"):
-        boxed._assert_no_leak(bad)
+        boxed.wrapper()
     # Same for the rw root: a later bind over it swaps the worktree for real
     # disk, which is writable and so hides the swap.
-    bad_root = [
-        "bwrap",
-        "--bind",
-        str(root),
-        str(root),
-        "--ro-bind",
-        str(root),
-        str(root),
-    ]
     with pytest.raises(ValueError, match="leaks"):
-        boxed._assert_no_leak(bad_root)
+        dataclasses.replace(boxed, binds=(BindOver(home, root),)).wrapper()
+
+
+def test_a_seal_does_not_count_as_covering_its_own_remount(tmp_path):
+    # A seal's ro remount is deferred past every other mount, so it is the LAST
+    # thing in the list -- but it modifies a mount already there rather than
+    # covering the path anew. Treating it as a cover would make the leak check
+    # fire on any seal of a directory under the rw root, i.e. on the .git dance
+    # itself, and the natural "fix" for that is to weaken the check.
+    root = tmp_path / "wt"
+    root.mkdir()
+    sealed = root / "worktrees"
+    sealed.mkdir()
+    Sandbox(root=root, binds=(Seal(sealed),), use_cgroup=False).wrapper()
 
 
 def test_bind_over_places_a_file_at_a_different_path(tmp_path):
@@ -564,14 +754,13 @@ def test_bind_over_places_a_file_at_a_different_path(tmp_path):
     src.write_text("127.0.0.1 example\n")
     root = tmp_path / "wt"
     root.mkdir()
-    box = Sandbox(root=root, bind_over_paths=((src, Path("/etc/hosts")),))
-    argv = box.wrapper()
+    argv = Sandbox(root=root, binds=(BindOver(src, Path("/etc/hosts")),)).wrapper()
     i = argv.index(str(src))
     assert argv[i - 1] == "--ro-bind"
     assert argv[i + 1] == "/etc/hosts"
 
 
-def test_bind_over_lands_after_the_system_binds_so_it_wins(tmp_path):
+def test_bind_over_written_last_lands_after_the_system_binds(tmp_path):
     """Order is the mechanism: bwrap mounts in sequence and a later mount wins.
 
     If this bind were emitted before `--ro-bind /etc /etc`, the system file
@@ -583,15 +772,14 @@ def test_bind_over_lands_after_the_system_binds_so_it_wins(tmp_path):
     root = tmp_path / "wt"
     root.mkdir()
     # Assert against the LAST bind of any kind, not just /etc: the requirement
-    # is that nothing can be mounted after a mapped bind, and an assertion
-    # naming one earlier mount passes even when the bind is emitted far too
-    # early. (Measured: it did.)
+    # is that nothing can be mounted after a mapped bind written last, and an
+    # assertion naming one earlier mount passes even when the bind is emitted far
+    # too early. (Measured: it did.)
     ro = tmp_path / "dep"
     ro.mkdir()
     argv = Sandbox(
         root=root,
-        ro_paths=(ro,),
-        bind_over_paths=((src, Path("/etc/hosts")),),
+        binds=(Bind(ro, RO), BindOver(src, Path("/etc/hosts"))),
     ).wrapper()
     binds = [i for i, a in enumerate(argv) if a in ("--ro-bind", "--bind", "--tmpfs")]
     assert argv.index(str(src)) > max(binds[:-1])
@@ -600,10 +788,10 @@ def test_bind_over_lands_after_the_system_binds_so_it_wins(tmp_path):
 def test_bind_over_source_must_exist(tmp_path):
     # Skipping a missing source would leave the box reading the ORIGINAL file,
     # which is the misconfiguration this bind exists to prevent -- so it raises
-    # rather than degrading, exactly as ro_over_rw_paths does.
+    # rather than degrading, exactly as a pin does.
     root = tmp_path / "wt"
     root.mkdir()
-    box = Sandbox(root=root, bind_over_paths=((tmp_path / "gone", Path("/etc/x")),))
+    box = Sandbox(root=root, binds=(BindOver(tmp_path / "gone", Path("/etc/x")),))
     with pytest.raises(FileNotFoundError, match="bind-over source missing"):
         box.wrapper()
 
@@ -619,7 +807,7 @@ def test_bind_over_cannot_shadow_the_rw_root(tmp_path):
     src.write_text("x\n")
     root = tmp_path / "wt"
     root.mkdir()
-    box = Sandbox(root=root, bind_over_paths=((src, root),))
+    box = Sandbox(root=root, binds=(BindOver(src, root),))
     with pytest.raises(ValueError, match="leaks"):
         box.wrapper()
 
@@ -696,7 +884,9 @@ async def test_a_bound_unix_socket_crosses_the_network_namespace(profile, tmp_pa
 
     threading.Thread(target=_serve, daemon=True).start()
     boxed = dataclasses.replace(
-        profile, unshare_net=True, ro_paths=(*profile.ro_paths, sock_dir)
+        profile,
+        unshare_net=True,
+        binds=(*profile.binds, Bind(sock_dir, RO)),
     )
     try:
         out = await run_shell(
@@ -710,18 +900,18 @@ async def test_a_bound_unix_socket_crosses_the_network_namespace(profile, tmp_pa
         srv.close()
 
 
-def test_tmp_overlay_source_must_exist(tmp_path):
+def test_overlay_source_must_exist(tmp_path):
     # Skipping it would leave the box with no cache where it expects a warm one.
     # For vpython that is not a degradation but a HANG (it tries to rebuild the
     # venv and, with no network, never finishes), so this fails at assembly.
     root = tmp_path / "wt"
     root.mkdir()
-    box = Sandbox(root=root, tmp_overlay_paths=(tmp_path / "gone",))
+    box = Sandbox(root=root, binds=(Overlay(tmp_path / "gone"),))
     with pytest.raises(FileNotFoundError, match="tmp-overlay source missing"):
         box.wrapper()
 
 
-def test_tmp_overlay_cannot_shadow_a_tmpfs(tmp_path):
+def test_overlay_cannot_shadow_a_tmpfs(tmp_path):
     # An overlay covers its mount point exactly as a bind does, so it is subject
     # to the leak rule too -- one over $HOME would shadow the blanked home just
     # as silently as the ro bind that caused that bug.
@@ -729,17 +919,13 @@ def test_tmp_overlay_cannot_shadow_a_tmpfs(tmp_path):
     src.mkdir()
     root = tmp_path / "wt"
     root.mkdir()
-    box = Sandbox(
-        root=root,
-        tmpfs=((str(src), 1 << 20),),
-        tmp_overlay_paths=(src,),
-    )
+    box = Sandbox(root=root, tmpfs=((str(src), 1 << 20),), binds=(Overlay(src),))
     with pytest.raises(ValueError, match="leaks"):
         box.wrapper()
 
 
 @needs_bwrap
-async def test_tmp_overlay_is_warm_to_read_and_writes_go_nowhere(profile, tmp_path):
+async def test_overlay_is_warm_to_read_and_writes_go_nowhere(profile, tmp_path):
     """The two halves that make a shared tool cache safe to expose.
 
     A cache the box must be able to WRITE to (vpython takes a lock file even to
@@ -754,9 +940,7 @@ async def test_tmp_overlay_is_warm_to_read_and_writes_go_nowhere(profile, tmp_pa
     cache = tmp_path / "cache"
     cache.mkdir()
     (cache / "warm.txt").write_text("from the host\n")
-    boxed = dataclasses.replace(
-        profile, tmp_overlay_paths=(cache,), ro_paths=(*profile.ro_paths, cache)
-    )
+    boxed = dataclasses.replace(profile, binds=(*profile.binds, Overlay(cache)))
     out = await run_shell(
         f"cat {cache}/warm.txt; echo poison > {cache}/evil.txt && echo WROTE",
         sandbox=boxed,
