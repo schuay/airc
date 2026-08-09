@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from airc_tools.sandbox import Sandbox
-from airc_tools.shell import run_shell
+from airc_tools.shell import DEFANG_ENV, run_shell
 
 
 @pytest.fixture
@@ -26,21 +26,36 @@ def profile(tmp_path):
         ro_paths=(dep,),
         opaque_ro_paths=(creds,),
         tmpfs=(("/tmp", 1 << 20),),
-        env=(("HOME", str(tmp_path)),),
+        # As a real caller builds it: the profile carries the whole environment,
+        # defang defaults included, because the wrapper adds nothing to it. HOME
+        # stays first -- tests below read env[0] for it.
+        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         memory_max="1G",
         tasks_max=64,
         use_cgroup=False,
     )
 
 
-def test_ai_agent_reaches_both_shells(profile):
-    # siso goes quiet on AI_AGENT (any non-empty value). _DEFANG_ENV is the single
-    # source: it is merged over os.environ for the unsandboxed shell, and the
-    # wrapper --setenv's it into the sandboxed one after --clearenv.
-    from airc_tools.shell import _DEFANG_ENV
-
-    assert _DEFANG_ENV.get("AI_AGENT")
+def test_ai_agent_is_in_the_defang_set(profile):
+    # siso goes quiet on AI_AGENT (any non-empty value), and DEFANG_ENV is where
+    # that lives for both shells: merged over os.environ for the unsandboxed one,
+    # and merged into the PROFILE by whoever builds it for the sandboxed one --
+    # the wrapper starts from --clearenv and adds nothing of its own.
+    assert DEFANG_ENV.get("AI_AGENT")
     assert "--setenv AI_AGENT" in " ".join(profile.wrapper())
+
+
+def test_the_profile_env_is_the_whole_env(tmp_path):
+    # Verbatim, in both directions: everything the profile names is set, and
+    # nothing it does not name is. A wrapper that quietly adds a variable makes
+    # the profile unreadable as a statement of what the box gets -- and it is the
+    # only place the defang defaults could come from, so their absence here is
+    # what proves the merge really moved to the caller.
+    root = tmp_path / "root"
+    root.mkdir()
+    argv = Sandbox(root=root, env=(("ONLY", "1"),), use_cgroup=False).wrapper()
+    setenv = [argv[i + 1] for i, a in enumerate(argv) if a == "--setenv"]
+    assert setenv == ["ONLY"]
 
 
 def test_wrapper_shape(profile):
@@ -220,7 +235,10 @@ async def test_root_stays_writable_under_ro_ancestor_end_to_end(profile, tmp_pat
         rw_paths=(),
         ro_paths=(tmp_path,),  # ancestor of root
         tmpfs=(("/tmp", 1 << 20),),
-        env=(("HOME", str(tmp_path)),),
+        # As a real caller builds it: the profile carries the whole environment,
+        # defang defaults included, because the wrapper adds nothing to it. HOME
+        # stays first -- tests below read env[0] for it.
+        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=False,
     )
     out = await run_shell(
@@ -244,7 +262,10 @@ def _ro_over_box(tmp_path, use_cgroup=False):
         rw_paths=(gitdir,),
         ro_over_rw_paths=(gitdir / "config", gitdir / "hooks"),
         tmpfs=(("/tmp", 1 << 20),),
-        env=(("HOME", str(tmp_path)),),
+        # As a real caller builds it: the profile carries the whole environment,
+        # defang defaults included, because the wrapper adds nothing to it. HOME
+        # stays first -- tests below read env[0] for it.
+        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=use_cgroup,
     )
 
@@ -379,7 +400,10 @@ async def test_ro_over_pins_inside_an_rw_hole_survive_it(tmp_path):
         ),
         rw_over_ro_paths=(private,),
         tmpfs=(("/tmp", 1 << 20),),
-        env=(("HOME", str(tmp_path)),),
+        # As a real caller builds it: the profile carries the whole environment,
+        # defang defaults included, because the wrapper adds nothing to it. HOME
+        # stays first -- tests below read env[0] for it.
+        env=(("HOME", str(tmp_path)), *DEFANG_ENV.items()),
         use_cgroup=False,
     )
     out = await run_shell(

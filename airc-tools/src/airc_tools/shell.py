@@ -17,12 +17,22 @@ import os
 import re
 import signal
 import time
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from .limits import MAX_SHELL_CAPTURE, MAX_SHELL_OUTPUT, head_tail
 
-if TYPE_CHECKING:
-    from .sandbox import Sandbox
+
+class Confinement(Protocol):
+    """Whatever produces an argv prefix that runs a command confined.
+
+    Structural on purpose: all this module ever does with a sandbox is prepend
+    `wrapper()`, so naming a concrete class here would import a confinement
+    implementation into the one module that does not need one. airc_tools.sandbox
+    satisfies it; so does anything else a caller brings.
+    """
+
+    def wrapper(self) -> list[str]: ...
+
 
 # Build footguns to refuse before running. A raw `ninja`/`siso ninja` bypasses
 # autoninja (and raw ninja fails on the siso state file, then tempts `gn clean`);
@@ -61,11 +71,14 @@ _BUILD_TRAP_MSG = (
 # AI_AGENT belongs to the same family: every shell run through these tools is an
 # agent's shell, and autoninja/siso key off AI_AGENT (any non-empty value) to
 # add --quiet, dropping the per-action build progress that would otherwise flood
-# the model's context one line per compiled file. Set here so it reaches BOTH the
-# unsandboxed child (this dict is merged over os.environ below) and the sandboxed
-# one (the wrapper --setenv's this dict after --clearenv), which is the only
-# place that covers both -- the daemon's own prebuild is handled separately.
-_DEFANG_ENV = {
+# the model's context one line per compiled file. This module merges it over
+# os.environ for the unsandboxed child; a sandboxed one starts from --clearenv
+# and gets exactly the env its profile carries, so whoever BUILDS that profile
+# has to merge this dict in -- which is why it is public. Splitting it that way
+# is deliberate: a profile that states what the box's environment is, and then
+# silently receives more of it from the module that runs the command, is a
+# profile nobody can read. (The daemon's own prebuild is handled separately.)
+DEFANG_ENV = {
     "DEBIAN_FRONTEND": "noninteractive",
     "GIT_PAGER": "cat",
     "PAGER": "cat",
@@ -117,12 +130,12 @@ async def run_shell(
     command: str,
     cwd: str | None = None,
     timeout: float = 30.0,
-    sandbox: "Sandbox | None" = None,
+    sandbox: Confinement | None = None,
 ) -> str:
     if _BUILD_TRAP.search(command):
         return _BUILD_TRAP_MSG
     root = cwd or os.environ.get("AIRC_TOOLS_ROOT") or None
-    env = {**os.environ, **_DEFANG_ENV}
+    env = {**os.environ, **DEFANG_ENV}
     # Under a sandbox the wrapper owns cwd (--chdir) and environment
     # (--clearenv + --setenv), so the host-side cwd/env are irrelevant to the
     # command; kill-by-group and the capture plumbing below are unchanged

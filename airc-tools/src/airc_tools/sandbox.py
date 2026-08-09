@@ -34,8 +34,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .shell import _DEFANG_ENV
-
 # The fixed system surface every sandboxed command sees. /usr and /etc ro; the
 # usual merged-usr symlinks recreated instead of bound so nothing else from /
 # leaks in. No /opt, no /srv, no /home beyond the tmpfs + explicit binds.
@@ -185,7 +183,11 @@ class Sandbox:
     # tmpfs (the worktree under the blanked $HOME) lands on top of it.
     tmpfs: tuple[tuple[str, int], ...] = ()
     # The complete environment inside the sandbox (--clearenv first, so the
-    # daemon's env -- credentials included -- never leaks through).
+    # daemon's env -- credentials included -- never leaks through). Verbatim and
+    # complete: nothing is added on the way to --setenv, so what a profile says
+    # the box's environment is, is what it is. A caller wanting the
+    # noninteractive defaults the unsandboxed shell gets merges
+    # `shell.DEFANG_ENV` in itself.
     env: tuple[tuple[str, str], ...] = ()
     # cgroup limits, applied via `systemd-run --user --scope` when available.
     # Empty string / 0 skips that property.
@@ -308,7 +310,7 @@ class Sandbox:
         self._assert_no_leak(argv)
         argv += _ISOLATION_ARGS
         argv += ["--clearenv"]
-        for k, v in (*_DEFANG_ENV.items(), *self.env):
+        for k, v in self.env:
             argv += ["--setenv", k, v]
         argv += ["--chdir", str(self.root)]
         return argv
