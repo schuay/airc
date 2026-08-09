@@ -128,3 +128,12 @@ async def test_require_delivery_is_satisfied_with_no_transports(tmp_path):
     t = room.create_thread("t")
     await room.post(t.id, "u", MessageKind.NOTICE, "hi", require_delivery=True)
     assert len(room.thread_messages(t.id)) == 1
+
+
+def test_the_room_exposes_the_store_it_was_built_on(tmp_path):
+    """A local tool holding a Room must reach the same connection the room posts
+    through -- otherwise its own state rows and the messages it compares them
+    against are two stores with independent orderings."""
+    store = Store(tmp_path / "airc.db")
+    room = Room(store)
+    assert room.store is store
