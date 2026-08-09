@@ -1110,3 +1110,32 @@ class Store:
             (namespace, thread_id),
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
+
+    def sweep_plugin_state(
+        self, namespace: str, older_than: float
+    ) -> list[tuple[str, int, str]]:
+        """(key, thread_id, json) for rows written before `older_than`, oldest
+        first. The thread-scoped listing above answers "what is in this thread";
+        this answers "what is overdue", which is the shape a plugin polling for
+        something it is still waiting on needs -- it holds no thread to ask about
+        until it finds the row.
+
+        `older_than` is an absolute epoch cutoff rather than an age, so the
+        caller's clock arithmetic is visible at its own call site.
+        """
+        rows = self._db.execute(
+            "SELECT key, thread_id, json FROM plugin_state"
+            " WHERE namespace = ? AND ts < ? ORDER BY ts",
+            (namespace, older_than),
+        ).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+
+    def drop_plugin_state(self, namespace: str, key: str) -> None:
+        """Forget one row. The plugin's own lifecycle, not prune's: a record that
+        has served its purpose (a job that finally reported) should go when it
+        does, rather than waiting for the thread it belongs to to be swept."""
+        self._db.execute(
+            "DELETE FROM plugin_state WHERE namespace = ? AND key = ?",
+            (namespace, key),
+        )
+        self._db.commit()

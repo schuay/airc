@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import sqlite3
+import time
 
 import pytest
 from airc_room.store import MessageKind, Store
@@ -429,6 +430,27 @@ def test_plugin_state_listing_keeps_insertion_order_across_an_edit(tmp_path):
     s.put_plugin_state("ns", "second", t.id, "2")
     s.put_plugin_state("ns", "first", t.id, "1-edited")
     assert s.list_plugin_state("ns", t.id) == [("first", "1-edited"), ("second", "2")]
+
+
+def test_plugin_state_sweep_finds_overdue_rows_and_drop_forgets_them(tmp_path):
+    # The shape a plugin waiting on something needs: it holds no thread to ask
+    # about until the sweep hands it one, and the row goes when it has served its
+    # purpose rather than waiting for its thread to be swept.
+    s = make_store(tmp_path)
+    t = s.create_thread("x")
+    s.put_plugin_state("ns", "old", t.id, "1")
+    s.put_plugin_state("ns", "new", t.id, "2")
+    now = time.time()
+    assert s.sweep_plugin_state("ns", now + 1) == [
+        ("old", t.id, "1"),
+        ("new", t.id, "2"),
+    ]
+    assert s.sweep_plugin_state("ns", now - 3600) == []  # nothing is overdue yet
+    assert s.sweep_plugin_state("other", now + 1) == []  # namespaced, like the rest
+    s.drop_plugin_state("ns", "old")
+    assert s.get_plugin_state("ns", "old") is None
+    assert s.sweep_plugin_state("ns", now + 1) == [("new", t.id, "2")]
+    s.drop_plugin_state("ns", "gone")  # dropping what is not there is not an error
 
 
 def test_plugin_state_appears_in_a_deployed_db_without_losing_rows(tmp_path):
