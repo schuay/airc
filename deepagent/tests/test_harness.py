@@ -79,9 +79,14 @@ async def test_aclose_closes_the_saver_connection_and_reclaims_its_pages(tmp_pat
     # TimeoutStopSec and SIGKILL leaves the WAL uncheckpointed. And `forget`
     # deletes rows without reclaiming pages: measured, a 240KB conversation left
     # a 3.7MB db + 4.2MB WAL that deleting every row did not shrink at all.
+    import asyncio
     import threading
+    import time
 
     from deepagent import LangGraphHarness
+
+    def connection_workers():
+        return [t for t in threading.enumerate() if "_connection_worker" in t.name]
 
     db = tmp_path / "cp.db"
     h = LangGraphHarness(_common(tmp_path), checkpoint_db=db)
@@ -103,7 +108,20 @@ async def test_aclose_closes_the_saver_connection_and_reclaims_its_pages(tmp_pat
 
     assert db.stat().st_size < before / 4
     assert h._saver_conn is None
-    assert not [t for t in threading.enumerate() if "_connection_worker" in t.name]
+    # Waited for, not asserted instantly. aiosqlite resolves close()'s future
+    # from INSIDE the worker's last loop iteration -- call_soon_threadsafe, then
+    # break -- so the await can return with the thread still on its way out.
+    # Measured: 0/200 closes on an idle machine, 9/200 with every core busy, the
+    # thread exiting up to ~1ms late. That is why this only ever failed under the
+    # concurrent suite runner and never standalone.
+    #
+    # The prod hazard is a thread that OUTLIVES shutdown (non-daemon, so it hangs
+    # interpreter exit), which a deadline still catches: a genuinely leaked one
+    # never exits and fails here just as loudly.
+    deadline = time.monotonic() + 5
+    while connection_workers() and time.monotonic() < deadline:
+        await asyncio.sleep(0.001)
+    assert not connection_workers()
 
 
 def test_the_durable_saver_ships_its_own_dependencies():
