@@ -1035,15 +1035,12 @@ def _seed_vertex_cache_globals() -> str:
       - `_location`: must match the model's serving region (default us-central1).
       - `_project`: avoids lazy normalization that triggers an otherwise-needless
         Cloud Resource Manager `projects.get` call.
-      - `_credentials`: seeds `_vertex_file_credentials` when `AIRC_VERTEX_TOKEN_FILE`
-        is set, so sandboxed calls authenticate via the brokered token file rather
-        than falling back to GCE metadata ADC.
-
-    Under the sandbox PROXY (`AIRC_VERTEX_PROXY_ENDPOINT`) none of that applies:
-    the cached-content client is a different stack from the chat client and
-    insists on TLS, so it cannot use the plaintext loopback seam at all. The
-    caller drives that path over REST instead; seeding here would only point a
-    client we do not use at a credential we do not have.
+    Credentials are deliberately NOT seeded. Under the sandbox proxy
+    (`AIRC_VERTEX_PROXY_ENDPOINT`) the box holds none: the cached-content client
+    is a different stack from the chat client and insists on TLS, so it cannot
+    use the plaintext loopback seam at all. The caller drives that path over REST
+    instead; seeding here would only point a client we do not use at a credential
+    we do not have. Everywhere else ADC applies as normal.
     """
     from google.cloud.aiplatform import initializer
 
@@ -1051,10 +1048,6 @@ def _seed_vertex_cache_globals() -> str:
     initializer.global_config._location = location
     if project := os.environ.get("GOOGLE_CLOUD_PROJECT"):
         initializer.global_config._project = project
-    if (tok := os.environ.get("AIRC_VERTEX_TOKEN_FILE")) and os.path.exists(tok):
-        from .model import _vertex_file_credentials
-
-        initializer.global_config._credentials = _vertex_file_credentials(tok)
     return location
 
 

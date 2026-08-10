@@ -28,16 +28,9 @@ import re
 
 from langchain.chat_models import init_chat_model
 
-# Env var naming the reclient token file the in-box Vertex client authenticates
-# from, in place of GCE metadata ADC (which the sandbox netfilter blocks). Set by
-# the sandbox profile in token+vertex mode; unset everywhere else, so the daemon
-# and any non-sandboxed caller keep normal ADC. See _vertex_file_credentials.
-_VERTEX_TOKEN_ENV = "AIRC_VERTEX_TOKEN_FILE"  # noqa: S105 -- a var NAME
-
 # Env var naming a loopback endpoint that fronts Vertex for a sandboxed caller.
-# The successor to _VERTEX_TOKEN_ENV above: there the box holds a short-lived
-# token, here it holds NO credential at all and a host-side proxy attaches the
-# real one. Set only by the sandbox profile, so every other caller is untouched.
+# The box holds NO credential at all; a host-side proxy attaches the real one.
+# Set only by the sandbox profile, so every other caller is untouched.
 #
 # This has to live here rather than at the call sites: make_model's callers pass
 # no kwargs, and the endpoint must reach the ChatVertexAI constructor.
@@ -297,65 +290,6 @@ def _silence_vertex_noise() -> None:
     logging.getLogger("langchain_google_vertexai._retry").addFilter(_RETRY_NOISE)
 
 
-def _vertex_file_credentials(path: str):
-    """google.auth Credentials that read a host-refreshed token file.
-
-    In the sandbox the box holds no durable credential and (once the metadata
-    netfilter lands) cannot reach the metadata-server SA, so Vertex ADC has no
-    source. A host-side broker instead refreshes a {"token", "expiry"} file at
-    `path` (icompleteu's vertextoken broker mints a short-lived identity); this
-    credential reads the current token and, when google.auth finds it stale,
-    `refresh()` re-reads the file rather than contacting the network.
-    google.auth is imported lazily so non-Vertex callers never pull it in.
-    """
-    import datetime
-    import json
-    from pathlib import Path
-
-    from google.auth.credentials import Credentials
-
-    def _parse_expiry(s: str | None) -> datetime.datetime:
-        # Two producer formats: the vertextoken broker writes ISO 8601, and
-        # luci-auth's reclient JSON emits Go's UnixDate ("Mon Jan _2 15:04:05
-        # MST 2006", space-padded day). google.auth compares expiry as a NAIVE
-        # UTC datetime, so both parse to that; on any format surprise expire in
-        # a minute so google.auth re-reads soon rather than trusting a token
-        # forever or treating it as always-expired.
-        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-        try:
-            t = datetime.datetime.fromisoformat(s)
-        except (ValueError, TypeError):
-            pass
-        else:
-            if t.tzinfo is not None:
-                t = t.astimezone(datetime.UTC).replace(tzinfo=None)
-            return t
-        try:
-            # google.auth compares expiry as naive UTC (see above), so attaching
-            # a tzinfo would make every comparison raise.
-            return datetime.datetime.strptime(
-                " ".join(s.split()), "%a %b %d %H:%M:%S UTC %Y"
-            )
-        except (ValueError, TypeError, AttributeError):
-            return now + datetime.timedelta(minutes=1)
-
-    class _FileToken(Credentials):
-        def __init__(self, p: str) -> None:
-            super().__init__()
-            self._p = Path(p)
-            self._load()
-
-        def _load(self) -> None:
-            data = json.loads(self._p.read_text())
-            self.token = data.get("token")
-            self.expiry = _parse_expiry(data.get("expiry"))
-
-        def refresh(self, request) -> None:
-            self._load()
-
-    return _FileToken(path)
-
-
 def make_model(model_id: str, **kwargs):
     if problem := check_model_id(model_id):
         raise ValueError(f"{problem}; {supported_models_hint()}")
@@ -389,20 +323,12 @@ def make_model(model_id: str, **kwargs):
         # graph builds its model here), so silence the benign call-time warnings
         # once, for every component, cached or not.
         _silence_vertex_noise()
-        # In the sandbox, authenticate from the bound reclient token instead of
-        # metadata ADC. Gated on the env var being set (only the sandbox sets it)
-        # and the file existing, so a missing/not-yet-minted token falls back to
-        # ADC rather than crashing model construction. An explicit caller-passed
-        # credentials wins.
-        # The proxy supersedes the token file: with it set the box holds no
-        # credential at all, so it wins and the token branch is skipped. Both are
-        # sandbox-only and an explicit caller value still wins over either.
+        # In the sandbox the box holds no credential at all: point the client at
+        # the loopback proxy, which attaches the real one host-side. Gated on the
+        # env var (only the sandbox profile sets it), so every other caller keeps
+        # normal ADC. An explicit caller-passed credentials still wins.
         if (proxy := os.environ.get(_VERTEX_PROXY_ENV)) and "credentials" not in kwargs:
             kwargs = {**_proxy_kwargs(proxy), **kwargs}
-        else:
-            tok = os.environ.get(_VERTEX_TOKEN_ENV)
-            if tok and "credentials" not in kwargs and os.path.exists(tok):
-                kwargs = {**kwargs, "credentials": _vertex_file_credentials(tok)}
         # Never surface the model's thought summaries. We consume only text
         # blocks, so thoughts are pure liability: on a degraded turn (prefill
         # overload, thrashed context) a thinking model can emit its reasoning as

@@ -535,48 +535,26 @@ async def test_end_to_end_graph_grows_cache_and_sends_tail():
     assert all(isinstance(m[0], SystemMessage) for m in cached_calls)
 
 
-def test_seed_vertex_cache_globals_seeds_location_project_and_file_creds(
-    monkeypatch, tmp_path
-):
-    import json
-
-    from airc_core.agent import _seed_vertex_cache_globals
-    from google.cloud.aiplatform import initializer
-
-    tok = tmp_path / "vertex.json"
-    tok.write_text(json.dumps({"token": "t", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}))
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east4")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
-    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tok))
-
-    loc = _seed_vertex_cache_globals()
-    assert loc == "us-east4"
-    assert initializer.global_config._location == "us-east4"
-    assert initializer.global_config._project == "test-project"
-    assert initializer.global_config._credentials.token == "t"
-
-
-def test_seed_vertex_cache_globals_skips_creds_when_token_absent(monkeypatch, tmp_path):
+def test_seed_vertex_cache_globals_never_touches_credentials(monkeypatch):
+    # Location and project are seeded; credentials never are. The cached-content
+    # client insists on TLS and so cannot use the sandbox's plaintext loopback
+    # seam at all -- seeding one here would point a client we do not use at a
+    # credential we do not have, and in a box there is none to find.
     from airc_core.agent import _seed_vertex_cache_globals
     from google.cloud.aiplatform import initializer
 
     sentinel = "ORIGINAL_SENTINEL"
     initializer.global_config._credentials = sentinel
 
-    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tmp_path / "gone.json"))
-    _seed_vertex_cache_globals()
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east4")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    assert _seed_vertex_cache_globals() == "us-east4"
+    assert initializer.global_config._location == "us-east4"
+    assert initializer.global_config._project == "test-project"
     assert initializer.global_config._credentials == sentinel
 
-    monkeypatch.delenv("AIRC_VERTEX_TOKEN_FILE", raising=False)
-    _seed_vertex_cache_globals()
-    assert initializer.global_config._credentials == sentinel
 
-
-async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_token_file(
-    monkeypatch, tmp_path
-):
-    import json
-
+async def test_growing_cache_fns_create_and_delete_seed_globals(monkeypatch):
     import langchain_google_vertexai as lgv
     from airc_core.agent import _growing_cache_fns
     from google.cloud.aiplatform import initializer
@@ -607,8 +585,6 @@ async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_tok
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project-123")
 
-    # Scenario 1: AIRC_VERTEX_TOKEN_FILE points to an absent file (not yet minted)
-    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tmp_path / "not_yet_minted.json"))
     initializer.global_config._credentials = None
     initializer.global_config._location = None
     initializer.global_config._project = None
@@ -628,19 +604,6 @@ async def test_growing_cache_fns_create_and_delete_seed_globals_even_without_tok
     assert captured_delete["project"] == "test-project-123"
     assert captured_delete["creds"] is None
 
-    # Scenario 2: AIRC_VERTEX_TOKEN_FILE is present and valid
-    tok = tmp_path / "vertex.json"
-    tok.write_text(
-        json.dumps(
-            {"token": "real-token-val", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}
-        )
-    )
-    monkeypatch.setenv("AIRC_VERTEX_TOKEN_FILE", str(tok))
-
-    initializer.global_config._credentials = None
-    await create([SystemMessage("SYS")])
-    assert captured_create["creds"].token == "real-token-val"
-
-    initializer.global_config._credentials = None
-    await delete("cache-123")
-    assert captured_delete["creds"].token == "real-token-val"
+    # Both paths run on ADC, whatever it resolves to: the seeding never supplies
+    # a credential of its own, so a None here is the seam staying out of the way
+    # rather than a token that failed to mint.

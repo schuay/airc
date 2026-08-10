@@ -200,108 +200,6 @@ def test_list_models_openrouter_unset_key_does_not_leak_openai_key(monkeypatch):
     assert "sk-SENTINEL-OPENAI-KEY" not in sent_keys
 
 
-def test_vertex_file_credentials_reads_and_refreshes(tmp_path):
-    # The in-box Vertex credential reads a reclient token file and re-reads it on
-    # refresh (the host rewrites it), never touching the network.
-    import datetime
-    import json
-
-    from airc_core.model import _vertex_file_credentials
-
-    f = tmp_path / "token.json"
-    f.write_text(
-        json.dumps({"token": "tok-1", "expiry": "Fri Jul 10 12:07:06 UTC 2026"})
-    )
-    cred = _vertex_file_credentials(str(f))
-    assert cred.token == "tok-1"
-    # Go UnixDate parsed to a NAIVE datetime (what google.auth compares against).
-    assert cred.expiry == datetime.datetime(2026, 7, 10, 12, 7, 6)
-    assert cred.expiry.tzinfo is None
-
-    # A host refresh: refresh() picks up the new token without a new object.
-    f.write_text(
-        json.dumps({"token": "tok-2", "expiry": "Sat Jul 11 00:00:00 UTC 2026"})
-    )
-    cred.refresh(None)
-    assert cred.token == "tok-2"
-
-
-def test_vertex_file_credentials_parses_iso_expiry(tmp_path):
-    # The vertextoken broker writes ISO 8601 with explicit UTC; parsed to the
-    # same naive-UTC shape google.auth compares against.
-    import datetime
-    import json
-
-    from airc_core.model import _vertex_file_credentials
-
-    f = tmp_path / "vertex.json"
-    f.write_text(json.dumps({"token": "vt", "expiry": "2026-07-11T12:00:00+00:00"}))
-    cred = _vertex_file_credentials(str(f))
-    assert cred.token == "vt"
-    assert cred.expiry == datetime.datetime(2026, 7, 11, 12, 0, 0)
-    assert cred.expiry.tzinfo is None
-    # A non-UTC offset converts, not truncates.
-    f.write_text(json.dumps({"token": "vt", "expiry": "2026-07-11T14:00:00+02:00"}))
-    assert _vertex_file_credentials(str(f)).expiry == datetime.datetime(
-        2026, 7, 11, 12, 0, 0
-    )
-
-
-def test_vertex_file_credentials_tolerates_bad_expiry(tmp_path):
-    # A space-padded single-digit day (Go's `_2`) still parses; a garbage expiry
-    # falls back to "expire soon" so google.auth re-reads rather than trusting it.
-    import datetime
-    import json
-
-    from airc_core.model import _vertex_file_credentials
-
-    f = tmp_path / "t.json"
-    f.write_text(json.dumps({"token": "x", "expiry": "Fri Jul  9 12:07:06 UTC 2026"}))
-    assert _vertex_file_credentials(str(f)).expiry == datetime.datetime(
-        2026, 7, 9, 12, 7, 6
-    )
-
-    f.write_text(json.dumps({"token": "x", "expiry": "not-a-date"}))
-    soon = _vertex_file_credentials(str(f)).expiry
-    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-    assert now <= soon <= now + datetime.timedelta(minutes=2)
-
-
-def test_make_model_injects_vertex_credentials_only_when_file_present(
-    monkeypatch, tmp_path
-):
-    # make_model injects the file-token credential when the env points at an
-    # existing token, and falls back to ADC (no credentials kwarg) when the file
-    # is absent -- so a not-yet-minted token never crashes construction.
-    import json
-
-    from airc_core import model as m
-
-    captured: dict = {}
-
-    def fake_init(model_id, **kw):
-        captured.clear()
-        captured.update(kw)
-        return "MODEL"
-
-    monkeypatch.setattr(m, "init_chat_model", fake_init)
-
-    tok = tmp_path / "token.json"
-    tok.write_text(json.dumps({"token": "t", "expiry": "Fri Jul 10 12:07:06 UTC 2026"}))
-    monkeypatch.setenv(m._VERTEX_TOKEN_ENV, str(tok))
-    m.make_model("google_vertexai:gemini-2.5-flash")
-    assert "credentials" in captured
-
-    monkeypatch.setenv(m._VERTEX_TOKEN_ENV, str(tmp_path / "gone.json"))
-    m.make_model("google_vertexai:gemini-2.5-flash")
-    assert "credentials" not in captured
-
-    # Non-vertex providers never get the credential, even with the env set.
-    monkeypatch.setenv(m._VERTEX_TOKEN_ENV, str(tok))
-    m.make_model("anthropic:claude-fable-5")
-    assert "credentials" not in captured
-
-
 def test_make_model_suppresses_vertex_thoughts(monkeypatch):
     # Vertex models default to include_thoughts=False so a thinking model's
     # reasoning can never reach the room as answer text; other providers are
@@ -374,22 +272,23 @@ def test_vertex_proxy_env_configures_the_client_for_the_loopback_seam(monkeypatc
     assert isinstance(kw["credentials"], AioCredentials)
 
 
-def test_vertex_proxy_supersedes_the_token_file(monkeypatch, tmp_path):
-    """With the proxy set the box holds NO credential, so it wins outright.
+def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
+    """A sandboxed client authenticates as nobody, whatever else is in the env.
 
-    Both are sandbox-only and they are mutually exclusive by design: the proxy
-    replaces the brokered token, it does not supplement it. If the token branch
-    could still fire, a half-configured box would authenticate itself and the
-    'no credential in the sandbox' claim would quietly stop being true.
+    This once guarded a precedence rule between the proxy and a brokered token
+    file; the broker is gone and the proxy is the only path left. The claim it
+    protects is unchanged and is the reason the mode exists: if construction
+    could pick up a real credential from the ambient environment, the box would
+    authenticate itself and 'no credential in the sandbox' would quietly stop
+    being true. Asserted against the credential that reaches the constructor,
+    not against the absence of the deleted branch -- ADC is read lazily from
+    env/metadata, so anonymity has to be positive.
     """
-    import json
+    from airc_core.model import _VERTEX_PROXY_ENV
+    from google.auth.aio.credentials import AnonymousCredentials
 
-    from airc_core.model import _VERTEX_PROXY_ENV, _VERTEX_TOKEN_ENV
-
-    tok = tmp_path / "vertex.json"
-    tok.write_text(json.dumps({"token": "brokered", "expiry": "2099-01-01T00:00:00Z"}))
-    monkeypatch.setenv(_VERTEX_TOKEN_ENV, str(tok))
     monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:9999")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json")
 
     captured = {}
 
@@ -403,5 +302,4 @@ def test_vertex_proxy_supersedes_the_token_file(monkeypatch, tmp_path):
     make_model("google_vertexai:gemini-3.1-pro-preview")
     assert captured["api_endpoint"] == "http://127.0.0.1:9999"
     assert captured["api_transport"] == "rest_asyncio"
-    # The brokered-token credential must NOT have been used.
-    assert type(captured["credentials"]).__name__ != "_FileToken"
+    assert isinstance(captured["credentials"], AnonymousCredentials)
