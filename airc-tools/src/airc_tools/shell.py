@@ -27,8 +27,10 @@ class Confinement(Protocol):
 
     Structural on purpose: all this module ever does with a sandbox is prepend
     `wrapper()`, so naming a concrete class here would import a confinement
-    implementation into the one module that does not need one. airc_tools.sandbox
-    satisfies it; so does anything else a caller brings.
+    implementation into the one module that does not need one. `aisan.sandbox`
+    satisfies it; so does anything else a caller brings. That the implementation
+    now lives in a package airc does not depend on is the protocol earning its
+    keep rather than a loose end.
     """
 
     def wrapper(self) -> list[str]: ...
