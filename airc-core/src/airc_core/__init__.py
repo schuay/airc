@@ -30,6 +30,7 @@ from .model import (
     list_models,
     make_model,
     missing_key,
+    register_provider,
     supported_models_hint,
     usage_counts,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "load_common",
     "make_model",
     "missing_key",
+    "register_provider",
     "retrying",
     "slug",
     "supported_models_hint",

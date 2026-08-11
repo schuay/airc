@@ -25,6 +25,8 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
+from .model import register_provider
+
 DATA_DIR = user_data_path("airc")
 DEFAULT_BUS_ROOT = DATA_DIR / "bus"
 DEFAULT_TOKEN_DB = DATA_DIR / "tokens.db"
@@ -112,6 +114,10 @@ class CommonConfig:
     """
 
     models: dict[str, str] = field(default_factory=dict)
+    #: [model_providers] verbatim, prefix -> spec. Kept on the config as well as
+    #: registered in airc_core.model, so a component can SEE what was declared
+    #: (an inspector, a test) without reading module state it does not own.
+    model_providers: dict[str, dict] = field(default_factory=dict)
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     mcp_enable_in_sandbox: dict[str, bool] = field(default_factory=dict)
     tool_groups: dict[str, list[str]] = field(
@@ -125,6 +131,45 @@ class CommonConfig:
     cache_ttl_minutes: int = 30
 
 
+def _load_model_providers(raw: Mapping, cfg: CommonConfig) -> None:
+    """Parse [model_providers] and register each one with airc_core.model.
+
+    Registering as a SIDE EFFECT of parsing, which is the one thing here worth
+    knowing about. The alternative -- return the specs and have each component
+    register -- needs the call added at four entry points (the room, the
+    processor, the watchers, icompleteu), and a missed one fails asymmetrically:
+    the room starts on a config the processor rejects, for the same file. Since
+    make_model is a free function with no cfg in scope, module state is where
+    the registration has to land either way, and load_common is the single point
+    every component already passes through.
+
+    The table is user-named ([model_providers.<prefix>]), so the section itself
+    is open; each SPEC is strict, for the reason reject_unknown states -- a
+    misspelled requires_env silently means "no credential check" and reads back
+    as if it were honoured.
+    """
+    for prefix, spec in raw.get("model_providers", {}).items():
+        where = f"[model_providers.{prefix}]"
+        if not isinstance(spec, Mapping):
+            raise SystemExit(f"{where} must be a table (factory = 'module:attr')")
+        reject_unknown(spec, {"factory", "requires_env"}, where)
+        if not (factory := spec.get("factory")):
+            raise SystemExit(f"{where} needs factory = 'module:attr'")
+        cfg.model_providers[prefix] = dict(spec)
+        requires_env = spec.get("requires_env")
+        try:
+            register_provider(
+                prefix,
+                str(factory),
+                requires_env=str(requires_env) if requires_env else None,
+            )
+        except ValueError as e:
+            # SystemExit, like every other config error here: this runs during
+            # startup parsing, where a traceback buries the one line naming the
+            # section the operator has to fix.
+            raise SystemExit(f"{where}: {e}") from e
+
+
 def load_common(raw: Mapping) -> CommonConfig:
     """Parse the shared sections out of an already-parsed TOML mapping.
 
@@ -136,6 +181,7 @@ def load_common(raw: Mapping) -> CommonConfig:
     # may name any role in it (resolve_model). Only default/filter are read here,
     # but constraining the table would reject a role a persona legitimately uses.
     cfg.models = {k: str(v) for k, v in raw.get("models", {}).items()}
+    _load_model_providers(raw, cfg)
     if mcp := raw.get("mcp"):
         reject_unknown(mcp, {"servers"}, "[mcp]")
     # A server spec is passed verbatim to MultiServerMCPClient, whose key set is

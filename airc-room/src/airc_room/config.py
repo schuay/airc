@@ -71,8 +71,9 @@ DATA_DIR = user_data_path("airc")
 # The full set of top-level sections the shared suite file may carry. A key
 # outside this set is a typo (`[watchers]`, `[air]`) that would otherwise be
 # silently ignored, so load_config errors on it. The set spans the whole suite,
-# not just the room: models/mcp/gcp/tool_groups/caching/bus_root/token_db_path/
-# repos are the shared sections airc_core.load_common parses; handover is suite
+# not just the room: models/model_providers/mcp/gcp/tool_groups/caching/
+# bus_root/token_db_path/repos are the shared sections
+# airc_core.load_common parses; handover is suite
 # policy read by airc and the processor; the sibling-daemon namespaces
 # ([watchers.*]/[processors.*]/[icompleteu.*]) live in this same file and are
 # known-not-ours, so they are permitted here rather than flagged. [airc] and
@@ -82,6 +83,7 @@ DATA_DIR = user_data_path("airc")
 _KNOWN_TOPLEVEL = frozenset(
     {
         "models",
+        "model_providers",
         "mcp",
         "gcp",
         "tool_groups",

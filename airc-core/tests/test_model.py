@@ -303,3 +303,139 @@ def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
     assert captured["api_endpoint"] == "http://127.0.0.1:9999"
     assert captured["api_transport"] == "rest_asyncio"
     assert isinstance(captured["credentials"], AnonymousCredentials)
+
+
+# ── external model providers ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def registry():
+    """A clean _CUSTOM_PROVIDERS, restored afterwards.
+
+    The registry is process-global module state (make_model is a free function),
+    so a test that registers a prefix would otherwise leak it into every later
+    test -- and the one that matters here asserts an UNREGISTERED prefix is
+    still rejected, which a leak turns into a false pass.
+    """
+    from airc_core import model as m
+
+    saved = dict(m._CUSTOM_PROVIDERS)
+    m._CUSTOM_PROVIDERS.clear()
+    try:
+        yield m
+    finally:
+        m._CUSTOM_PROVIDERS.clear()
+        m._CUSTOM_PROVIDERS.update(saved)
+
+
+def _stub_factory(model_id, **kwargs):
+    return ("STUB", model_id, kwargs)
+
+
+_STUB = f"{__name__}:_stub_factory"
+
+
+def test_registered_provider_passes_check_and_unregistered_still_fails(registry):
+    # The pair is the point: without the second half, a check_model_id that
+    # accepted everything would pass the first half just as well.
+    registry.register_provider("mybackend", _STUB)
+    assert check_model_id("mybackend:v1") is None
+    assert check_model_id("otherbackend:v1") is not None
+    assert "unknown provider" in check_model_id("otherbackend:v1")
+    # The shape check still applies to a registered provider.
+    assert check_model_id("mybackend") is not None
+
+
+def test_make_model_uses_factory_and_never_touches_init_chat_model(
+    registry, monkeypatch
+):
+    def boom(*a, **kw):  # pragma: no cover -- the assertion is that it is unused
+        raise AssertionError("init_chat_model must not run for a custom provider")
+
+    monkeypatch.setattr(registry, "init_chat_model", boom)
+    registry.register_provider("mybackend", _STUB)
+
+    # The factory gets the FULL id (one provider can serve several models) and
+    # the caller kwargs verbatim.
+    kind, model_id, kwargs = registry.make_model("mybackend:v1", temperature=0.4)
+    assert (kind, model_id) == ("STUB", "mybackend:v1")
+    assert kwargs == {"temperature": 0.4}
+
+
+def test_make_model_unregistered_provider_raises(registry):
+    # The guard that has to stay live: an id that merely LOOKS like a custom
+    # provider is rejected, so a typo'd prefix fails at startup rather than
+    # reaching a factory that does not exist.
+    with pytest.raises(ValueError, match="unknown provider"):
+        registry.make_model("mybackend:v1")
+
+
+def test_custom_provider_does_not_disturb_builtin_construction(registry, monkeypatch):
+    # A registered external provider must be inert for every other id: the
+    # branch is an early return keyed on the prefix, so a built-in still flows
+    # through init_chat_model untouched.
+    captured = {}
+
+    def fake_init(model_id, **kw):
+        captured["model_id"] = model_id
+        return "MODEL"
+
+    monkeypatch.setattr(registry, "init_chat_model", fake_init)
+    registry.register_provider("mybackend", _STUB)
+    assert registry.make_model("anthropic:claude-fable-5") == "MODEL"
+    assert captured["model_id"] == "anthropic:claude-fable-5"
+
+
+def test_missing_key_reports_requires_env_only_when_declared(registry, monkeypatch):
+    registry.register_provider("needy", _STUB, requires_env="MYBACKEND_TOKEN")
+    registry.register_provider("keyless", _STUB)
+
+    monkeypatch.delenv("MYBACKEND_TOKEN", raising=False)
+    assert registry.missing_key("needy:v1") == "MYBACKEND_TOKEN"
+    monkeypatch.setenv("MYBACKEND_TOKEN", "t")
+    assert registry.missing_key("needy:v1") is None
+    # A backend authenticating some other way declares no env var and is
+    # correctly not checked -- it is not "missing" anything.
+    assert registry.missing_key("keyless:v1") is None
+
+
+def test_register_provider_rejects_builtin_and_conflicting_prefixes(registry):
+    with pytest.raises(ValueError, match="built-in provider"):
+        registry.register_provider("anthropic", _STUB)
+    with pytest.raises(ValueError, match="colon-free"):
+        registry.register_provider("bad:prefix", _STUB)
+
+    registry.register_provider("mybackend", _STUB)
+    # Idempotent for the identical spec (icompleteu parses its config several
+    # times per process), but a CONFLICTING one raises rather than silently
+    # deciding by parse order.
+    registry.register_provider("mybackend", _STUB)
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register_provider("mybackend", "other.module:make")
+
+
+def test_hint_lists_registered_providers_and_stays_clean_when_empty(registry):
+    from airc_core import supported_models_hint
+
+    hint = supported_models_hint()
+    assert "mybackend" not in hint
+    # No trailing separator when nothing is registered -- the hint is printed
+    # verbatim on an --check failure.
+    assert "anthropic, openrouter " not in hint
+    assert hint.count(", ,") == 0
+
+    registry.register_provider("mybackend", _STUB)
+    assert "mybackend" in supported_models_hint()
+
+
+def test_custom_factory_requires_module_attr_form(registry):
+    registry.register_provider("mybackend", "not_a_dotted_path")
+    with pytest.raises(ValueError, match="must be 'module:attr'"):
+        registry.make_model("mybackend:v1")
+
+
+def test_list_models_returns_none_for_custom_provider(registry):
+    # No listing hook on the spec: --list-models prints "could not list" rather
+    # than failing, which is the documented degradation.
+    registry.register_provider("mybackend", _STUB)
+    assert list_models("mybackend:v1") is None

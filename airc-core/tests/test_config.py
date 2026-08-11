@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from airc_core import (
     DEFAULT_BUS_ROOT,
     DEFAULT_TOOL_GROUPS,
@@ -96,3 +97,76 @@ def test_common_config_is_constructible_directly():
     # Components may build one in tests without going through TOML.
     cfg = CommonConfig(bus_root=Path("/tmp/bus"))
     assert cfg.bus_root == Path("/tmp/bus")
+
+
+# ── [model_providers] ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def registry():
+    """A clean provider registry, restored afterwards -- load_common registers
+    into process-global module state, so two configs in one session would
+    otherwise see each other."""
+    from airc_core import model as m
+
+    saved = dict(m._CUSTOM_PROVIDERS)
+    m._CUSTOM_PROVIDERS.clear()
+    try:
+        yield m
+    finally:
+        m._CUSTOM_PROVIDERS.clear()
+        m._CUSTOM_PROVIDERS.update(saved)
+
+
+def test_model_providers_parsed_and_registered(registry):
+    cfg = load_common(
+        {
+            "model_providers": {
+                "mybackend": {
+                    "factory": "mypkg.provider:make_model",
+                    "requires_env": "MYBACKEND_TOKEN",
+                }
+            },
+            "models": {"default": "mybackend:v1"},
+        }
+    )
+    assert cfg.model_providers["mybackend"]["factory"] == "mypkg.provider:make_model"
+    # Registered as a side effect, which is what makes the id valid suite-wide:
+    # every component reaches make_model through load_common.
+    assert registry.check_model_id("mybackend:v1") is None
+
+
+def test_model_providers_absent_leaves_registry_empty(registry):
+    # The dormant case: a config with no [model_providers] must not make any
+    # previously-invalid id start validating.
+    cfg = load_common({"models": {"default": "google_vertexai:gemini-3.6-flash"}})
+    assert cfg.model_providers == {}
+    assert registry.check_model_id("mybackend:v1") is not None
+
+
+def test_model_providers_rejects_typo_and_missing_factory(registry):
+    # A misspelled requires_env would silently mean "no credential check" and
+    # read back to the operator as if it had been honoured.
+    with pytest.raises(SystemExit, match="requires_envv"):
+        load_common(
+            {"model_providers": {"mine": {"factory": "m:f", "requires_envv": "X"}}}
+        )
+    with pytest.raises(SystemExit, match="needs factory"):
+        load_common({"model_providers": {"mine": {"requires_env": "X"}}})
+    with pytest.raises(SystemExit, match="must be a table"):
+        load_common({"model_providers": {"mine": "m:f"}})
+
+
+def test_model_providers_builtin_prefix_names_the_section(registry):
+    # register_provider's ValueError becomes a SystemExit naming the section, so
+    # the operator gets the line to edit rather than a traceback.
+    with pytest.raises(SystemExit, match=r"\[model_providers.anthropic\]"):
+        load_common({"model_providers": {"anthropic": {"factory": "m:f"}}})
+
+
+def test_model_providers_reparse_of_same_config_is_idempotent(registry):
+    # icompleteu calls load_common several times per process over the same file.
+    raw = {"model_providers": {"mybackend": {"factory": "mypkg:make"}}}
+    load_common(raw)
+    load_common(raw)
+    assert registry.check_model_id("mybackend:v1") is None

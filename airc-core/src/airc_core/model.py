@@ -18,6 +18,12 @@ own, so it is served through the openai provider with OpenRouter's base_url and
 OPENROUTER_API_KEY (same shape as deepseek). A persona with an "openrouter:..."
 model_id constructs with no google-cloud/ADC dependency, so a deploy can run its
 personas without any Google Cloud setup (e.g. GLM via OpenRouter).
+
+A third style, for a backend that is not an init_chat_model provider at all: an
+external BaseChatModel subclass, named in config under [model_providers] and
+built by a dotted-path factory (register_provider). make_model is the suite's
+only chat-model constructor, so that one branch serves the room, the review
+graph and the harness alike.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
@@ -96,11 +103,83 @@ _PROVIDER_KEYS = {
 }
 
 
+@dataclass(frozen=True)
+class _ProviderSpec:
+    factory: str  # "module:attr", imported on first use
+    requires_env: str | None = None  # unset var disables the persona at startup
+
+
+# External model providers, registered from config ([model_providers], parsed by
+# load_common). A custom backend is a BaseChatModel subclass wrapping an in-house
+# mechanism -- it has no init_chat_model id, so make_model needs a branch that
+# returns a caller-built object rather than a provider string.
+#
+# Module state rather than something hung off a config object because make_model
+# is a free function with no cfg in scope, and every one of its six call sites
+# reaches it that way. The registry has to live HERE and not behind the room's
+# plugin contract: airc-processors and the coding subscribers import make_model
+# without ever loading the room plugin, so a provider registered there would
+# serve chat and leave commit review on the built-in providers.
+_CUSTOM_PROVIDERS: dict[str, _ProviderSpec] = {}
+
+
+def register_provider(
+    prefix: str, factory: str, *, requires_env: str | None = None
+) -> None:
+    """Register an external model provider under `prefix` ("mybackend:...").
+
+    `factory` is a "module:attr" path to a callable taking (model_id, **kwargs)
+    and returning a BaseChatModel; it is imported on FIRST USE, not here. Every
+    component calls load_common, but only the ones that build this model need
+    its package importable -- a watcher polling gerrit should not die because a
+    chat-only backend is missing.
+
+    Re-registering the same spec is a no-op: load_common runs once per process
+    in most components but several times in icompleteu, always over the same
+    file. A CONFLICTING re-registration raises instead of quietly winning, since
+    which model got built would then depend on parse order.
+    """
+    if ":" in prefix or not prefix:
+        # split(":", 1)[0] is how a provider is recovered from a model id, so a
+        # prefix holding a colon could never match one -- dead config, not a
+        # subtle bug to leave for later.
+        raise ValueError(f"provider prefix {prefix!r} must be non-empty and colon-free")
+    if prefix in SUPPORTED_PROVIDERS:
+        raise ValueError(f"{prefix!r} is a built-in provider; pick another prefix")
+    spec = _ProviderSpec(factory, requires_env)
+    if (prior := _CUSTOM_PROVIDERS.get(prefix)) and prior != spec:
+        raise ValueError(
+            f"provider {prefix!r} is already registered as {prior.factory!r}"
+        )
+    _CUSTOM_PROVIDERS[prefix] = spec
+
+
+def _custom_spec(model_id: str) -> _ProviderSpec | None:
+    return _CUSTOM_PROVIDERS.get(model_id.split(":", 1)[0])
+
+
+def _custom_factory(spec: _ProviderSpec):
+    module, sep, attr = spec.factory.partition(":")
+    if not sep:
+        raise ValueError(f"factory {spec.factory!r} must be 'module:attr'")
+    from importlib import import_module
+
+    return getattr(import_module(module), attr)
+
+
 def missing_key(model_id: str) -> str | None:
     """Return the name of a required-but-unset env var, or None if usable."""
     for prefix, key in _PROVIDER_KEYS.items():
         if model_id.startswith(prefix) and not os.environ.get(key):
             return key
+    # Without this an external provider is never disabled at startup (the loop
+    # above only knows built-in prefixes), so a persona with no credential fails
+    # mid-conversation instead of being skipped. Only as good as requires_env:
+    # a backend authenticating by token file or socket declares none and is
+    # correctly not checked here.
+    spec = _custom_spec(model_id)
+    if spec and spec.requires_env and not os.environ.get(spec.requires_env):
+        return spec.requires_env
     return None
 
 
@@ -113,16 +192,21 @@ def check_model_id(model_id: str) -> str | None:
     provider, sep, name = model_id.partition(":")
     if not sep or not name:
         return f"{model_id!r} is not in '<provider>:<model>' form"
-    if provider not in SUPPORTED_PROVIDERS:
+    if provider not in SUPPORTED_PROVIDERS and provider not in _CUSTOM_PROVIDERS:
         return f"{model_id!r} has unknown provider {provider!r}"
     return None
 
 
 def supported_models_hint() -> str:
-    """One-line reminder of the valid provider prefixes and id format."""
+    """One-line reminder of the valid provider prefixes and id format.
+
+    Registered external providers are listed alongside the built-ins so an
+    `airc --check` failure names a configured prefix rather than implying it is
+    invalid -- the hint is printed by the same code that rejected the id.
+    """
     return (
         "model ids are '<provider>:<model>'; supported providers: "
-        + ", ".join(SUPPORTED_PROVIDERS)
+        + ", ".join((*SUPPORTED_PROVIDERS, *sorted(_CUSTOM_PROVIDERS)))
         + " (e.g. google_vertexai:gemini-2.5-flash)"
     )
 
@@ -132,8 +216,9 @@ def list_models(model_id: str) -> list[str] | None:
 
     Calls the provider's models.list API; returns the short names (the part
     after the colon) of generate-capable models, sorted. Returns None when the
-    provider can't be enumerated here (unsupported, missing credentials, or the
-    API call failed) so callers can fall back gracefully.
+    provider can't be enumerated here (unsupported, an external provider whose
+    spec carries no listing hook, missing credentials, or the API call failed)
+    so callers can fall back gracefully.
     """
     provider = model_id.split(":", 1)[0]
     try:
@@ -293,6 +378,13 @@ def _silence_vertex_noise() -> None:
 def make_model(model_id: str, **kwargs):
     if problem := check_model_id(model_id):
         raise ValueError(f"{problem}; {supported_models_hint()}")
+    # A registered external provider owns construction entirely: it gets the full
+    # id (so one provider can serve several models) and the caller kwargs, and
+    # returns a BaseChatModel. Nothing below is reachable for it -- including the
+    # Vertex proxy endpoint, which is provider-specific, so a custom backend that
+    # must work from inside the sandbox needs its own egress arrangement.
+    if spec := _custom_spec(model_id):
+        return _custom_factory(spec)(model_id, **kwargs)
     if model_id.startswith("openrouter:"):
         # No langchain-openrouter package: serve the model through the openai
         # provider pointed at OpenRouter's OpenAI-compatible endpoint. An explicit
