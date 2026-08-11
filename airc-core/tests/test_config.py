@@ -170,3 +170,11 @@ def test_model_providers_reparse_of_same_config_is_idempotent(registry):
     load_common(raw)
     load_common(raw)
     assert registry.check_model_id("mybackend:v1") is None
+
+
+def test_model_providers_bad_factory_shape_fails_at_parse(registry):
+    # Shape is checked at registration, so a malformed path fails at STARTUP with
+    # the section named -- not inside the first turn that needs the model.
+    with pytest.raises(SystemExit, match="must be 'module:attr'"):
+        load_common({"model_providers": {"mine": {"factory": "not_dotted"}}})
+    assert "mine" not in registry._CUSTOM_PROVIDERS

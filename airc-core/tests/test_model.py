@@ -428,10 +428,27 @@ def test_hint_lists_registered_providers_and_stays_clean_when_empty(registry):
     assert "mybackend" in supported_models_hint()
 
 
-def test_custom_factory_requires_module_attr_form(registry):
-    registry.register_provider("mybackend", "not_a_dotted_path")
-    with pytest.raises(ValueError, match="must be 'module:attr'"):
+def test_factory_shape_is_rejected_at_registration_not_first_use(registry):
+    # Shape is checkable without importing, and a path that is not "module:attr"
+    # at all can never become one -- so it fails at startup rather than inside
+    # the first turn that happens to need this model.
+    for bad in ("not_a_dotted_path", "mod:", ":attr"):
+        with pytest.raises(ValueError, match="must be 'module:attr'"):
+            registry.register_provider("mybackend", bad)
+    assert "mybackend" not in registry._CUSTOM_PROVIDERS
+
+
+def test_unloadable_factory_names_the_config_section(registry):
+    # The import stays deferred, so this failure lands mid-turn. A bare
+    # ModuleNotFoundError there names a module the operator never typed under
+    # that name; the message has to tie it back to the config line.
+    registry.register_provider("mybackend", "no_such_module_xyz:make")
+    with pytest.raises(RuntimeError, match=r"\[model_providers.mybackend\]"):
         registry.make_model("mybackend:v1")
+
+    registry.register_provider("attrless", f"{__name__}:nope")
+    with pytest.raises(RuntimeError, match=r"\[model_providers.attrless\]"):
+        registry.make_model("attrless:v1")
 
 
 def test_list_models_returns_none_for_custom_provider(registry):
@@ -439,3 +456,20 @@ def test_list_models_returns_none_for_custom_provider(registry):
     # than failing, which is the documented degradation.
     registry.register_provider("mybackend", _STUB)
     assert list_models("mybackend:v1") is None
+
+
+def test_multi_colon_model_name_reaches_factory_whole(registry):
+    # A provider may serve vendor-qualified names (openrouter's ids look like
+    # this). Only the FIRST colon separates the prefix; the rest is the model's.
+    registry.register_provider("mybackend", _STUB)
+    _, model_id, _ = registry.make_model("mybackend:vendor:model:v2")
+    assert model_id == "mybackend:vendor:model:v2"
+
+
+def test_custom_prefix_does_not_shadow_a_builtin_key_check(registry, monkeypatch):
+    # missing_key matches built-ins by "<name>:" WITH the colon, so a custom
+    # prefix that merely starts with one ("openai_custom") must not inherit its
+    # env-var requirement.
+    registry.register_provider("openai_custom", _STUB)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert registry.missing_key("openai_custom:v1") is None

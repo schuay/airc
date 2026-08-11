@@ -115,7 +115,7 @@ class _ProviderSpec:
 # returns a caller-built object rather than a provider string.
 #
 # Module state rather than something hung off a config object because make_model
-# is a free function with no cfg in scope, and every one of its six call sites
+# is a free function with no cfg in scope, and every one of its call sites
 # reaches it that way. The registry has to live HERE and not behind the room's
 # plugin contract: airc-processors and the coding subscribers import make_model
 # without ever loading the room plugin, so a provider registered there would
@@ -146,6 +146,11 @@ def register_provider(
         raise ValueError(f"provider prefix {prefix!r} must be non-empty and colon-free")
     if prefix in SUPPORTED_PROVIDERS:
         raise ValueError(f"{prefix!r} is a built-in provider; pick another prefix")
+    # Shape now, import later: a factory that is not "module:attr" at all cannot
+    # become one, so there is nothing to gain by discovering it mid-turn. This is
+    # as far as startup validation can go without importing the package, which
+    # would make a chat-only backend a hard dependency of every component.
+    split_factory(factory)
     spec = _ProviderSpec(factory, requires_env)
     if (prior := _CUSTOM_PROVIDERS.get(prefix)) and prior != spec:
         raise ValueError(
@@ -158,13 +163,34 @@ def _custom_spec(model_id: str) -> _ProviderSpec | None:
     return _CUSTOM_PROVIDERS.get(model_id.split(":", 1)[0])
 
 
-def _custom_factory(spec: _ProviderSpec):
-    module, sep, attr = spec.factory.partition(":")
-    if not sep:
-        raise ValueError(f"factory {spec.factory!r} must be 'module:attr'")
+def split_factory(factory: str) -> tuple[str, str]:
+    """("module", "attr") from a "module:attr" path, or raise.
+
+    Shape-only, so config parsing can reject a malformed path at STARTUP without
+    importing the package -- the import itself stays deferred to first use.
+    """
+    module, sep, attr = factory.partition(":")
+    if not (sep and module and attr):
+        raise ValueError(f"factory {factory!r} must be 'module:attr'")
+    return module, attr
+
+
+def _custom_factory(prefix: str, spec: _ProviderSpec):
+    module, attr = split_factory(spec.factory)
     from importlib import import_module
 
-    return getattr(import_module(module), attr)
+    try:
+        return getattr(import_module(module), attr)
+    except (ImportError, AttributeError) as e:
+        # The failure this re-raises is the deferred one: the path passed startup
+        # and only now turns out to be unimportable, which surfaces INSIDE a turn
+        # or a bus-driven review. A bare ModuleNotFoundError there names a module
+        # the operator never typed under that name, with nothing tying it to the
+        # config line that chose it -- so name the section and the model.
+        raise RuntimeError(
+            f"[model_providers.{prefix}] factory {spec.factory!r} could not be"
+            f" loaded: {e}"
+        ) from e
 
 
 def missing_key(model_id: str) -> str | None:
@@ -384,7 +410,7 @@ def make_model(model_id: str, **kwargs):
     # Vertex proxy endpoint, which is provider-specific, so a custom backend that
     # must work from inside the sandbox needs its own egress arrangement.
     if spec := _custom_spec(model_id):
-        return _custom_factory(spec)(model_id, **kwargs)
+        return _custom_factory(model_id.split(":", 1)[0], spec)(model_id, **kwargs)
     if model_id.startswith("openrouter:"):
         # No langchain-openrouter package: serve the model through the openai
         # provider pointed at OpenRouter's OpenAI-compatible endpoint. An explicit
