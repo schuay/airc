@@ -540,8 +540,13 @@ class AgentRunner:
         *,
         addressed: bool = False,
         task_prompt: str | None = None,
+        trigger_id: int | None = None,
     ) -> str | None:
         """Run one agent turn against a thread; return the reply text.
+
+        `trigger_id` is the message that caused this turn, when one did; it
+        rides the turn config for a tool that needs to read what a human
+        actually asked rather than scan the thread guessing. See turn_config.
 
         Returns None if the agent declined (NOTHING_TO_ADD) or produced no
         text -- except when addressed is set (a human named this agent
@@ -590,7 +595,7 @@ class AgentRunner:
         # turn. Race-free: an in-flight turn keeps writing to the old id; only the
         # next turn reads the bumped one.
         gen = self._store.context_generation(thread_id)
-        config = {"configurable": turn_config(thread_id, skey, gen)}
+        config = {"configurable": turn_config(thread_id, skey, gen, trigger_id)}
         text, usage = await self._stream(
             entry.graph,
             agent_name,

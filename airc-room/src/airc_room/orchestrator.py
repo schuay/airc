@@ -343,7 +343,15 @@ class TurnContext:
     async def run_turn(self, *, task_prompt: str | None = None) -> str | None:
         """A plain conversational turn (the room's default response shape)."""
         return await self._orch._guarded_turn(
-            self.responder, self.thread_id, addressed=False, task_prompt=task_prompt
+            self.responder,
+            self.thread_id,
+            addressed=False,
+            task_prompt=task_prompt,
+            # The announcement IS this turn's trigger, even though it came from
+            # a watcher rather than a person -- a tool reading provenance wants
+            # what caused the turn, and is the one that decides whether a
+            # non-human trigger counts for what it is checking.
+            trigger_id=self.announcement.id,
         )
 
     async def run_structured_turn(
@@ -745,7 +753,13 @@ class Orchestrator:
                             thread_id,
                         )
                     return
-                text = await self._guarded_turn(name, thread_id, addressed=addressed)
+                # The routed turn is the one case with a message behind it, so it
+                # is the one that carries provenance: a tool asking "did a human
+                # ask for this" can read the actual trigger instead of scanning
+                # the thread for a message that looks like one.
+                text = await self._guarded_turn(
+                    name, thread_id, addressed=addressed, trigger_id=msg.id
+                )
                 if text is None:
                     log.info(
                         "agent %s had nothing to add in thread %d", name, thread_id
@@ -764,6 +778,7 @@ class Orchestrator:
         *,
         addressed: bool = False,
         task_prompt: str | None = None,
+        trigger_id: int | None = None,
     ) -> str | None:
         """A plain turn under the shared turn timeout + the room's error UX: a
         NOTICE on timeout or error, None on failure. Does not post the reply --
@@ -773,7 +788,11 @@ class Orchestrator:
         try:
             async with asyncio.timeout(timeout):
                 return await self._runner.run_turn(
-                    name, thread_id, addressed=addressed, task_prompt=task_prompt
+                    name,
+                    thread_id,
+                    addressed=addressed,
+                    task_prompt=task_prompt,
+                    trigger_id=trigger_id,
                 )
         except TimeoutError:
             log.error(

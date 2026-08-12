@@ -10,7 +10,14 @@ from airc_room.timers import (
     TimerScheduler,
     make_timer_tools,
 )
-from airc_room.turn_context import AGENT_KEY, THREAD_KEY, turn_config, turn_context
+from airc_room.turn_context import (
+    AGENT_KEY,
+    THREAD_KEY,
+    TRIGGER_KEY,
+    turn_config,
+    turn_context,
+    turn_trigger,
+)
 
 
 def _timer_tools(scheduler):
@@ -49,6 +56,35 @@ def test_turn_context_refuses_a_turn_with_no_identity():
     )
     assert turn_context({}) == (None, "")
     assert turn_context(None) == (None, "")
+
+
+def test_turn_trigger_reads_the_message_that_caused_the_turn():
+    cfg = {"configurable": turn_config(7, "perf", 0, trigger_id=42)}
+    assert turn_trigger(cfg) == 42
+    # And the identity is unaffected by carrying one.
+    assert turn_context(cfg) == (7, "perf")
+
+
+def test_turn_trigger_is_none_when_no_message_caused_the_turn():
+    # A timer wake is driven by a note, not a message; a structured turn belongs
+    # to no thread at all. Both are ordinary, so None is an answer rather than a
+    # fault -- the tool reading it decides what to do without one.
+    assert turn_trigger(_cfg(7, "perf")) is None
+    assert turn_trigger({"configurable": {}}) is None
+    assert turn_trigger({}) is None
+    assert turn_trigger(None) is None
+
+
+def test_a_triggerless_turn_still_has_an_identity():
+    # The reason the trigger is read separately rather than as a third element
+    # of turn_context: folding it into that all-or-nothing check would make
+    # every timer wake read as "no identity" and silently disable every local
+    # tool on it.
+    cfg = _cfg(7, "perf")
+    assert turn_context(cfg) == (7, "perf")
+    assert turn_trigger(cfg) is None
+    # bool is an int subclass; True must not read as message 1.
+    assert turn_trigger({"configurable": {TRIGGER_KEY: True}}) is None
 
 
 def test_turn_context_refuses_a_half_populated_identity():
@@ -109,11 +145,13 @@ async def test_run_turn_builds_a_config_its_own_tools_can_read(tmp_path, monkeyp
         return "ok", _TurnUsage()
 
     monkeypatch.setattr(runner, "_stream", _fake_stream)
-    await runner.run_turn("Sonic", thread.id, addressed=True)
+    await runner.run_turn("Sonic", thread.id, addressed=True, trigger_id=99)
     store.close()
 
     # The identity a local tool would recover, from what the runner actually built.
     assert turn_context(seen) == (thread.id, "perf")
+    # And the provenance, through the same real-runner path.
+    assert turn_trigger(seen) == 99
     # Under use_nicknames the addressable name is the nickname while the stable
     # key stays the folder handle; a timer stores the key, so the wake path must
     # translate key -> name. The key is never the name, and a dead persona is None.

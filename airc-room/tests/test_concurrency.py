@@ -21,6 +21,7 @@ class FakeRunner:
         self.calls = []  # (agent, thread_id) in completion order
         self.addressed = []  # (agent, thread_id, addressed) in completion order
         self.task_prompts = []  # (agent, thread_id, task_prompt) in completion order
+        self.triggers = []  # (agent, thread_id, trigger_id) in completion order
         self.active = 0
         self.max_active = 0
 
@@ -30,7 +31,9 @@ class FakeRunner:
 
         return {n: SimpleNamespace(description=f"{n} expert") for n in self._names}
 
-    async def run_turn(self, name, thread_id, *, addressed=False, task_prompt=None):
+    async def run_turn(
+        self, name, thread_id, *, addressed=False, task_prompt=None, trigger_id=None
+    ):
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
@@ -40,6 +43,7 @@ class FakeRunner:
         self.calls.append((name, thread_id))
         self.addressed.append((name, thread_id, addressed))
         self.task_prompts.append((name, thread_id, task_prompt))
+        self.triggers.append((name, thread_id, trigger_id))
         return f"reply from {name}"
 
 
@@ -224,7 +228,9 @@ async def test_busy_agent_does_not_block_idle_agent(tmp_path, monkeypatch):
     room = Room(store)
 
     class PerAgentDelay(FakeRunner):
-        async def run_turn(self, name, thread_id, *, addressed=False, task_prompt=None):
+        async def run_turn(
+            self, name, thread_id, *, addressed=False, task_prompt=None, trigger_id=None
+        ):
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             try:
@@ -421,7 +427,9 @@ async def test_agent_address_forces_other_agent(tmp_path, monkeypatch):
     # even when it echoes its own name into the address ("perf, compiler: ..."),
     # which previously voided the whole match (sender not in candidates).
     class ChainingRunner(FakeRunner):
-        async def run_turn(self, name, thread_id, *, addressed=False, task_prompt=None):
+        async def run_turn(
+            self, name, thread_id, *, addressed=False, task_prompt=None, trigger_id=None
+        ):
             await super().run_turn(name, thread_id, addressed=addressed)
             if name == "perf":
                 return "perf, compiler: please double-check the lowering"
@@ -504,3 +512,19 @@ async def test_run_structured_turn_serializes_per_persona(tmp_path):
     )
     assert all(r is not None for r in results)
     assert max_active == 1  # never overlapped
+
+
+async def test_a_routed_turn_carries_the_message_that_triggered_it(
+    tmp_path, monkeypatch
+):
+    # Provenance: a tool asking "did a human ask for this" should read the
+    # message that woke the turn rather than scan the thread for one that looks
+    # like it. The scan is what makes two open requests in one thread resolve to
+    # whichever is newest, regardless of which one this turn is answering.
+    store, room, runner, orch = make_env(tmp_path, monkeypatch, agents=("perf",))
+    t = room.create_thread("main")
+
+    m = await room.post(t.id, "alice", "human", "perf: review crrev.com/c/123")
+    await drive(orch, lambda: len(replies(store, t.id)) == 1)
+
+    assert runner.triggers == [("perf", t.id, m.id)]
