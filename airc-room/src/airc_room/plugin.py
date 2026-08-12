@@ -55,6 +55,15 @@ Optional (duck-typed; absent means the room's default behavior):
   declaring `build_local_tools(cfg)` keeps working, so this stays a compatible
   addition and needs no PLUGIN_API_VERSION bump. The room inspects the hook and
   passes `room` only to one that accepts it, by name or through `**kwargs`.
+- build_message_handlers(cfg, room, store) -> list[MessageHandler]  -- observers
+  on arriving messages, run by the orchestrator before it routes anything (see
+  orchestrator.MessageHandler / Disposition). A handler that returns CONSUMED
+  ends the message there: no mention parse, no coordinator, no persona turn. The
+  room pushes messages to personas and nowhere else, so without this a plugin
+  feature reacting to what a human typed can only reconstruct arrival by polling
+  the store; this is the push. Handlers run inline in the per-thread worker, so
+  they inherit its ordering, watermark and crash replay -- and owe idempotency
+  back, since replay re-delivers. Absent means no handlers.
 - build_services(cfg, room, store) -> list  -- long-running background services
   the room supervises as tasks (each a `.name` and an async `.run()`, like a
   Subscriber but not bus-driven). For periodic/clock work with no bus topic: e.g.
@@ -118,6 +127,8 @@ class Plugin(Protocol):
     def config_template(self) -> str | None: ...
 
     def build_local_tools(self, cfg, *, room=None) -> dict: ...
+
+    def build_message_handlers(self, cfg, room, store) -> list: ...
 
     def build_services(self, cfg, room, store) -> list: ...
 

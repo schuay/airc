@@ -556,7 +556,25 @@ async def amain(args: argparse.Namespace) -> None:
         follow_ups = (
             plugin.build_follow_ups(cfg, store, agents_dir=agents_dir) if plugin else {}
         )
-        orchestrator = Orchestrator(cfg, room, runner, store, follow_ups=follow_ups)
+        # Message handlers observe arriving messages before routing (see
+        # orchestrator.MessageHandler). NOT gated by --no-watch, unlike
+        # subscribers and services: those are the plugin's autonomous work, which
+        # --no-watch exists to silence, while a handler only ever answers
+        # something a human just typed in the room. Silencing those would make
+        # --no-watch drop commands on the floor rather than quiet the room.
+        message_handlers = (
+            plugin.build_message_handlers(cfg, room, store)
+            if plugin and hasattr(plugin, "build_message_handlers")
+            else []
+        )
+        orchestrator = Orchestrator(
+            cfg,
+            room,
+            runner,
+            store,
+            follow_ups=follow_ups,
+            message_handlers=message_handlers,
+        )
         scheduler.deliver = orchestrator.deliver_wake
         # Rebuild pending timers from the store before run() starts, so a
         # timer set before the restart still fires (one immediately if it came
@@ -597,11 +615,13 @@ async def amain(args: argparse.Namespace) -> None:
         # as transport=console or an empty subscriber list, instead of just
         # going quiet.
         log.info(
-            "airc: transport=%s bus_root=%s subscribers=[%s] services=[%s]",
+            "airc: transport=%s bus_root=%s subscribers=[%s] services=[%s]"
+            " handlers=[%s]",
             kind,
             cfg.bus_root,
             ", ".join(s.name for s in subscribers) or "none",
             ", ".join(s.name for s in services) or "none",
+            ", ".join(h.name for h in message_handlers) or "none",
         )
         for src in subscribers:
             tasks.append(asyncio.create_task(src.run(), name=f"source:{src.name}"))

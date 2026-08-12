@@ -6,6 +6,11 @@
 The orchestrator consumes every message posted to the room and decides which
 agents respond, mimicking a human group chat:
 
+- A plugin may register message handlers, run on each message before any
+  routing. One that CONSUMES a message ends it there: no mention parse, no
+  coordinator, no turn. This is how an app answers something mechanical (a
+  command a human typed) without spending a persona turn on it, and it is the
+  only delivery a plugin gets -- everything below routes to personas alone.
 - An address (a leading "handle:" prefix) forces a reply from the named agents.
 - Otherwise a single COORDINATOR call on the fast model decides whether anyone
   should reply and who: it sees the agent roster, a bounded recent window with
@@ -50,6 +55,8 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 from airc_core import TokenLog, make_model, retrying, usage_counts
 
@@ -62,6 +69,43 @@ from .store import Message, MessageKind, Store
 # message's follow_up string. It owns the response (prompt, parse, render, side
 # effects) via the TurnContext the room lends it; the room stays domain-blind.
 FollowUp = Callable[["TurnContext"], Awaitable[None]]
+
+
+class Disposition(StrEnum):
+    """What a message handler decided about the message it was given.
+
+    CONSUMED suppresses ORCHESTRATION only. The message is already persisted and
+    already delivered to every transport by the time a handler sees it, and its
+    `kind` is left alone -- so the store's history stays honest about what was
+    said, and only the routing (mention parse, coordinator, turns) is skipped.
+
+    PASS carries a noqa: ruff reads any name/value pair spelled like this one as
+    a hardcoded credential, and there is no rewording of a routing verdict that
+    escapes the heuristic.
+    """
+
+    CONSUMED = "consumed"  # stop here: no mention parse, no coordinator, no turn
+    PASS = "pass"  # noqa: S105  -- next handler, then normal orchestration
+
+
+@runtime_checkable
+class MessageHandler(Protocol):
+    """A plugin's observer on messages, run before routing.
+
+    The room pushes messages end to end -- transport, room.post, per-thread
+    worker, turn -- but the only consumer at the end of that pipeline is a
+    persona woken by a mention. A plugin had no delivery at all, so every plugin
+    feature reacting to what a human typed had to reconstruct arrival by
+    re-reading SQLite on a timer. This is the seam that pushes instead: a handler
+    IS the delivery, so a near-miss can be answered synchronously, once.
+
+    `name` is for logs (a handler that raises is named there).
+    """
+
+    name: str
+
+    async def handle(self, msg: Message) -> Disposition: ...
+
 
 log = logging.getLogger(__name__)
 
@@ -325,12 +369,16 @@ class Orchestrator:
         runner: AgentRunner,
         store: Store,
         follow_ups: dict[str, FollowUp] | None = None,
+        message_handlers: list[MessageHandler] | None = None,
     ) -> None:
         self._cfg = cfg
         self._room = room
         self._runner = runner
         self._store = store
         self._tokens = TokenLog(cfg.token_db_path)
+        # Plugin observers on arriving messages, run in registration order before
+        # any routing. Empty for a bare room and for a plugin without the hook.
+        self._message_handlers: list[MessageHandler] = message_handlers or []
         # App-registered response handlers keyed by a message's follow_up string
         # (D2 registry: an explicit dict the app populates, not entry-point magic).
         # A SYSTEM announcement whose follow_up names one dispatches its whole
@@ -468,6 +516,8 @@ class Orchestrator:
     async def _handle(self, msg: Message, pm: _PendingMsg) -> None:
         if msg.kind in (MessageKind.NOTICE, MessageKind.PING):
             return
+        if await self._consumed(msg):
+            return
         agents = self._runner.agents
         candidates = [n for n in agents if n != msg.sender]
         if not candidates:
@@ -525,6 +575,35 @@ class Orchestrator:
             )
             self._round_tasks.add(task)
             task.add_done_callback(self._round_tasks.discard)
+
+    async def _consumed(self, msg: Message) -> bool:
+        """Run the plugin handler chain; True once one claims the message.
+
+        Here in the worker loop rather than in room.post, because _recover
+        replays persisted messages above the watermark straight into the worker
+        queues -- a hook on post would silently skip every replayed message, and
+        consumption would not be crash-durable. In the loop the handlers inherit
+        what the orchestrator already guarantees: per-thread ordering, the
+        durable watermark, and replay after a crash. Replay is also the contract
+        they owe back: a handler must be idempotent, exactly like every bus
+        subscriber in the suite.
+
+        Handlers run INLINE, so a slow one delays this thread's routing (and only
+        this thread's). They are meant for store reads/writes, a bus publish, and
+        at most a post; anything heavier belongs on the bus.
+
+        A handler that raises is logged and treated as PASS. A broken plugin must
+        not be able to silence the room -- the failure mode to avoid is one
+        exception swallowing a message nobody then answers.
+        """
+        for h in self._message_handlers:
+            try:
+                if await h.handle(msg) is Disposition.CONSUMED:
+                    log.info("handler %s consumed message %d", h.name, msg.id)
+                    return True
+            except Exception:
+                log.exception("handler %s failed on message %d", h.name, msg.id)
+        return False
 
     async def _run_responder(
         self,

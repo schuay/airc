@@ -96,6 +96,11 @@ def build_local_tools(cfg, *, room=None) -> dict[str, list]:
     the room inspects the signature and passes `room` only to a hook that accepts
     it, by name or through **kwargs."""
 
+def build_message_handlers(cfg, room, store) -> list[MessageHandler]:
+    """Observers on arriving messages, run before the orchestrator routes. A
+    handler returning CONSUMED ends the message there -- no mention parse, no
+    coordinator, no persona turn. Absent means no handlers."""
+
 def parse_config(cfg) -> object:
     """Validate and type this app's own [airc] sub-table. Core parses only the
     generic [airc] keys and carries the rest through as cfg.plugin_config; this
@@ -104,6 +109,43 @@ def parse_config(cfg) -> object:
     config. Reject unknown [airc] keys here -- core cannot know the plugin's key
     set, so the plugin owns that half of the strict-config check."""
 ```
+
+### Message handlers
+
+The room delivers messages to exactly one kind of consumer: a persona woken by a
+mention. A plugin gets no delivery at all -- its only surface is the store, so
+any plugin feature reacting to what a human typed has to reconstruct arrival by
+re-reading SQLite on a timer. `build_message_handlers` is the push instead:
+
+```python
+class MessageHandler(Protocol):
+    name: str
+    async def handle(self, msg: Message) -> Disposition: ...
+    # Disposition.CONSUMED -- stop: no mention parse, no coordinator, no turn
+    # Disposition.PASS     -- next handler, then normal orchestration
+```
+
+Both types are importable from `airc_room.orchestrator`. Handlers run in
+registration order and the first CONSUMED wins; NOTICE and PING messages never
+reach them (they are never routed either). A handler that raises is logged and
+treated as PASS, so a broken plugin cannot silence the room.
+
+Three properties are worth knowing before writing one:
+
+- **CONSUMED suppresses orchestration, not the message.** By the time a handler
+  runs the message is already persisted and already delivered to every
+  transport, and its `kind` is left untouched. The store's history stays honest;
+  only the routing is skipped.
+- **Handlers must be idempotent.** They run in the per-thread worker loop, which
+  is what gives them ordering, the durable watermark, and crash replay -- and
+  replay means a handler will see the same message again after a crash. This is
+  the same contract every bus subscriber already honors. (This is also why the
+  hook is not in `room.post`: startup recovery replays store messages straight
+  into the workers, bypassing `post` entirely, so a hook there would silently
+  skip exactly the messages that most need re-processing.)
+- **Handlers run inline.** A slow handler delays its own thread's routing. Do
+  store reads/writes, a bus publish, at most a post; put anything heavier on the
+  bus.
 
 ### Transport-level hook: `aux_services`
 
