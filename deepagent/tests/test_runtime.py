@@ -125,6 +125,40 @@ def test_report_tool_is_in_the_cached_tool_list(tmp_path, monkeypatch):
     assert REPORT_TOOL_NAME in {t.name for t in seen["tools"]}
 
 
+def test_graph_for_compiles_with_application_reminders(tmp_path, monkeypatch):
+    """One reminder on the harness plus base_middleware's own grounding reminder.
+
+    Both are GroundingReminderMiddleware, and create_agent rejects duplicate
+    middleware names -- which default to the class name -- so this exact shape
+    raised "Please remove duplicate middleware instances." and killed every
+    goal turn at graph build (first seen live starting an icu_task). The
+    sibling test above stubs base_middleware to [], which is why it never
+    caught this; here the real stack compiles.
+    """
+    from airc_core import CommonConfig
+    from airc_core import agent as airc_agent
+    from langchain_core.language_models import GenericFakeChatModel
+
+    from deepagent import langgraph_harness as lh
+
+    # Stub model CONSTRUCTION only, in both places it is resolved: the
+    # harness's own make_model and the one base_middleware calls for the
+    # summarizer. ChatVertexAI validates project/credentials at __init__ (no
+    # ADC in tests), SummarizationMiddleware reads _llm_type at construction,
+    # and the middleware STACK is what is under test here.
+    fake = lambda *a, **k: GenericFakeChatModel(messages=iter([]))
+    monkeypatch.setattr(lh, "make_model", fake)
+    monkeypatch.setattr(airc_agent, "make_model", fake)
+
+    common = CommonConfig()
+    common.models = {"default": "google_vertexai:gemini-3.6-flash"}
+    h = lh.LangGraphHarness(
+        common, reminders=(("tools_reminder", "prefer the bound tools", 150_000),)
+    )
+    h._v8_tools = []
+    h._graph_for("t1", tmp_path, Report)
+
+
 def test_to_result_flattens_extra_fields():
     res = to_result(
         _DemoReport(

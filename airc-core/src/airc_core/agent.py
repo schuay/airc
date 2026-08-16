@@ -986,6 +986,16 @@ class GroundingReminderMiddleware(AgentMiddleware):
         # and only in threads long enough for both to fire.
         self._src = src
 
+    @property
+    def name(self) -> str:
+        # create_agent both rejects duplicate middleware names and keys graph
+        # nodes on them, and the default name is the CLASS name -- so
+        # base_middleware's grounding reminder plus an application reminder
+        # (the harness appends one per `reminders` entry) failed the whole
+        # graph at compile time. src is already the per-instance identity
+        # (_is_reminder keys on it), so the name rides the same uniqueness.
+        return f"GroundingReminderMiddleware({self._src})"
+
     def _is_reminder(self, m) -> bool:
         return (
             isinstance(m, HumanMessage)

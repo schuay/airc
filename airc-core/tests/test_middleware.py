@@ -556,6 +556,30 @@ async def test_two_reminders_do_not_suppress_each_other():
     assert await tools.abefore_model({"messages": both}, None) is None
 
 
+def test_two_reminders_compile_into_one_agent():
+    # The harness composes base_middleware (which carries the grounding
+    # reminder) with one GroundingReminderMiddleware per application reminder.
+    # create_agent both asserts on duplicate middleware names and keys graph
+    # nodes on them, and the name defaults to the CLASS name -- so exactly this
+    # composition raised "Please remove duplicate middleware instances." at
+    # graph build and killed every icompleteu goal turn. Must drive the real
+    # create_agent validation: a name-set comparison here could drift from
+    # whatever the factory checks. Fails against the class-name default.
+    from airc_core.agent import GroundingReminderMiddleware
+    from langchain.agents import create_agent
+    from langchain_core.language_models import GenericFakeChatModel
+
+    create_agent(
+        GenericFakeChatModel(messages=iter([])),
+        tools=[],
+        system_prompt="sys",
+        middleware=[
+            *base_middleware(_NON_VERTEX, "sys", []),
+            GroundingReminderMiddleware(150_000, "use the tools", "tools_reminder"),
+        ],
+    )
+
+
 # ── RequireStructuredResultMiddleware ────────────────────────────────────────
 #
 # The guard against a silent no-verdict: a ToolStrategy turn that answers in
