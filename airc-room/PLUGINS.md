@@ -25,7 +25,7 @@ in the wiring.
 Declare the API version you build against as a LITERAL:
 
 ```python
-PLUGIN_API_VERSION = 1   # the core contract version this plugin targets
+PLUGIN_API_VERSION = 1  # the core contract version this plugin targets
 ```
 
 `airc_room.plugin.PLUGIN_API_VERSION` is an integer core bumps on an
@@ -49,11 +49,13 @@ def build_subscribers(cfg, room, store, toolset) -> list:
     Each is an airc_room Subscriber (a `run()` loop over a bus Subscription).
     Return [] for a chat-only app with no bus feeds."""
 
+
 def build_follow_ups(cfg, store, *, agents_dir) -> dict[str, FollowUp]:
     """The announcement-response handlers the orchestrator dispatches by the
     `follow_up` key a subscriber stamps on a SYSTEM announcement. The room stays
     domain-blind: it injects whatever follow-up prompt the message carries. Return
     {} for an app with no announcement follow-ups."""
+
 
 def build_transport(cfg, room, store, kind: str):
     """Build a plugin-owned transport by kind, or None if this app supplies none
@@ -72,11 +74,13 @@ def default_transport_kind() -> str | None:
     no transport itself -- this is how a plugin owns that default (the coding app
     returns 'gchat'). Absent/None falls back to the console."""
 
+
 def personas_dir() -> Path | None:
     """The packaged agents/ directory this plugin ships, so its personas travel
     with the package instead of relying on the service cwd. Resolution order in
     the room: --agents-dir, then ./agents in the cwd, then this hook, then
     ~/.config/airc/agents."""
+
 
 def build_local_tools(cfg, *, room=None) -> dict[str, list]:
     """Local (non-MCP) langchain tools this plugin contributes, keyed by
@@ -96,10 +100,12 @@ def build_local_tools(cfg, *, room=None) -> dict[str, list]:
     the room inspects the signature and passes `room` only to a hook that accepts
     it, by name or through **kwargs."""
 
+
 def build_message_handlers(cfg, room, store) -> list[MessageHandler]:
     """Observers on arriving messages, run before the orchestrator routes. A
     handler returning CONSUMED ends the message there -- no mention parse, no
     coordinator, no persona turn. Absent means no handlers."""
+
 
 def parse_config(cfg) -> object:
     """Validate and type this app's own [airc] sub-table. Core parses only the
@@ -120,7 +126,9 @@ re-reading SQLite on a timer. `build_message_handlers` is the push instead:
 ```python
 class MessageHandler(Protocol):
     name: str
+
     async def handle(self, msg: Message) -> Disposition: ...
+
     # Disposition.CONSUMED -- stop: no mention parse, no coordinator, no turn
     # Disposition.PASS     -- next handler, then normal orchestration
 ```

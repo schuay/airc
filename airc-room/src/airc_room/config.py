@@ -416,9 +416,7 @@ def parse_handover_fields(
     if kinds_raw is not None and (
         isinstance(kinds_raw, str) or not isinstance(kinds_raw, list)
     ):
-        raise error(
-            '[handover] kinds must be a list, e.g. kinds = ["bugfix", "repro"]'
-        )
+        raise error('[handover] kinds must be a list, e.g. kinds = ["bugfix", "repro"]')
     # The default is now just ["repro"] (the one kind that cannot produce a
     # CL). Before kinds existed, an enabled section with no per-kind policy
     # meant EVERY kind -- so accepting the omission silently would narrow a
