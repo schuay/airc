@@ -200,6 +200,13 @@ ttl_minutes = 30           # cache lifetime; clamped up if below the turn deadli
 # enabled  = true
 # autonomy = "draft-only"
 # bus_root = "/path/to/worker/bus"
+# kinds = ["repro"]           # allowlist of job kinds this suite may hand over.
+#                              # REQUIRED once enabled (startup refuses to guess
+#                              # for a live deployment). Values are the app's
+#                              # vocabulary (the coding suite's: bugfix, repro,
+#                              # perf, task), validated at startup. The default
+#                              # is repro alone -- the one kind that cannot
+#                              # produce a CL; every uploading kind is opt-in.
 
 # == [airc.*]  (the chat room; run `airc` / `airc --headless`) =================
 
@@ -346,19 +353,21 @@ class HandoverConfig:
     enabled: bool = False
     autonomy: str = "draft-only"  # draft-only | upload-wip | upload-cq-pinpoint
     bus_root: Path = field(default_factory=lambda: DATA_DIR / "bus")
-    # Emit no fix jobs: the deployment gathers verified repros and leaves the
-    # fixing to humans. Read here as well as by the processor because there are
-    # TWO producers of a fix -- the processor's per-finding handover, and the
-    # results consumer's fix-from-a-verified-repro. Core dropped this key
-    # silently, so the second one kept uploading CLs under a config that
-    # promised none.
-    #
-    # TODO(jgruber): replace with per-kind gates ([handover.kinds.<kind>]
-    # enabled), which is the shape this actually wants: a bool per job kind,
-    # opaque to core, instead of one domain-named boolean that has to be taught
-    # to every producer as they appear. See the same TODO in
-    # airc_processors.config.
-    repro_only: bool = False
+    # Which job kinds this suite may hand over. The per-kind gate: every
+    # producer's enqueue funnels through one choke per component (airc's
+    # Handover.submit, the processor's _submit), so one list here is
+    # authoritative for all of them -- replacing repro_only, which had to be
+    # taught to each new producer as it appeared and even then covered only
+    # "fix" jobs (a perf or task job sailed through a config that promised
+    # repro-gathering). Defaults to repro alone, the one kind that cannot
+    # produce a CL; every kind that uploads, runs CQ, or spends Pinpoint is an
+    # explicit opt-in. Deliberately no wildcard: a future kind must be a
+    # decision in this list, not a default that appears when it is added. The
+    # vocabulary is the apps' (the coding suite: bugfix, repro, perf, task),
+    # validated by them -- core must not depend on a component package, so the
+    # strings stay opaque here. [] is the drain state; the components warn
+    # that enabled = false is the clearer switch for that.
+    kinds: list[str] = field(default_factory=lambda: ["repro"])
 
 
 @dataclass
@@ -601,6 +610,16 @@ def load_config(path: Path | None = None) -> Config:
     # hardcoded DATA_DIR fallback: a suite configured onto a non-default bus
     # must not have its handover publish to a bus nothing polls.
     h = raw.get("handover", {})
+    # repro_only was the one-domain-boolean version of the kinds allowlist. The
+    # generic strict check below would reject it too, but with a message that
+    # reads like a rename; say what the key becomes, so a prod config carrying
+    # it is a one-line fix at the deploy moment it fires.
+    if "repro_only" in h:
+        raise SystemExit(
+            "[handover] repro_only is gone: allowlist the kinds instead -- "
+            'kinds = ["repro"] is the old repro_only = true (with repro = '
+            "true); omit kinds to allow every kind"
+        )
     # [handover] is ONE table read by two components with different supersets of
     # it: the processor also honours `repro`, which core does not model. Strict
     # against core's fields alone would refuse a perfectly valid suite config at
@@ -608,13 +627,41 @@ def load_config(path: Path | None = None) -> Config:
     # rather than by importing the processor's dataclass -- core must not depend
     # on a component package (see airc_core's module docstring).
     reject_unknown_fields(h, HandoverConfig, "[handover]", aliases=["repro"])
+    # A bare string is iterable, so kinds = "repro" would become a
+    # per-character allowlist that matches no kind -- the same trap
+    # [airc.cl_review] spaces guards against, caught here once for both
+    # components that read this table.
+    kinds_raw = h.get("kinds")
+    if kinds_raw is not None and (
+        isinstance(kinds_raw, str) or not isinstance(kinds_raw, list)
+    ):
+        raise SystemExit(
+            '[handover] kinds must be a list, e.g. kinds = ["bugfix", "repro"]'
+        )
+    # The default is now just ["repro"] (the one kind that cannot produce a
+    # CL). Before kinds existed, an enabled section with no per-kind policy
+    # meant EVERY kind -- so accepting the omission silently would narrow a
+    # live deployment on upgrade: bugfix/perf/task jobs stopping with nothing
+    # in the log. Refuse instead, at the moment the decision matters, naming
+    # both resolutions. Disabled sections default silently: nothing runs, so
+    # the choice costs nothing until enabled is set -- and then this fires.
+    enabled = bool(h.get("enabled", False))
+    if kinds_raw is None and enabled:
+        raise SystemExit(
+            "[handover] enabled = true without kinds: state the allowlist. The"
+            ' default is just ["repro"]; every kind that can produce a CL'
+            " (bugfix, perf, task) is opt-in now. E.g."
+            ' kinds = ["bugfix", "repro", "perf", "task"] restores the'
+            ' pre-kinds behaviour, kinds = ["repro"] is the old'
+            " repro_only = true."
+        )
     cfg.handover = HandoverConfig(
-        enabled=bool(h.get("enabled", False)),
+        enabled=enabled,
         autonomy=h.get("autonomy", "draft-only"),
         bus_root=Path(h["bus_root"]).expanduser()
         if h.get("bus_root")
         else cfg.bus_root,
-        repro_only=bool(h.get("repro_only", False)),
+        kinds=[str(k) for k in kinds_raw] if kinds_raw is not None else ["repro"],
     )
     if "plugin_module" in own:
         cfg.plugin_module = str(own["plugin_module"])

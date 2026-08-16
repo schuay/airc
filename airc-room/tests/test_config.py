@@ -226,7 +226,7 @@ def test_known_sibling_sections_allowed(tmp_path):
         '[[watchers.repo]]\nname = "v8"\n'
         "[processors.review]\npasses = 2\n"
         '[icompleteu]\ncontrol_root = "/srv/ctl"\n'
-        "[handover]\nenabled = true\n"
+        '[handover]\nenabled = true\nkinds = ["repro"]\n'
     )
     cfg = load_config(_write(tmp_path, body))
     assert cfg.handover.enabled is True
@@ -268,7 +268,7 @@ def test_handover_bus_root_defaults_to_suite_bus_root(tmp_path):
     # Without an explicit [handover].bus_root the handover publishes to the
     # suite bus_root, where icompleteu polls -- not to a hardcoded DATA_DIR
     # fallback nothing reads.
-    body = 'bus_root = "/tmp/airc-bus"\n[handover]\nenabled = true\n'
+    body = 'bus_root = "/tmp/airc-bus"\n[handover]\nenabled = true\nkinds = ["repro"]\n'
     cfg = load_config(_write(tmp_path, body))
     assert str(cfg.handover.bus_root) == "/tmp/airc-bus"
     # And an explicit one still wins.
@@ -277,14 +277,45 @@ def test_handover_bus_root_defaults_to_suite_bus_root(tmp_path):
     assert str(cfg.handover.bus_root) == "/tmp/icu-bus"
 
 
-def test_handover_repro_only_round_trips(tmp_path):
-    # Core dropped this key silently, which left the app's second fix producer
-    # (the results consumer's fix-from-a-verified-repro) uploading CLs under a
-    # config that promised none. Core does not act on it -- it carries it, so
-    # every producer reads the same policy.
-    assert not load_config(_write(tmp_path, "[handover]\n")).handover.repro_only
-    body = "[handover]\nenabled = true\nrepro_only = true\n"
-    assert load_config(_write(tmp_path, body)).handover.repro_only
+def test_handover_kinds_round_trip(tmp_path):
+    # Unset stays at the repro-only default when the section is disabled --
+    # the one kind that cannot produce a CL, so enabling handover later
+    # without pinning a list is conservative by construction, and the parser
+    # makes that moment a decision (see the next test).
+    h = load_config(_write(tmp_path, "[handover]\n")).handover
+    assert h.enabled is False and h.kinds == ["repro"]
+    body = '[handover]\nenabled = true\nkinds = ["repro", "perf"]\n'
+    assert load_config(_write(tmp_path, body)).handover.kinds == ["repro", "perf"]
+    # The drain state parses; the components that read it do the warning.
+    assert (
+        load_config(_write(tmp_path, "[handover]\nkinds = []\n")).handover.kinds == []
+    )
+
+
+def test_handover_enabled_without_kinds_refuses_to_guess(tmp_path):
+    # Before kinds existed, enabled = true with no per-kind policy meant EVERY
+    # kind; the default is now repro only, so honouring the omission would
+    # silently stop a live deployment's bugfix/perf/task jobs on upgrade.
+    # Refuse at startup and name both resolutions -- the operator states the
+    # list once and the policy is explicit from then on.
+    with pytest.raises(SystemExit, match="without kinds"):
+        load_config(_write(tmp_path, "[handover]\nenabled = true\n"))
+
+
+def test_handover_repro_only_names_its_replacement(tmp_path):
+    # The strict check would reject the old key generically, with a message
+    # that reads like a rename; this says what the config becomes, so a prod
+    # file still carrying it is a one-line fix at the deploy moment it fires.
+    with pytest.raises(SystemExit, match="repro_only is gone"):
+        load_config(_write(tmp_path, "[handover]\nrepro_only = true\n"))
+
+
+def test_handover_kinds_must_be_a_list(tmp_path):
+    # A bare string iterates per character into an allowlist matching no kind;
+    # the same guard [airc.cl_review] spaces carries, caught here for both
+    # components that read this one table.
+    with pytest.raises(SystemExit, match="kinds must be a list"):
+        load_config(_write(tmp_path, '[handover]\nkinds = "repro"\n'))
 
 
 def test_core_default_tool_groups_are_empty():
