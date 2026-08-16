@@ -20,8 +20,10 @@ from .config import (
     DEFAULT_TOKEN_DB,
     DEFAULT_TOOL_GROUPS,
     CommonConfig,
+    HandoverFields,
     apply_gcp_env_defaults,
     load_common,
+    parse_handover_fields,
 )
 from .mcptools import MCPToolset
 from .model import (
@@ -47,6 +49,7 @@ __all__ = [
     "CommonConfig",
     "EmptyCandidateError",
     "GroundingReminderMiddleware",
+    "HandoverFields",
     "MCPToolset",
     "RequireStructuredResultMiddleware",
     "TimeBudgetMiddleware",
@@ -59,6 +62,7 @@ __all__ = [
     "load_common",
     "make_model",
     "missing_key",
+    "parse_handover_fields",
     "register_provider",
     "retrying",
     "slug",

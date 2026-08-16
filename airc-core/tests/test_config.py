@@ -14,6 +14,7 @@ from airc_core import (
     CommonConfig,
     apply_gcp_env_defaults,
     load_common,
+    parse_handover_fields,
 )
 
 
@@ -97,6 +98,34 @@ def test_common_config_is_constructible_directly():
     # Components may build one in tests without going through TOML.
     cfg = CommonConfig(bus_root=Path("/tmp/bus"))
     assert cfg.bus_root == Path("/tmp/bus")
+
+
+def test_handover_fields_parse_shared_shape():
+    fields = parse_handover_fields(
+        {
+            "enabled": True,
+            "autonomy": "upload-wip",
+            "bus_root": "~/bus",
+            "kinds": ["bugfix", "repro"],
+        }
+    )
+    assert fields.enabled is True
+    assert fields.autonomy == "upload-wip"
+    assert fields.bus_root == "~/bus"
+    assert fields.kinds == ["bugfix", "repro"]
+
+
+@pytest.mark.parametrize("old", ["repro", "repro_only"])
+def test_handover_fields_reject_old_keys_with_migration_help(old):
+    with pytest.raises(ValueError, match=f"{old} is gone"):
+        parse_handover_fields({old: True}, error=ValueError)
+
+
+def test_handover_fields_reject_ambiguous_or_missing_allowlists():
+    with pytest.raises(ValueError, match="must be a list"):
+        parse_handover_fields({"kinds": "repro"}, error=ValueError)
+    with pytest.raises(ValueError, match="without kinds"):
+        parse_handover_fields({"enabled": True}, error=ValueError)
 
 
 # ── [model_providers] ───────────────────────────────────────────────────────

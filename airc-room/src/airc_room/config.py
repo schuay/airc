@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomllib
-from airc_core import DEFAULT_TOOL_GROUPS, load_common
+from airc_core import DEFAULT_TOOL_GROUPS, load_common, parse_handover_fields
 from airc_core import apply_gcp_env_defaults as _apply_gcp_env
 from airc_core.config import reject_unknown, reject_unknown_fields
 from platformdirs import user_config_path, user_data_path
@@ -368,78 +368,6 @@ class HandoverConfig:
     # strings stay opaque here. [] is the drain state; the components warn
     # that enabled = false is the clearer switch for that.
     kinds: list[str] = field(default_factory=lambda: ["repro"])
-
-
-@dataclass(frozen=True)
-class HandoverFields:
-    """Raw [handover] fields after shared validation, before component-specific
-    path/default handling. Room resolves bus_root eagerly; processors keep None
-    to mean "the suite bus root", so the common code stops before constructing
-    either component's config object."""
-
-    enabled: bool
-    autonomy: str
-    bus_root: str | None
-    kinds: list[str]
-
-
-def parse_handover_fields(
-    h: dict, *, error: type[BaseException] = SystemExit
-) -> HandoverFields:
-    """Parse the shared [handover] table shape.
-
-    Core owns the table shape and migration errors, but not the vocabulary of
-    job kinds. Plugins/processors validate those strings against their protocol
-    enums after this shared parse.
-    """
-    # repro_only and repro were the two-key version of the kinds allowlist. The
-    # generic strict check below would reject them too, but with a message that
-    # reads like a rename; say what each key becomes, so a prod config carrying
-    # either is a one-line fix at the deploy moment it fires.
-    if "repro_only" in h:
-        raise error(
-            "[handover] repro_only is gone: allowlist the kinds instead -- "
-            'kinds = ["repro"] is the old repro_only = true'
-        )
-    if "repro" in h:
-        raise error(
-            "[handover] repro is gone: allowlisting the kind replaces it -- "
-            'kinds += "repro" is the old repro = true (a repro-suitable finding'
-            " then takes the verified-repro detour instead of a direct fix)"
-        )
-    reject_unknown_fields(h, HandoverConfig, "[handover]")
-    # A bare string is iterable, so kinds = "repro" would become a
-    # per-character allowlist that matches no kind -- the same trap
-    # [airc.cl_review] spaces guards against, caught here once for both
-    # components that read this table.
-    kinds_raw = h.get("kinds")
-    if kinds_raw is not None and (
-        isinstance(kinds_raw, str) or not isinstance(kinds_raw, list)
-    ):
-        raise error('[handover] kinds must be a list, e.g. kinds = ["bugfix", "repro"]')
-    # The default is now just ["repro"] (the one kind that cannot produce a
-    # CL). Before kinds existed, an enabled section with no per-kind policy
-    # meant EVERY kind -- so accepting the omission silently would narrow a
-    # live deployment on upgrade: bugfix/perf/task jobs stopping with nothing
-    # in the log. Refuse instead, at the moment the decision matters, naming
-    # both resolutions. Disabled sections default silently: nothing runs, so
-    # the choice costs nothing until enabled is set -- and then this fires.
-    enabled = bool(h.get("enabled", False))
-    if kinds_raw is None and enabled:
-        raise error(
-            "[handover] enabled = true without kinds: state the allowlist. The"
-            ' default is just ["repro"]; every kind that can produce a CL'
-            " (bugfix, perf, task) is opt-in now. E.g."
-            ' kinds = ["bugfix", "repro", "perf", "task"] restores the'
-            ' pre-kinds behaviour, kinds = ["repro"] is the old'
-            " repro_only = true."
-        )
-    return HandoverFields(
-        enabled=enabled,
-        autonomy=h.get("autonomy", "draft-only"),
-        bus_root=str(h["bus_root"]) if h.get("bus_root") else None,
-        kinds=[str(k) for k in kinds_raw] if kinds_raw is not None else ["repro"],
-    )
 
 
 @dataclass

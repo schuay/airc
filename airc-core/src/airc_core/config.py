@@ -49,6 +49,16 @@ DEFAULT_TOKEN_DB = DATA_DIR / "tokens.db"
 DEFAULT_TOOL_GROUPS: dict[str, list[str]] = {"read": [], "active": []}
 
 
+@dataclass(frozen=True)
+class HandoverFields:
+    """Shared [handover] fields before component-specific path handling."""
+
+    enabled: bool
+    autonomy: str
+    bus_root: str | None
+    kinds: list[str]
+
+
 def reject_unknown_fields(
     table: Mapping, spec: type, where: str, *, aliases: Iterable[str] = ()
 ) -> None:
@@ -101,6 +111,45 @@ def reject_unknown(
             f"unknown {where} key(s): {', '.join(sorted(unknown))}"
             f" (known: {', '.join(sorted(known))})"
         )
+
+
+def parse_handover_fields(
+    h: Mapping, *, error: type[BaseException] = SystemExit
+) -> HandoverFields:
+    """Parse the shared [handover] shape without owning its kind vocabulary."""
+    if "repro_only" in h:
+        raise error(
+            "[handover] repro_only is gone: allowlist the kinds instead -- "
+            'kinds = ["repro"] is the old repro_only = true'
+        )
+    if "repro" in h:
+        raise error(
+            "[handover] repro is gone: allowlisting the kind replaces it -- add"
+            ' "repro" to the kinds array (a repro-suitable finding then takes'
+            " the verified-repro detour instead of a direct fix)"
+        )
+    reject_unknown_fields(h, HandoverFields, "[handover]")
+    kinds_raw = h.get("kinds")
+    if kinds_raw is not None and (
+        isinstance(kinds_raw, str) or not isinstance(kinds_raw, list)
+    ):
+        raise error('[handover] kinds must be a list, e.g. kinds = ["bugfix", "repro"]')
+    enabled = bool(h.get("enabled", False))
+    if kinds_raw is None and enabled:
+        raise error(
+            "[handover] enabled = true without kinds: state the allowlist. The"
+            ' default is just ["repro"]; every kind that can produce a CL'
+            " (bugfix, perf, task) is opt-in now. E.g."
+            ' kinds = ["bugfix", "repro", "perf", "task"] restores the'
+            ' pre-kinds behaviour, kinds = ["repro"] is the old'
+            " repro_only = true."
+        )
+    return HandoverFields(
+        enabled=enabled,
+        autonomy=h.get("autonomy", "draft-only"),
+        bus_root=str(h["bus_root"]) if h.get("bus_root") else None,
+        kinds=[str(k) for k in kinds_raw] if kinds_raw is not None else ["repro"],
+    )
 
 
 @dataclass
