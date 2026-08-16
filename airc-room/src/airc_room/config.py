@@ -610,23 +610,22 @@ def load_config(path: Path | None = None) -> Config:
     # hardcoded DATA_DIR fallback: a suite configured onto a non-default bus
     # must not have its handover publish to a bus nothing polls.
     h = raw.get("handover", {})
-    # repro_only was the one-domain-boolean version of the kinds allowlist. The
-    # generic strict check below would reject it too, but with a message that
-    # reads like a rename; say what the key becomes, so a prod config carrying
-    # it is a one-line fix at the deploy moment it fires.
+    # repro_only and repro were the two-key version of the kinds allowlist. The
+    # generic strict check below would reject them too, but with a message that
+    # reads like a rename; say what each key becomes, so a prod config carrying
+    # either is a one-line fix at the deploy moment it fires.
     if "repro_only" in h:
         raise SystemExit(
             "[handover] repro_only is gone: allowlist the kinds instead -- "
-            'kinds = ["repro"] is the old repro_only = true (with repro = '
-            "true); omit kinds to allow every kind"
+            'kinds = ["repro"] is the old repro_only = true'
         )
-    # [handover] is ONE table read by two components with different supersets of
-    # it: the processor also honours `repro`, which core does not model. Strict
-    # against core's fields alone would refuse a perfectly valid suite config at
-    # room startup, so the known set is the union. Kept as an explicit extra
-    # rather than by importing the processor's dataclass -- core must not depend
-    # on a component package (see airc_core's module docstring).
-    reject_unknown_fields(h, HandoverConfig, "[handover]", aliases=["repro"])
+    if "repro" in h:
+        raise SystemExit(
+            "[handover] repro is gone: allowlisting the kind replaces it -- "
+            'kinds += "repro" is the old repro = true (a repro-suitable finding'
+            " then takes the verified-repro detour instead of a direct fix)"
+        )
+    reject_unknown_fields(h, HandoverConfig, "[handover]")
     # A bare string is iterable, so kinds = "repro" would become a
     # per-character allowlist that matches no kind -- the same trap
     # [airc.cl_review] spaces guards against, caught here once for both

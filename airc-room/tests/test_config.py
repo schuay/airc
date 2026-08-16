@@ -310,6 +310,15 @@ def test_handover_repro_only_names_its_replacement(tmp_path):
         load_config(_write(tmp_path, "[handover]\nrepro_only = true\n"))
 
 
+def test_handover_repro_names_its_replacement(tmp_path):
+    # Same treatment for the route switch the allowlist subsumed: repro = true
+    # is kinds += "repro" (which also routes repro-suitable findings through
+    # the verified-repro detour -- the one producer of repro jobs derives its
+    # route from the permission now).
+    with pytest.raises(SystemExit, match="repro is gone"):
+        load_config(_write(tmp_path, "[handover]\nrepro = true\n"))
+
+
 def test_handover_kinds_must_be_a_list(tmp_path):
     # A bare string iterates per character into an allowlist matching no kind;
     # the same guard [airc.cl_review] spaces carries, caught here for both
