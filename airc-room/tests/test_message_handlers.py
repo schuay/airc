@@ -99,7 +99,15 @@ async def test_a_passed_message_routes_as_it_always_did(tmp_path, monkeypatch):
         m = await room.post(t.id, "alice", MessageKind.HUMAN, "perf: what changed?")
         await until(lambda: len(replies(store, t.id)) == 1)
 
-    assert h.seen == [m.id]
+    # Not h.seen == [m.id]: the reply is a message too and reaches the chain on
+    # the same worker (the idempotency contract _consumed states), so whether it
+    # appears here is a race between routing it and the cancel above exiting the
+    # block -- under a loaded machine the worker wins, and the assertion must
+    # not bid on scheduling. Invariant either way: the chain saw m exactly once,
+    # saw it first (per-thread id order), and the turn only ran because the
+    # chain let it (PASS precedes routing).
+    assert h.seen[0] == m.id
+    assert h.seen.count(m.id) == 1
     assert runner.calls == [("perf", t.id)]
 
 
@@ -133,8 +141,12 @@ async def test_a_broken_handler_cannot_silence_the_room(tmp_path, monkeypatch):
         m = await room.post(t.id, "alice", MessageKind.HUMAN, "perf: go")
         await until(lambda: len(replies(store, t.id)) == 1)
 
-    assert boom.calls == 1
-    assert after.seen == [m.id]  # the chain continued past the raise
+    # boom may also run on the reply (same worker-loop placement as above), so
+    # its call count is not this test's subject; that m reached it and the
+    # chain continued past the raise is.
+    assert boom.calls >= 1
+    assert after.seen[0] == m.id  # the chain continued past the raise
+    assert after.seen.count(m.id) == 1
     assert runner.calls == [("perf", t.id)]
 
 
