@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS messages (
     -- "commit"): the orchestrator dispatches the response to the registered
     -- handler of this name and is otherwise domain-blind. "" = plain forced turn.
     -- Persisted so a restart's _recover replays the marker with the message.
-    follow_up TEXT NOT NULL DEFAULT ''
+    follow_up TEXT NOT NULL DEFAULT '',
+    -- Stable transport identity, separate from the human-readable sender.
+    sender_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id);
 CREATE TABLE IF NOT EXISTS agent_seen (
@@ -263,8 +265,10 @@ class Message:
     text: str
     ts: float
     # App-defined follow-up handler key (see the messages.follow_up schema note).
-    # Last field so Message(*row) positional construction matches the SELECT.
     follow_up: str = ""
+    # Stable transport identity; sender remains the human-readable display name.
+    # Optional/defaulted so callers constructing Message directly remain valid.
+    sender_id: str = ""
 
     def __post_init__(self) -> None:
         # One coercion point for every construction path (add_message, Message(*row)
@@ -350,6 +354,10 @@ class Store:
             self._db.execute(
                 "ALTER TABLE messages ADD COLUMN follow_up TEXT NOT NULL DEFAULT ''"
             )
+        if "sender_id" not in mcols:
+            self._db.execute(
+                "ALTER TABLE messages ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         self._db.close()
@@ -409,12 +417,14 @@ class Store:
         kind: MessageKind,
         text: str,
         follow_up: str = "",
+        sender_id: str = "",
     ) -> Message:
         now = time.time()
         cur = self._db.execute(
-            "INSERT INTO messages (thread_id, sender, kind, text, ts, follow_up)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (thread_id, sender, kind, text, now, follow_up),
+            "INSERT INTO messages"
+            " (thread_id, sender, kind, text, ts, follow_up, sender_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (thread_id, sender, kind, text, now, follow_up, sender_id),
         )
         self._db.commit()
         return Message(
@@ -425,11 +435,13 @@ class Store:
             text=text,
             ts=now,
             follow_up=follow_up,
+            sender_id=sender_id,
         )
 
     def thread_messages(self, thread_id: int) -> list[Message]:
         rows = self._db.execute(
-            "SELECT id, thread_id, sender, kind, text, ts, follow_up FROM messages"
+            "SELECT id, thread_id, sender, kind, text, ts, follow_up, sender_id"
+            " FROM messages"
             " WHERE thread_id = ? ORDER BY id",
             (thread_id,),
         ).fetchall()

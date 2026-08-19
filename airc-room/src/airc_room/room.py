@@ -161,6 +161,7 @@ class Room:
         text: str,
         follow_up: str = "",
         require_delivery: bool = False,
+        sender_id: str = "",
     ) -> Message:
         """Persist a message, enqueue for orchestration, deliver to transports.
 
@@ -183,7 +184,9 @@ class Room:
         transport failed; a partial failure is still a delivered message, and
         re-posting it would duplicate for the transports that worked.
         """
-        msg = self._store.add_message(thread_id, sender, kind, text, follow_up)
+        msg = self._store.add_message(
+            thread_id, sender, kind, text, follow_up, sender_id=sender_id
+        )
         self.inbox.put_nowait(msg)
         delivered = 0
         for t in self._transports:

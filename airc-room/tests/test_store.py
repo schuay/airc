@@ -24,6 +24,17 @@ def test_message_kind_coerces_and_round_trips(tmp_path):
     assert loaded.kind is MessageKind.EVENT  # coerced on read from the DB string
 
 
+def test_message_sender_identity_round_trips_separately_from_display(tmp_path):
+    s = make_store(tmp_path)
+    t = s.create_thread("x")
+    m = s.add_message(
+        t.id, "Alice", MessageKind.HUMAN, "hello", sender_id="gaia:stable"
+    )
+    assert (m.sender, m.sender_id) == ("Alice", "gaia:stable")
+    loaded = s.thread_messages(t.id)[0]
+    assert (loaded.sender, loaded.sender_id) == ("Alice", "gaia:stable")
+
+
 def test_chat_key_unique_stable_and_uuid_based(tmp_path):
     s = make_store(tmp_path)
     t1, t2 = s.create_thread("a"), s.create_thread("b")
