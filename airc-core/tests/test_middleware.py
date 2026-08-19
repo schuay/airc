@@ -10,6 +10,7 @@ context cache is the caller-appended growing-prefix overlay, gated to Vertex.
 
 import contextlib
 
+import pytest
 from airc_core.agent import (
     CallBudgetMiddleware,
     EmptyCandidateError,
@@ -30,6 +31,16 @@ _VERTEX = "google_vertexai:gemini-2.5-flash"
 
 def _names(middleware):
     return [type(m).__name__ for m in middleware]
+
+
+@pytest.fixture
+def middleware_with_summarizer(monkeypatch):
+    """Build the stack without asking a real provider for credentials."""
+    from langchain_core.language_models import GenericFakeChatModel
+
+    model = GenericFakeChatModel(messages=iter([]))
+    monkeypatch.setattr("airc_core.agent.make_model", lambda _model_id: model)
+    return base_middleware(_NON_VERTEX, "s", [], summarizer_model_id=_NON_VERTEX)
 
 
 # ── retrying() bare-model wrapper ────────────────────────────────────────────
@@ -356,7 +367,9 @@ async def test_the_nudge_is_not_reappended_on_an_empty_candidate_retry():
     agent._empty_retry.set(0)
 
 
-def test_summarization_added_only_with_a_summarizer_model():
+def test_summarization_added_only_with_a_summarizer_model(
+    middleware_with_summarizer,
+):
     # No summarizer -> no compaction middleware (unchanged stack).
     assert not any(
         isinstance(m, SummarizationMiddleware)
@@ -364,18 +377,20 @@ def test_summarization_added_only_with_a_summarizer_model():
     )
     # With one, it leads (a before_model state mutation, so the request shapers
     # and the growing cache see the already-compacted state).
-    mw = base_middleware(_NON_VERTEX, "s", [], summarizer_model_id=_NON_VERTEX)
+    mw = middleware_with_summarizer
     assert isinstance(mw[0], SummarizationMiddleware)
     assert type(mw[1]).__name__ == "_ContextBudget"  # still the outermost shaper
 
 
-def test_summarizer_reads_the_whole_block_not_langchains_4k_default():
+def test_summarizer_reads_the_whole_block_not_langchains_4k_default(
+    middleware_with_summarizer,
+):
     # langchain trims the to-summarize block to its last 4000 tokens by default,
     # which at our ~900k trigger would summarize almost none of what it drops. We
     # lift that cap so the summary actually covers the block.
     from airc_core.agent import _SUMMARY_TRIM_TOKENS
 
-    mw = base_middleware(_NON_VERTEX, "s", [], summarizer_model_id=_NON_VERTEX)
+    mw = middleware_with_summarizer
     summ = next(m for m in mw if isinstance(m, SummarizationMiddleware))
     assert summ.trim_tokens_to_summarize == _SUMMARY_TRIM_TOKENS
     assert summ.trim_tokens_to_summarize > 4000
@@ -386,7 +401,7 @@ def test_summarizer_reads_the_whole_block_not_langchains_4k_default():
     assert summ.trim_tokens_to_summarize < CONTEXT_WINDOW
 
 
-def test_keep_is_token_based_and_tuning_invariants_hold():
+def test_keep_is_token_based_and_tuning_invariants_hold(middleware_with_summarizer):
     # keep is a token budget, not a message count, so the verbatim tail is
     # predictable across chat and tool-heavy agents.
     from airc_core.agent import (
@@ -395,7 +410,7 @@ def test_keep_is_token_based_and_tuning_invariants_hold():
         _SUMMARY_TRIM_TOKENS,
     )
 
-    mw = base_middleware(_NON_VERTEX, "s", [], summarizer_model_id=_NON_VERTEX)
+    mw = middleware_with_summarizer
     summ = next(m for m in mw if isinstance(m, SummarizationMiddleware))
     assert summ.keep == ("tokens", _SUMMARY_KEEP_TOKENS)
     # No silent drop: the summarizer's cap covers the whole block (trigger - keep).
