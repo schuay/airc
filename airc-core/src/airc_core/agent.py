@@ -1046,7 +1046,7 @@ def _seed_vertex_cache_globals() -> str:
       - `_project`: avoids lazy normalization that triggers an otherwise-needless
         Cloud Resource Manager `projects.get` call.
     Credentials are deliberately NOT seeded. Under the sandbox proxy
-    (`AIRC_VERTEX_PROXY_ENDPOINT`) the box holds none: the cached-content client
+    (`AISAN_VERTEX_PROXY_ENDPOINT`) the box holds none: the cached-content client
     is a different stack from the chat client and insists on TLS, so it cannot
     use the plaintext loopback seam at all. The caller drives that path over REST
     instead; seeding here would only point a client we do not use at a credential

@@ -41,7 +41,7 @@ from langchain.chat_models import init_chat_model
 #
 # This has to live here rather than at the call sites: make_model's callers pass
 # no kwargs, and the endpoint must reach the ChatVertexAI constructor.
-_VERTEX_PROXY_ENV = "AIRC_VERTEX_PROXY_ENDPOINT"
+_VERTEX_PROXY_ENV = "AISAN_VERTEX_PROXY_ENDPOINT"
 
 
 def _proxy_kwargs(endpoint: str) -> dict:
