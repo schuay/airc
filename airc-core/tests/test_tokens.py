@@ -132,3 +132,24 @@ def test_readonly_db_disables_ledger_without_raising(tmp_path, caplog):
         assert "token ledger disabled" in caplog.text
     finally:
         os.chmod(db.parent, stat.S_IRWXU)  # let tmp_path cleanup remove it
+
+
+def test_runtime_write_failure_is_noncritical(tmp_path, caplog):
+    import logging
+
+    class BrokenConnection:
+        def execute(self, *args):
+            raise sqlite3.OperationalError("database is locked")
+
+        def close(self):
+            pass
+
+    tokens = TokenLog(tmp_path / "tokens.db")
+    tokens._db.close()
+    tokens._db = BrokenConnection()
+
+    with caplog.at_level(logging.WARNING, logger="airc_core.tokens"):
+        tokens.add(1, "triage", "structured-task", 100, 10)
+
+    assert tokens._db is None
+    assert "disabled after write failure" in caplog.text

@@ -18,6 +18,7 @@ airc dependency so airc-processors can log to it directly.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import time
@@ -134,25 +135,34 @@ class TokenLog:
     ) -> None:
         if self._db is None:
             return
-        self._db.execute(
-            "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
-            " output_tokens, cached_input_tokens, model, model_calls,"
-            " max_call_input_tokens)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                time.time(),
-                thread_id,
-                agent,
-                kind,
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-                model,
-                model_calls,
-                max_call_input_tokens,
-            ),
-        )
-        self._db.commit()
+        try:
+            self._db.execute(
+                "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
+                " output_tokens, cached_input_tokens, model, model_calls,"
+                " max_call_input_tokens)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    time.time(),
+                    thread_id,
+                    agent,
+                    kind,
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                    model,
+                    model_calls,
+                    max_call_input_tokens,
+                ),
+            )
+            self._db.commit()
+        except (sqlite3.Error, OSError) as e:
+            # Accounting is never part of the caller's result. In particular,
+            # this method commonly runs in a finally block, where raising would
+            # replace the model error or cancellation the caller is handling.
+            log.warning("token ledger disabled after write failure: %s", e)
+            with contextlib.suppress(sqlite3.Error):
+                self._db.close()
+            self._db = None
 
     def totals(self, since: float = 0.0) -> tuple[int, int]:
         if self._db is None:
