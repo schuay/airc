@@ -30,6 +30,27 @@ def test_orchestrator_defaults(tmp_path):
     assert cfg.orchestrator.max_responders == 2
 
 
+def test_room_tolerates_coding_project_pack_sections(tmp_path):
+    cfg = load_config(
+        _write(
+            tmp_path,
+            """
+            [prompt_pack]
+            repo = "/packs"
+            revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            cache_root = "/cache"
+            project = "chromium-blink"
+            workflows = ["bugfix"]
+
+            [projects.chromium-blink]
+            repo = "chromium"
+            checkout = "/chromium"
+            """,
+        )
+    )
+    assert cfg.plugin_config == {}
+
+
 def test_legacy_turn_budget_maps_to_soft(tmp_path):
     cfg = load_config(_write(tmp_path, "[airc.orchestrator]\nturn_budget = 5\n"))
     assert cfg.orchestrator.soft_turn_budget == 5

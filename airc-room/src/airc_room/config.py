@@ -98,6 +98,11 @@ _KNOWN_TOPLEVEL = frozenset(
         "watchers",
         "processors",
         "icompleteu",
+        # Project-pack policy is interpreted by the coding plugin and sibling
+        # coding daemons. Core tolerates it like their other suite sections but
+        # remains ignorant of its schema.
+        "prompt_pack",
+        "projects",
         # Sibling daemons' own sections. The suite shares ONE file, so every
         # component must tolerate the sections it does not own -- a component
         # added without its name here makes the room refuse to start on a
