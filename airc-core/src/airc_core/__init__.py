@@ -36,6 +36,7 @@ from .model import (
     supported_models_hint,
     usage_counts,
 )
+from .structured import StructuredTaskError, StructuredTaskRunner
 from .tokens import TokenLog
 
 __all__ = [
@@ -52,6 +53,8 @@ __all__ = [
     "HandoverFields",
     "MCPToolset",
     "RequireStructuredResultMiddleware",
+    "StructuredTaskError",
+    "StructuredTaskRunner",
     "TimeBudgetMiddleware",
     "TokenLog",
     "apply_gcp_env_defaults",
