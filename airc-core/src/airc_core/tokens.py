@@ -159,6 +159,23 @@ class TokenLog:
             # Accounting is never part of the caller's result. In particular,
             # this method commonly runs in a finally block, where raising would
             # replace the model error or cancellation the caller is handling.
+            #
+            # BUSY/LOCKED is the transient case, and in a suite where several
+            # components share one store it is the LIKELY case: another writer
+            # held the file for a moment. Disabling the ledger on it turned one
+            # collision into silent zero accounting until restart. Drop the one
+            # row (roll back so no transaction dangles) and keep the ledger;
+            # everything else -- a full disk, a corrupt or vanished file -- is
+            # structural, and retrying per call would log a warning per model
+            # call forever, so disable as before.
+            transient = isinstance(e, sqlite3.Error) and getattr(
+                e, "sqlite_errorcode", None
+            ) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            if transient:
+                log.warning("token ledger: dropped one entry (%s)", e)
+                with contextlib.suppress(sqlite3.Error):
+                    self._db.rollback()
+                return
             log.warning("token ledger disabled after write failure: %s", e)
             with contextlib.suppress(sqlite3.Error):
                 self._db.close()

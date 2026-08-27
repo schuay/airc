@@ -153,3 +153,35 @@ def test_runtime_write_failure_is_noncritical(tmp_path, caplog):
 
     assert tokens._db is None
     assert "disabled after write failure" in caplog.text
+
+
+def test_transient_busy_drops_the_row_and_keeps_the_ledger(tmp_path, caplog):
+    import logging
+
+    class BusyConnection:
+        rolled_back = False
+
+        def execute(self, *args):
+            e = sqlite3.OperationalError("database is locked")
+            e.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise e
+
+        def rollback(self):
+            self.rolled_back = True
+
+    tokens = TokenLog(tmp_path / "tokens.db")
+    real = tokens._db
+    busy = BusyConnection()
+    tokens._db = busy
+
+    with caplog.at_level(logging.WARNING, logger="airc_core.tokens"):
+        tokens.add(1, "triage", "structured-task", 100, 10)
+
+    # One collision costs one row, never the ledger: the connection stays,
+    # the failed write is rolled back, and the next write records normally.
+    assert tokens._db is busy
+    assert busy.rolled_back
+    assert "dropped one entry" in caplog.text
+    tokens._db = real
+    tokens.add(1, "triage", "structured-task", 5, 7)
+    assert tokens.totals() == (5, 7)
