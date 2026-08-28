@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     space TEXT NOT NULL,
     chat_thread TEXT NOT NULL,
     thread_id INTEGER NOT NULL,
+    -- Whether the linked chat thread lives in a DM rather than a shared space:
+    -- 1 DM, 0 space, NULL unknown. Written only by a transport that positively
+    -- knows (the inbound event is the one place DM-ness is visible), NULL
+    -- otherwise -- including every pre-migration row. Nullable on purpose:
+    -- retention grants the longer space window only on an explicit 0, so an
+    -- unknown can never over-retain DM content, only under-retain space
+    -- content (the compliant direction).
+    is_dm INTEGER,
     PRIMARY KEY (space, chat_thread)
 );
 CREATE TABLE IF NOT EXISTS chat_headlines (
@@ -358,6 +366,14 @@ class Store:
             self._db.execute(
                 "ALTER TABLE messages ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''"
             )
+        # chat_threads gained the DM/space distinction for per-class retention.
+        # Deliberately no backfill: existing rows stay NULL (unknown), which the
+        # pruner treats as not-a-space -- the direction that can only scrub
+        # early, never retain a DM past its window. Live DM links self-heal on
+        # the next inbound message (the transport re-links with is_dm set).
+        ccols = {r[1] for r in self._db.execute("PRAGMA table_info(chat_threads)")}
+        if "is_dm" not in ccols:
+            self._db.execute("ALTER TABLE chat_threads ADD COLUMN is_dm INTEGER")
 
     def close(self) -> None:
         self._db.close()
@@ -563,12 +579,27 @@ class Store:
         ).fetchone()
         return row[0] if row else None
 
-    def link_chat_thread(self, space: str, chat_thread: str, thread_id: int) -> None:
+    def link_chat_thread(
+        self,
+        space: str,
+        chat_thread: str,
+        thread_id: int,
+        is_dm: bool | None = None,
+    ) -> None:
+        """Map a transport-side chat thread to a room thread.
+
+        is_dm records whether the chat thread lives in a DM (retention keys on
+        it). None means the caller does not know -- outbound posts, transports
+        with no DM concept -- and COALESCE keeps whatever a knowing caller
+        already recorded, so a bot reply into a DM thread cannot erase the
+        inbound path's verdict.
+        """
         self._db.execute(
-            "INSERT INTO chat_threads (space, chat_thread, thread_id)"
-            " VALUES (?, ?, ?) ON CONFLICT(space, chat_thread)"
-            " DO UPDATE SET thread_id = excluded.thread_id",
-            (space, chat_thread, thread_id),
+            "INSERT INTO chat_threads (space, chat_thread, thread_id, is_dm)"
+            " VALUES (?, ?, ?, ?) ON CONFLICT(space, chat_thread)"
+            " DO UPDATE SET thread_id = excluded.thread_id,"
+            " is_dm = COALESCE(excluded.is_dm, is_dm)",
+            (space, chat_thread, thread_id, None if is_dm is None else int(is_dm)),
         )
         self._db.commit()
 

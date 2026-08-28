@@ -27,6 +27,7 @@ from airc_room.prune import (
     live_threads,
     parse_duration,
     redact_threads,
+    space_class_threads,
     vacuum,
 )
 from airc_room.room import Room
@@ -113,6 +114,128 @@ async def test_aged_thread_with_only_system_messages_is_not_swept(store):
     await room.post(t.id, "watcher", MessageKind.SYSTEM, "[v8] subject")
     _age(store, t.id, OLD)
     assert aged_threads(store._db, time.time() - 30 * 86400) == []
+
+
+# ── the two retention classes (space vs DM) ───────────────────────────────────
+#
+# The windows differ by an order of magnitude, so classification errors are not
+# symmetric: over-granting the space window retains DM content against policy,
+# under-granting merely scrubs a space thread early. Every test here checks the
+# rule fails in the safe direction.
+
+VERY_OLD = 600 * 86400  # comfortably past the 540d space window
+
+
+def _cutoffs():
+    now = time.time()
+    return now - 30 * 86400, now - 540 * 86400
+
+
+async def test_announced_thread_gets_the_space_window(store):
+    """A commit thread (SYSTEM message) is space content by construction --
+    announcements only ever post to spaces -- and outlives the DM window."""
+    t = store.create_thread("commit")
+    await _populate(store, t.id)
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert aged_threads(store._db, cutoff, space_cutoff) == []
+    _age(store, t.id, VERY_OLD)
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_space_linked_human_thread_gets_the_space_window(store):
+    """A human thread in a shared space (no announcement, but a link the
+    transport recorded as is_dm=0) is space content too."""
+    t = store.create_thread("t")
+    room = Room(store)
+    await room.post(t.id, "alice", MessageKind.HUMAN, "hi")
+    store.link_chat_thread("spaces/A", "spaces/A/threads/T", t.id, is_dm=False)
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert aged_threads(store._db, cutoff, space_cutoff) == []
+    _age(store, t.id, VERY_OLD)
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_dm_thread_swept_at_the_short_window(store):
+    t = store.create_thread("t")
+    room = Room(store)
+    await room.post(t.id, "alice", MessageKind.HUMAN, "hi")
+    store.link_chat_thread("spaces/DM", "spaces/DM/threads/T", t.id, is_dm=True)
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_dm_link_vetoes_an_announcement_signal(store):
+    """A stray SYSTEM message in a DM thread must not extend it to the space
+    window: the veto keeps over-retention impossible whatever else the thread
+    accumulated."""
+    t = store.create_thread("t")
+    await _populate(store, t.id)  # includes a SYSTEM message
+    store.link_chat_thread("spaces/DM", "spaces/DM/threads/T", t.id, is_dm=True)
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert t.id not in space_class_threads(store._db)
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_unknown_link_grants_nothing(store):
+    """A NULL is_dm link (pre-migration row, or a transport that never says)
+    stays in the short class -- the compliant direction for a DM whose link
+    predates the column."""
+    t = store.create_thread("t")
+    room = Room(store)
+    await room.post(t.id, "alice", MessageKind.HUMAN, "hi")
+    store.link_chat_thread("spaces/X", "spaces/X/threads/T", t.id)
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_unlinked_local_thread_stays_short(store):
+    """No chat presence at all (a local tool's thread): short window."""
+    t = store.create_thread("t")
+    room = Room(store)
+    await room.post(t.id, "cli", MessageKind.HUMAN, "hi")
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_classification_survives_a_store_without_is_dm(store):
+    """An older store's chat_threads has no is_dm column; links are then all
+    unknown and the classification must neither crash nor grant on them."""
+    t = store.create_thread("t")
+    room = Room(store)
+    await room.post(t.id, "alice", MessageKind.HUMAN, "hi")
+    store.link_chat_thread("spaces/A", "spaces/A/threads/T", t.id, is_dm=False)
+    # Rebuild chat_threads at the pre-is_dm shape, keeping the row.
+    store._db.execute("DROP TABLE chat_threads")
+    store._db.execute(
+        "CREATE TABLE chat_threads (space TEXT NOT NULL, chat_thread TEXT"
+        " NOT NULL, thread_id INTEGER NOT NULL, PRIMARY KEY (space, chat_thread))"
+    )
+    store._db.execute(
+        "INSERT INTO chat_threads VALUES ('spaces/A', 'spaces/A/threads/T', ?)",
+        (t.id,),
+    )
+    store._db.commit()
+    _age(store, t.id, OLD)
+    cutoff, space_cutoff = _cutoffs()
+    assert aged_threads(store._db, cutoff, space_cutoff) == [t.id]
+
+
+async def test_link_upsert_preserves_is_dm_on_unknowing_relink(store):
+    """An outbound post relinks (space, thread) without knowing DM-ness; that
+    must not erase the inbound path's verdict."""
+    t = store.create_thread("t")
+    store.link_chat_thread("spaces/DM", "spaces/DM/threads/T", t.id, is_dm=True)
+    store.link_chat_thread("spaces/DM", "spaces/DM/threads/T", t.id)  # outbound
+    row = store._db.execute(
+        "SELECT is_dm FROM chat_threads WHERE space = 'spaces/DM'"
+    ).fetchone()
+    assert row[0] == 1
 
 
 # ── what survives ─────────────────────────────────────────────────────────────

@@ -8,6 +8,15 @@ twice: verbatim in `messages.text` (airc.db) and again, per persona, inside the
 LangGraph checkpoint blobs (airc.ckpt.db, which is the bulk of the volume). A
 sweep that skips the checkpoints has not scrubbed anything.
 
+Two retention classes: content in shared SPACES keeps a long window (default
+18 months), content in DMs a short one (default 30 days). A thread earns the
+space window only on a positive signal -- it was watcher-announced (SYSTEM
+message, commit_threads, announcement_meta: announcements only ever post to
+spaces) or it is linked to a chat thread recorded as is_dm=0 -- and an is_dm=1
+link vetoes regardless. Everything else (unknown links, unlinked local threads)
+falls to the short window: misclassification can only scrub early, never
+retain DM content past its window.
+
 The shape is REDACT, not delete. Blanking text keeps the rows, and with them the
 five dedup keys that stop a real-world event being announced twice
 (`commit_threads`, `chat_threads`, `chat_seen_messages`, `handover_jobs`,
@@ -166,23 +175,78 @@ def existing_tables(db: sqlite3.Connection) -> set[str]:
     }
 
 
-def aged_threads(db: sqlite3.Connection, cutoff: float) -> list[int]:
-    """Thread ids created before the cutoff and not already fully scrubbed.
+def _has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
+    """Whether the table has the column. Needed for the same reason as
+    existing_tables: this tool never migrates, so a store written by an older
+    room can have chat_threads without is_dm, and an unguarded reference
+    aborts the sweep."""
+    return column in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
 
-    The second half is what keeps a weekly timer cheap and its report honest: a
-    thread whose non-SYSTEM messages are all blank has nothing left to redact, so
-    re-reporting it every week would make the counts meaningless. The floor row is
-    not the marker -- a thread can have one and still hold new messages posted
-    since -- so the check is on the content itself.
+
+def space_class_threads(db: sqlite3.Connection) -> set[int]:
+    """Thread ids entitled to the space retention window.
+
+    Positive signals only, because the two windows differ by an order of
+    magnitude and the failure directions are not symmetric: granting the space
+    window to a DM thread over-retains against policy, while denying it to a
+    space thread merely scrubs early. So a thread qualifies on evidence it is
+    space content -- it was announced (SYSTEM message, commit_threads,
+    announcement_meta: announcements only ever post to spaces), or a transport
+    recorded a link with is_dm=0 -- and any is_dm=1 link vetoes, so a stray
+    announcement signal on a DM thread cannot extend it. Unknown links (NULL:
+    pre-migration rows, transports that never say) grant nothing.
     """
+    have = existing_tables(db)
+    space = {
+        r[0]
+        for r in db.execute(
+            "SELECT DISTINCT thread_id FROM messages WHERE kind = ?",
+            (_RETAINED_KIND,),
+        )
+    }
+    for t in ("commit_threads", "announcement_meta"):
+        if t in have:
+            space |= {r[0] for r in db.execute(f"SELECT thread_id FROM {t}")}
+    if "chat_threads" in have and _has_column(db, "chat_threads", "is_dm"):
+        space |= {
+            r[0]
+            for r in db.execute("SELECT thread_id FROM chat_threads WHERE is_dm = 0")
+        }
+        space -= {
+            r[0]
+            for r in db.execute("SELECT thread_id FROM chat_threads WHERE is_dm = 1")
+        }
+    return space
+
+
+def aged_threads(
+    db: sqlite3.Connection, cutoff: float, space_cutoff: float | None = None
+) -> list[int]:
+    """Thread ids aged past their class window and not already fully scrubbed.
+
+    cutoff is the short (DM/default) window; space_cutoff, when given, is the
+    long window applied to space_class_threads. None means one window for
+    everything (the pre-split behavior, kept for callers that do not classify).
+
+    The content check is what keeps a weekly timer cheap and its report honest:
+    a thread whose non-SYSTEM messages are all blank has nothing left to redact,
+    so re-reporting it every week would make the counts meaningless. The floor
+    row is not the marker -- a thread can have one and still hold new messages
+    posted since -- so the check is on the content itself.
+    """
+    space = space_class_threads(db) if space_cutoff is not None else set()
     rows = db.execute(
-        "SELECT t.id FROM threads t WHERE t.created < ?"
-        " AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id"
+        "SELECT t.id, t.created FROM threads t"
+        " WHERE EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id"
         "   AND m.kind != ? AND (m.text != '' OR m.sender != ''))"
         " ORDER BY t.id",
-        (cutoff, _RETAINED_KIND),
+        (_RETAINED_KIND,),
     ).fetchall()
-    return [r[0] for r in rows]
+    return [
+        tid
+        for tid, created in rows
+        if created < (space_cutoff if tid in space else cutoff)
+    ]
 
 
 def live_threads(db: sqlite3.Connection, control_root: Path | None) -> set[int]:
@@ -435,6 +499,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="retention window: <n>h, <n>d or <n>w (default 30d)",
     )
     p.add_argument(
+        "--space-older-than",
+        type=parse_duration,
+        default=parse_duration("540d"),
+        metavar="DURATION",
+        # Defaulted long rather than to --older-than: the asymmetric footgun is
+        # a hand-run without the flag wiping space threads 17 months early
+        # (irreversible), not a deploy without the split retaining them (idle
+        # bytes). A single-window sweep is --space-older-than equal to
+        # --older-than, stated explicitly.
+        help="retention window for space-class threads (default 540d, ~18 months)",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would be swept, change nothing",
@@ -464,20 +540,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no store at {db_path}", file=sys.stderr)
         return 1
 
-    cutoff = time.time() - args.older_than
+    now = time.time()
+    cutoff = now - args.older_than
+    space_cutoff = now - args.space_older_than
     db = _connect(db_path)
     try:
-        aged = aged_threads(db, cutoff)
+        aged = aged_threads(db, cutoff, space_cutoff)
         live = live_threads(db, _control_root(args.config))
         targets = [t for t in aged if t not in live]
         skipped = len(aged) - len(targets)
+        n_space = len(set(targets) & space_class_threads(db))
 
         days = args.older_than / 86400
+        space_days = args.space_older_than / 86400
         print(f"store:      {db_path}")
         print(f"checkpoints:{ckpt_path}")
-        print(f"window:     {days:.1f} day(s) (threads created before this age)")
         print(
-            f"threads:    {len(targets)} to sweep, {skipped} skipped (work in flight)"
+            f"window:     {days:.1f} day(s) DM/default, {space_days:.0f} day(s) space"
+        )
+        print(
+            f"threads:    {len(targets)} to sweep"
+            f" ({n_space} space-class, {len(targets) - n_space} dm/default),"
+            f" {skipped} skipped (work in flight)"
         )
         if not targets:
             print("nothing to do")
@@ -540,7 +624,8 @@ def main(argv: list[str] | None = None) -> int:
                     "prune",
                     time.time(),
                     (
-                        f"swept {counts.summary()} (window {days:.0f}d,"
+                        f"swept {counts.summary()}"
+                        f" (window {days:.0f}d/{space_days:.0f}d,"
                         f" threads {_compact_ids(targets)})"
                     ),
                 ),
