@@ -97,7 +97,8 @@ def _print_models(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
     apply_gcp_env_defaults(cfg)
     personas = discover_personas(
-        _resolve_agents_dir(args, _load_plugin(cfg)), use_nicknames=cfg.use_nicknames
+        _resolve_agents_dir(args, _load_plugin(cfg), cfg),
+        use_nicknames=cfg.use_nicknames,
     )
     seen: set[str] = set()
     for mid in _configured_model_ids(cfg, personas).values():
@@ -281,22 +282,43 @@ def _plugin_config_template(module_name: str | None) -> str | None:
     return template()
 
 
-def _resolve_agents_dir(args: argparse.Namespace, plugin) -> Path:
+def _resolve_agents_dir(args: argparse.Namespace, plugin, cfg=None) -> Path:
     """Where personas load from. Precedence: an explicit --agents-dir; then a
     ./agents in the service cwd (the dev/console path); then the plugin's own
-    packaged personas (personas_dir(), so an app ships its agents/ with the
-    package); then ~/.config/airc/agents. Letting the plugin contribute its
+    personas (personas_dir(), so an app supplies its agents/ without staging
+    them here); then ~/.config/airc/agents. Letting the plugin contribute its
     directory is what frees an out-of-tree app from staging personas into the
-    process cwd."""
+    process cwd.
+
+    `cfg` is passed to the hook when it takes one, by the same signature
+    inspection _call_local_tools uses and for the same compatibility reason. A
+    plugin whose personas come from a configured source rather than from its own
+    package -- the coding app resolves them out of a pinned project pack -- has
+    no other way to reach the config: this runs before any plugin config is
+    parsed, because personas have to exist before anything else is built."""
     if args.agents_dir:
         return args.agents_dir
     local = Path.cwd() / "agents"
     if local.is_dir():
         return local
-    personas_dir = getattr(plugin, "personas_dir", None) if plugin else None
-    if personas_dir and (d := personas_dir()) is not None:
+    hook = getattr(plugin, "personas_dir", None) if plugin else None
+    if hook and (d := _call_personas_dir(hook, cfg)) is not None:
         return d
     return CONFIG_DIR / "agents"
+
+
+def _call_personas_dir(hook, cfg):
+    """Call personas_dir with cfg only if it takes one; see _call_local_tools."""
+    if cfg is None:
+        return hook()
+    try:
+        params = inspect.signature(hook).parameters.values()
+    except (TypeError, ValueError):
+        return hook()
+    takes_cfg = any(
+        p.name == "cfg" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params
+    )
+    return hook(cfg=cfg) if takes_cfg else hook()
 
 
 def _call_local_tools(plugin, cfg, room) -> dict:
@@ -463,7 +485,7 @@ async def amain(args: argparse.Namespace) -> None:
     # Load the plugin first: it may contribute the personas directory, so agents
     # resolution has to know it before discovering personas.
     plugin = _load_plugin(cfg)
-    agents_dir = _resolve_agents_dir(args, plugin)
+    agents_dir = _resolve_agents_dir(args, plugin, cfg)
     personas = discover_personas(agents_dir, use_nicknames=cfg.use_nicknames)
     room_prompt = load_room_prompt(agents_dir)
     log.info("personas from %s: %s", agents_dir, ", ".join(personas))

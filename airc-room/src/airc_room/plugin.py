@@ -27,9 +27,11 @@ Optional (duck-typed; absent means the room's default behavior):
 - default_transport_kind() -> str | None  -- the transport a headless deploy
   binds when config names none (the coding app returns "gchat"). Core names no
   transport itself; this is how a plugin, not core, owns that default.
-- personas_dir() -> Path | None  -- the packaged `agents/` directory this plugin
-  ships, so its personas travel with the package instead of relying on the
-  service cwd.
+- personas_dir(cfg=...) -> Path | None  -- the `agents/` directory this plugin
+  supplies, so its personas travel with it instead of relying on the service
+  cwd. Takes the loaded Config when it declares the parameter (a compatible
+  addition, dispatched by signature like build_local_tools' `room`), for a
+  plugin whose personas come from a configured source rather than its package.
 - parse_config(cfg) -> object  -- validate and type the plugin's own [airc]
   sub-table (carried on cfg.plugin_config), returning the config object its
   subscribers read. Owning this is what lets core delete the domain config fields.
@@ -120,7 +122,7 @@ class Plugin(Protocol):
     # aux_services is deliberately absent: it lives on the Transport, not here.
     def default_transport_kind(self) -> str | None: ...
 
-    def personas_dir(self) -> Path | None: ...
+    def personas_dir(self, cfg=None) -> Path | None: ...
 
     def parse_config(self, cfg): ...
 

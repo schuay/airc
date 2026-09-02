@@ -405,6 +405,13 @@ class Config:
     # overlay (e.g. airc_coding.config.parse_config) reads its sections out of
     # this dict and owns their validation. Empty when [airc] has no plugin keys.
     plugin_config: dict = field(default_factory=dict)
+    # The whole parsed file, as read. Carried because a plugin may own TOP-LEVEL
+    # sections core does not model -- the coding app resolves its project pack
+    # from [prompt_pack] and [projects], which are shared across the suite's
+    # daemons and so cannot live under [airc]. plugin_config answers the same
+    # need for keys inside [airc]; this answers it for the ones outside. Core
+    # itself never reads this: it is the plugin's window onto its own sections.
+    raw: dict = field(default_factory=dict)
     # Parsed [matrix] config when [transport] kind = "matrix", else None. Unlike
     # gchat (a plugin transport whose config core passes through as opaque
     # plugin_config), Matrix is a core transport, so core models its config as a
@@ -662,6 +669,7 @@ def load_config(path: Path | None = None) -> Config:
             " a bare room ignores them. set [airc] plugin_module to parse them",
             ", ".join(sorted(cfg.plugin_config)),
         )
+    cfg.raw = raw
     return cfg
 
 
