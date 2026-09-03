@@ -1777,12 +1777,45 @@ class _GrowingPrefixCache(AgentMiddleware):
                         request.override(model=st.model, messages=tail)
                     )
                 except Exception as e:
-                    if not _is_cache_gone(e, st.name):
+                    if _is_cache_gone(e, st.name):
+                        # Vanished/expired; uncached this call, rebuild next.
+                        log.info("growing cache gone (%s); uncached this call", st.name)
+                        self._states[key] = _PrefixState(seen_len=len(messages))
+                        return await handler(request)
+                    if _is_transient(e):
                         raise
-                    # Vanished/expired; uncached this call, rebuild next.
-                    log.info("growing cache gone (%s); uncached this call", st.name)
+                    # A permanent error that may be the cached prefix rather than
+                    # the request. A model can reject a cached prefix on its shape
+                    # alone, in wording that names neither the cache nor its id
+                    # ("Requests ending with a model turn are not supported"), and
+                    # the tail cannot be what it describes -- a model call is only
+                    # ever made with a human or tool turn last. Wording therefore
+                    # cannot separate the two, so decide it by experiment: resend
+                    # once without the cache. Succeeding proves the prefix was at
+                    # fault (drop it, back off, and let the turn continue uncached
+                    # rather than die); failing proves the request was, and the
+                    # original error stands. Gated to permanent errors because a
+                    # transient one is the retry middleware's to handle, and a
+                    # full uncached resend is the wrong answer to an overload.
+                    try:
+                        resp = await handler(request)
+                    except Exception:
+                        # from None: the probe re-raises the same error the
+                        # cached call already reported, and chaining it would
+                        # bury the original under a duplicate.
+                        raise e from None
+                    log.warning(
+                        "growing cache %s rejected at serve time; dropped,"
+                        " uncached ~%ds: %s",
+                        st.name,
+                        _CACHE_FAIL_COOLDOWN_S,
+                        _short_error(e),
+                    )
+                    self._cooldown_until = time.monotonic() + _CACHE_FAIL_COOLDOWN_S
+                    rejected = st.name
                     self._states[key] = _PrefixState(seen_len=len(messages))
-                    return await handler(request)
+                    await self._delete_quietly(rejected)
+                    return resp
                 # Replace the prefix-size estimate with the provider's exact count
                 # so the window guard cannot under-count a token-dense prefix and
                 # let the un-sheddable cache overflow on a later, larger tail.

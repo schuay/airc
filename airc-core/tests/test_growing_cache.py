@@ -9,6 +9,7 @@ real create_agent graph end to end. tools_tokens is set above the 4096 floor so
 caching engages without padding the message content.
 """
 
+import pytest
 from airc_core.agent import (
     _GrowingPrefixCache,
     _is_cache_gone,
@@ -667,3 +668,80 @@ async def test_genai_cache_create_builds_config_and_returns_full_name(monkeypatc
     # path under the configured project NAME, which is what the sandbox
     # proxy's allowlist is anchored to.
     assert captured["deleted"] == "42"
+
+
+# ── serve-time cache rejection ───────────────────────────────────────────────
+
+
+async def _serve_then(mw, msgs, cached_exc, uncached_exc=None):
+    """Drive one cached call whose cached attempt raises `cached_exc`, recording
+    whether the uncached resend happened and what it was sent."""
+    seen = {"cached": 0, "uncached": 0, "messages": None}
+
+    async def handler(r):
+        if r.model != "BASE":  # the cache-bound model
+            seen["cached"] += 1
+            raise cached_exc
+        seen["uncached"] += 1
+        seen["messages"] = r.messages
+        if uncached_exc is not None:
+            raise uncached_exc
+        return "ok"
+
+    return seen, await mw.awrap_model_call(_Req(msgs), handler)
+
+
+async def test_serve_time_rejection_falls_back_and_drops_the_cache():
+    # A model rejecting the cached prefix on its shape says nothing about the
+    # cache: the turn must continue uncached instead of dying.
+    mw, state = _mw()
+    await mw.awrap_model_call(_Req(_history(0)), _noop)  # cache gen c1
+    msgs = _fat_history(4)
+    rejection = ValueError("INVALID_ARGUMENT: Requests ending with a model turn")
+    seen, resp = await _serve_then(mw, msgs, rejection)
+
+    assert (seen["cached"], seen["uncached"]) == (1, 1)
+    assert seen["messages"] == msgs  # resent whole, not as a tail
+    assert resp == "ok"
+    assert state["created"][-1][0] in state["deleted"]  # rejected gen deleted
+    assert mw._states[_Req(msgs).runtime.execution_info.thread_id].name is None
+    # Backed off, so the next call does not immediately rebuild the same shape.
+    assert mw._cooldown_until > 0
+
+
+async def test_serve_time_rejection_surfaces_a_genuine_request_error():
+    # The uncached resend failing too proves the request was at fault, not the
+    # prefix: the original error stands and the cache is kept.
+    mw, state = _mw()
+    await mw.awrap_model_call(_Req(_history(0)), _noop)
+    msgs = _fat_history(4)
+    original = ValueError("400 missing a thought signature")
+    seen, exc = None, None
+    try:
+        seen, _ = await _serve_then(mw, msgs, original, uncached_exc=RuntimeError("x"))
+    except Exception as e:
+        exc = e
+    assert exc is original
+    assert seen is None
+    assert state["deleted"] == ["c1"]  # only the supersession, no rejection drop
+
+
+async def test_transient_error_on_a_cached_call_is_not_probed_uncached():
+    # An overload is the retry middleware's to handle; resending the whole
+    # prompt uncached is the wrong answer to it.
+    mw, _ = _mw()
+    await mw.awrap_model_call(_Req(_history(0)), _noop)
+    msgs = _fat_history(4)
+    overload = type("Overloaded", (Exception,), {"code": 503})("503 unavailable")
+    seen = {"uncached": 0}
+
+    async def handler(r):
+        if r.model == "BASE":
+            seen["uncached"] += 1
+            return "ok"
+        raise overload
+
+    with pytest.raises(Exception) as ei:
+        await mw.awrap_model_call(_Req(msgs), handler)
+    assert ei.value is overload
+    assert seen["uncached"] == 0
