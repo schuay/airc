@@ -55,6 +55,47 @@ def test_retry_noise_filter_condenses_prefill_dump():
     assert len(out) < 60  # the dump is gone
 
 
+def test_tool_first_guard_converts_a_tool_opening_history():
+    # The growing cache's tail opens on the tool response(s) answering a cached
+    # function call; without the guard the converter raises IndexError on that
+    # shape (langchain-google issue #392).
+    from airc_core.model import _install_vertex_tool_first_guard
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_google_vertexai import chat_models as cm
+    from langchain_google_vertexai._image_utils import ImageBytesLoader
+
+    _install_vertex_tool_first_guard()
+    guarded = cm._parse_chat_history_gemini
+    _install_vertex_tool_first_guard()
+    assert cm._parse_chat_history_gemini is guarded  # no double wrap
+
+    tail = [
+        ToolMessage("int main()", tool_call_id="c1", name="look"),
+        ToolMessage("42", tool_call_id="c2", name="count"),
+        AIMessage("both read"),
+    ]
+    system, contents = cm._parse_chat_history_gemini(tail, ImageBytesLoader())
+    assert system is None
+    assert [c.role for c in contents] == ["user", "model"]
+    # Parallel responses merge into one user content; the sentinel is stripped.
+    assert [p.function_response.name for p in contents[0].parts] == ["look", "count"]
+    assert all(not p.text for p in contents[0].parts)
+
+
+def test_tool_first_guard_leaves_normal_histories_alone():
+    from airc_core.model import _install_vertex_tool_first_guard
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_google_vertexai import chat_models as cm
+    from langchain_google_vertexai._image_utils import ImageBytesLoader
+
+    _install_vertex_tool_first_guard()
+    _, contents = cm._parse_chat_history_gemini(
+        [HumanMessage("hi"), AIMessage("yo")], ImageBytesLoader()
+    )
+    assert [c.role for c in contents] == ["user", "model"]
+    assert contents[0].parts[0].text == "hi"
+
+
 def test_retry_noise_filter_passes_unrelated_records():
     from airc_core.model import _RetryNoiseFilter
 

@@ -401,6 +401,46 @@ def _silence_vertex_noise() -> None:
     logging.getLogger("langchain_google_vertexai._retry").addFilter(_RETRY_NOISE)
 
 
+def _install_vertex_tool_first_guard() -> None:
+    """Make a request that opens on a tool response convertible.
+
+    The growing prefix cache cuts the cached prefix after the model's function
+    call (gemini-3.8-flash rejects a prefix ending on the function response),
+    so the uncached tail begins with a ToolMessage. langchain's history
+    converter crashes on exactly that shape -- an unguarded vertex_messages[-1]
+    in its ToolMessage branch -- although the API accepts it. Known upstream
+    since 2024 with the one-line fix spelled out, never landed:
+    https://github.com/langchain-ai/langchain-google/issues/392
+
+    Prepending a sentinel user turn routes the tool response through the
+    converter's existing merge-into-previous-user-content path; stripping the
+    sentinel part afterwards leaves exactly what the upstream fix would
+    produce.
+
+    TODO: retire by migrating off langchain-google-vertexai (ChatVertexAI is
+    deprecated upstream) to google-genai -- after verifying its converter
+    against this shape: today it silently DROPS a ToolMessage whose calling
+    AIMessage is absent from the history.
+    """
+    from langchain_core.messages import HumanMessage, ToolMessage
+    from langchain_google_vertexai import chat_models as cm
+
+    orig = cm._parse_chat_history_gemini
+    if getattr(orig, "_airc_tool_first_guard", False):
+        return
+
+    def guarded(history, *args, **kwargs):
+        if not (history and isinstance(history[0], ToolMessage)):
+            return orig(history, *args, **kwargs)
+        system, contents = orig([HumanMessage("-"), *history], *args, **kwargs)
+        first = contents[0]
+        rebuilt = cm.Content(role=first.role, parts=list(first.parts)[1:])
+        return system, [rebuilt, *contents[1:]]
+
+    guarded._airc_tool_first_guard = True
+    cm._parse_chat_history_gemini = guarded
+
+
 def make_model(model_id: str, **kwargs):
     if problem := check_model_id(model_id):
         raise ValueError(f"{problem}; {supported_models_hint()}")
@@ -439,8 +479,9 @@ def make_model(model_id: str, **kwargs):
     if model_id.startswith("google_vertexai:"):
         # Construction is the universal Vertex chokepoint (every agent/review
         # graph builds its model here), so silence the benign call-time warnings
-        # once, for every component, cached or not.
+        # and install the tool-first converter guard once, for every component.
         _silence_vertex_noise()
+        _install_vertex_tool_first_guard()
         # In the sandbox the box holds no credential at all: point the client at
         # the loopback proxy, which attaches the real one host-side. Gated on the
         # env var (only the sandbox profile sets it), so every other caller keeps

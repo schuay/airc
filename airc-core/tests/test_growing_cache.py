@@ -127,8 +127,17 @@ def test_is_cache_gone_matches_known_id_regardless_of_wording():
 def test_last_step_boundary():
     assert _last_step_boundary([HumanMessage("x")]) == 0
     h = _history(3)
-    assert _last_step_boundary(h) == 5
-    assert isinstance(h[5], AIMessage) and isinstance(h[4], ToolMessage)
+    # The prefix ends on the last AIMessage holding a function call; its tool
+    # response opens the tail.
+    assert _last_step_boundary(h) == 6
+    assert isinstance(h[5], AIMessage) and isinstance(h[6], ToolMessage)
+    # Conversational rest-point: plain user text is a valid prefix ending.
+    conv = [HumanMessage("q"), AIMessage("a"), HumanMessage("q2"), AIMessage("a2")]
+    assert _last_step_boundary(conv) == 3
+    # A human turn right after a tool response merges with it on the wire, so
+    # it is no rest-point; fall back to the function-call ending.
+    merged = [*_history(1), HumanMessage("go on"), AIMessage("a")]
+    assert _last_step_boundary(merged) == 2
 
 
 # ── boundary growth ──────────────────────────────────────────────────────────
@@ -148,12 +157,13 @@ async def test_grows_to_a_step_boundary_and_sends_only_the_tail():
     await mw.awrap_model_call(_Req(_history(0)), _noop)  # cache gen c1 (boundary 0)
     msgs = _fat_history(4)  # tail large enough to repay a re-cache
     seen = await _run(mw, _Req(msgs))
-    boundary = _last_step_boundary(msgs)  # 7
+    boundary = _last_step_boundary(msgs)  # 8
     assert state["created"][-1] == ("c2", boundary + 1)  # [system]+prefix
     assert state["deleted"] == ["c1"]  # superseded gen deleted
     assert seen["model"] == "M:c2"
     assert seen["messages"] == msgs[boundary:]
-    assert isinstance(seen["messages"][0], AIMessage)  # tail starts on a model turn
+    # The tail opens on the tool response answering the cached function call.
+    assert isinstance(seen["messages"][0], ToolMessage)
 
 
 # ── re-cache payback ─────────────────────────────────────────────────────────

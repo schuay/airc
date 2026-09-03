@@ -1287,16 +1287,24 @@ def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: 
 
 
 def _last_step_boundary(messages: list) -> int:
-    """Largest index b where messages[b] begins a completed ReAct step: an
-    AIMessage preceded by a tool response or the initial human turn. Caching
-    messages[:b] leaves a tail [ai, tool, ...] that starts on a model turn (a
-    request may not begin with a tool response). 0 before any model turn (then
-    the prefix is just [system], i.e. the system+tools cache)."""
-    for i in range(len(messages) - 1, 0, -1):
-        if isinstance(messages[i], AIMessage) and isinstance(
-            messages[i - 1], (ToolMessage, HumanMessage)
+    """Largest slice point p where caching messages[:p] ends the prefix on a
+    wire shape every model accepts: an AIMessage holding a function call (its
+    ToolMessage then opens the tail, which the tool-first guard in model.py
+    makes sendable) or plain user text. Never on a ToolMessage: some models
+    (gemini-3.8-flash) reject a cached prefix ending on a function response,
+    reporting it as "ending with a model turn". A HumanMessage directly after
+    a ToolMessage is no rest-point either -- consecutive user-role contents
+    merge into one on the wire, so that prefix would still end on the function
+    response. 0 when no point qualifies (then the prefix is just [system],
+    i.e. the system+tools cache)."""
+    for p in range(len(messages) - 1, 0, -1):
+        prev = messages[p - 1]
+        if isinstance(prev, AIMessage) and isinstance(messages[p], ToolMessage):
+            return p
+        if isinstance(prev, HumanMessage) and (
+            p < 2 or not isinstance(messages[p - 2], ToolMessage)
         ):
-            return i
+            return p
     return 0
 
 
@@ -1449,9 +1457,10 @@ class _GrowingPrefixCache(AgentMiddleware):
     - A short turn caches [system] (boundary 0) -- the system+tools cache,
       available from the first call, sending the full history as the tail.
     - A long tool-using turn or a long conversation grows the cached prefix as
-      history accrues, re-caching at ReAct step rest-points so the tail always
-      starts on a model turn (a request may not begin with a tool response).
-      When to grow is a cost decision, not a fixed interval -- see _recache_pays.
+      history accrues, re-caching at rest-points where the prefix ends on a
+      shape every model accepts (see _last_step_boundary); the tail then opens
+      on the tool response answering the cached function call. When to grow is
+      a cost decision, not a fixed interval -- see _recache_pays.
 
     State is per conversation, keyed by thread id, because the persona graph (and
     this middleware) is shared across all of a persona's threads. No locks: the
