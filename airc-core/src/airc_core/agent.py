@@ -48,7 +48,7 @@ from langchain_core.messages.utils import get_buffer_string
 from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.constants import TAG_NOSTREAM
 
-from .model import _VERTEX_PROXY_ENV, make_model
+from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
 
 log = logging.getLogger(__name__)
 
@@ -1386,6 +1386,64 @@ async def _cache_delete_rest(endpoint: str, name: str) -> None:
         r.raise_for_status()
 
 
+def _genai_client():
+    """google-genai client mirroring ChatGoogleGenerativeAI's backend choice:
+    a set GOOGLE_CLOUD_PROJECT selects Vertex over ADC (prod), else the
+    Developer API via GOOGLE_API_KEY -- the local-verification path, running
+    the identical client code against the other backend. The sandbox proxy
+    rides base_url and is UNVERIFIED on this stack (see
+    model._make_genai_vertex)."""
+    from google import genai
+    from google.genai import types
+
+    http_options = None
+    if endpoint := os.environ.get(_VERTEX_PROXY_ENV):
+        http_options = types.HttpOptions(base_url=endpoint)
+    if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        return genai.Client(
+            vertexai=True,
+            project=proj,
+            location=os.environ.get("GOOGLE_CLOUD_LOCATION") or "global",
+            http_options=http_options,
+        )
+    return genai.Client(http_options=http_options)
+
+
+async def _genai_cache_create(model_id, prefix, tools, ttl_minutes) -> str:
+    """Create cached content through the google-genai SDK.
+
+    Much less machinery than the vertexai path: the langchain-google-genai
+    converter emits google.genai types directly (no proto hand-assembly, no
+    aiplatform initializer globals to seed) and the client is natively async.
+    Returns the FULL resource name: ChatGoogleGenerativeAI passes
+    cached_content through verbatim, so the bare-id dance _cache_create_rest
+    documents does not apply here.
+    """
+    from google.genai import types
+    from langchain_google_genai import chat_models as cm
+    from langchain_google_genai._function_utils import (
+        _format_to_genai_function_declaration,
+    )
+
+    name = model_id.split(":", 1)[1]
+    system, contents = cm._parse_chat_history(prefix, model=name)
+    decls = [_format_to_genai_function_declaration(t) for t in tools]
+    cache = await _genai_client().aio.caches.create(
+        model=name,
+        config=types.CreateCachedContentConfig(
+            system_instruction=system,
+            contents=contents or None,
+            tools=[types.Tool(function_declarations=decls)] if decls else None,
+            ttl=f"{ttl_minutes * 60}s",
+        ),
+    )
+    return cache.name
+
+
+async def _genai_cache_delete(name: str) -> None:
+    await _genai_client().aio.caches.delete(name=name)
+
+
 def _growing_cache_fns(model_id, tools, ttl_minutes):
     """Return (create, delete, model_for, tools_tokens) for the growing-prefix
     cache.
@@ -1406,6 +1464,8 @@ def _growing_cache_fns(model_id, tools, ttl_minutes):
     tools_tokens = sum(len(json.dumps(t)) for t in oai_tools) // _CHARS_PER_TOKEN
 
     async def create(prefix: list) -> str:
+        if _google_sdk() == "genai":
+            return await _genai_cache_create(model_id, prefix, tools, ttl_minutes)
         from langchain_google_vertexai import create_context_cache
 
         if endpoint := os.environ.get(_VERTEX_PROXY_ENV):
@@ -1422,6 +1482,9 @@ def _growing_cache_fns(model_id, tools, ttl_minutes):
         )
 
     async def delete(name: str) -> None:
+        if _google_sdk() == "genai":
+            await _genai_cache_delete(name)
+            return
         from vertexai.preview import caching
 
         if endpoint := os.environ.get(_VERTEX_PROXY_ENV):

@@ -273,6 +273,9 @@ def apply_gcp_env_defaults(gcp: Mapping[str, str]) -> None:
         ("project", "GOOGLE_CLOUD_PROJECT"),
         ("location", "GOOGLE_CLOUD_LOCATION"),
         ("quota_project", "GOOGLE_CLOUD_QUOTA_PROJECT"),
+        # Client-stack selector for google_vertexai: ids ("vertexai"/"genai");
+        # see model._google_sdk.
+        ("sdk", "AIRC_GOOGLE_SDK"),
     ):
         if env not in os.environ and (val := gcp.get(key)):
             os.environ[env] = str(val)  # a TOML int/float would crash os.environ

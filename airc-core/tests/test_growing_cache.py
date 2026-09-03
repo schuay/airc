@@ -617,3 +617,50 @@ async def test_growing_cache_fns_create_and_delete_seed_globals(monkeypatch):
     # Both paths run on ADC, whatever it resolves to: the seeding never supplies
     # a credential of its own, so a None here is the seam staying out of the way
     # rather than a token that failed to mint.
+
+
+# -- genai-stack cache create/delete ------------------------------------------
+
+
+async def test_genai_cache_create_builds_config_and_returns_full_name(monkeypatch):
+    from airc_core import agent as agent_mod
+    from langchain_core.tools import tool
+
+    @tool
+    def look(x: str) -> str:
+        """Look something up."""
+        return x
+
+    captured = {}
+
+    class _Caches:
+        async def create(self, *, model, config):
+            captured["model"], captured["config"] = model, config
+            return type("C", (), {"name": "projects/p/locations/l/cachedContents/42"})()
+
+        async def delete(self, *, name):
+            captured["deleted"] = name
+
+    client = type("Cl", (), {"aio": type("A", (), {"caches": _Caches()})()})()
+    monkeypatch.setattr(agent_mod, "_genai_client", lambda: client)
+
+    prefix = [
+        SYS,
+        HumanMessage("hello"),
+        AIMessage(content="", tool_calls=[{"name": "look", "args": {}, "id": "c1"}]),
+    ]
+    name = await agent_mod._genai_cache_create(
+        "google_vertexai:gemini-3.8-flash", prefix, [look], ttl_minutes=15
+    )
+    assert name == "projects/p/locations/l/cachedContents/42"
+    assert captured["model"] == "gemini-3.8-flash"
+    cfg = captured["config"]
+    assert cfg.ttl == "900s"
+    assert cfg.system_instruction is not None
+    # The prefix ends on the model's function call (the growing-cache shape).
+    assert cfg.contents[-1].role == "model"
+    assert cfg.contents[-1].parts[-1].function_call.name == "look"
+    assert cfg.tools[0].function_declarations[0].name == "look"
+
+    await agent_mod._genai_cache_delete(name)
+    assert captured["deleted"] == name

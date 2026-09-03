@@ -96,6 +96,74 @@ def test_tool_first_guard_leaves_normal_histories_alone():
     assert contents[0].parts[0].text == "hi"
 
 
+def test_genai_tool_first_guard_converts_a_tool_opening_history():
+    # Same tail shape as the vertexai guard test; the genai converter's failure
+    # mode is silent DROPPING of orphan tool responses rather than a crash.
+    from airc_core.model import _install_genai_tool_first_guard
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_google_genai import chat_models as cm
+
+    _install_genai_tool_first_guard()
+    guarded = cm._parse_chat_history
+    _install_genai_tool_first_guard()
+    assert cm._parse_chat_history is guarded  # no double wrap
+
+    tail = [
+        ToolMessage("int main()", tool_call_id="c1", name="look"),
+        ToolMessage("42", tool_call_id="c2", name="count"),
+        AIMessage("both read"),
+    ]
+    system, contents = cm._parse_chat_history(tail, model="gemini-3.8-flash")
+    assert system is None
+    assert [c.role for c in contents] == ["user", "model"]
+    # Parallel responses share one user content; the sentinel model turn that
+    # claimed their ids is gone.
+    assert [p.function_response.name for p in contents[0].parts] == ["look", "count"]
+    assert all(p.function_call is None for p in contents[0].parts)
+
+
+def test_genai_tool_first_guard_leaves_normal_histories_alone():
+    from airc_core.model import _install_genai_tool_first_guard
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_google_genai import chat_models as cm
+
+    _install_genai_tool_first_guard()
+    _, contents = cm._parse_chat_history(
+        [HumanMessage("hi"), AIMessage("yo")], model="gemini-3.8-flash"
+    )
+    assert [c.role for c in contents] == ["user", "model"]
+    assert contents[0].parts[0].text == "hi"
+
+
+def test_google_sdk_flag_routes_vertex_ids_to_genai(monkeypatch):
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_google_genai import chat_models as cm
+
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    m = make_model("google_vertexai:gemini-3.8-flash")
+    assert isinstance(m, ChatGoogleGenerativeAI)
+    # Vertex backend via the project kwarg, same call-time defaults as the
+    # vertexai path, and the orphan-tool guard installed at construction.
+    assert (m.project, m.location) == ("test-project", "global")
+    assert (m.include_thoughts, m.max_retries, m.timeout) == (False, 1, 600.0)
+    assert getattr(cm._parse_chat_history, "_airc_tool_first_guard", False)
+
+    # Without a project the class's own detection lands on the Developer API
+    # (GOOGLE_API_KEY) -- the local-verification path.
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    assert make_model("google_vertexai:gemini-3.8-flash").project is None
+
+
+def test_google_sdk_defaults_to_vertexai(monkeypatch):
+    from airc_core.model import _google_sdk
+
+    monkeypatch.delenv("AIRC_GOOGLE_SDK", raising=False)
+    assert _google_sdk() == "vertexai"
+
+
 def test_retry_noise_filter_passes_unrelated_records():
     from airc_core.model import _RetryNoiseFilter
 

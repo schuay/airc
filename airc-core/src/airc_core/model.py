@@ -441,6 +441,95 @@ def _install_vertex_tool_first_guard() -> None:
     cm._parse_chat_history_gemini = guarded
 
 
+def _google_sdk() -> str:
+    """Which client stack backs google_vertexai: ids: "vertexai" (the
+    deprecated langchain-google-vertexai path) or "genai"
+    (ChatGoogleGenerativeAI on the google-genai SDK). Same endpoints either
+    way. Env-shaped (seeded from [gcp] sdk) so one deployment can revert
+    without a code change while the old path still exists."""
+    return os.environ.get("AIRC_GOOGLE_SDK", "vertexai")
+
+
+def _install_genai_tool_first_guard() -> None:
+    """Make a request that opens on a tool response convertible (genai stack).
+
+    Same growing-cache shape as _install_vertex_tool_first_guard, worse
+    failure: langchain-google-genai's converter re-emits ToolMessages only
+    paired to the AIMessage whose tool_calls ids match, so a history OPENING
+    on tool responses (their calling AIMessage lives inside the cached
+    prefix) produces a request with the tool results silently MISSING -- no
+    crash, wrong request. A sentinel AIMessage claiming the leading
+    tool_call_ids routes them through that pairing path; dropping the
+    sentinel's own model Content from the result leaves the request opening
+    on the function responses.
+
+    TODO: upstream the fix (this package is maintained, unlike vertexai --
+    its twin is langchain-google issue #392) and retire the guard.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_google_genai import chat_models as cm
+
+    orig = cm._parse_chat_history
+    if getattr(orig, "_airc_tool_first_guard", False):
+        return
+
+    def guarded(input_messages, *args, **kwargs):
+        msgs = list(input_messages)
+        if not (msgs and isinstance(msgs[0], ToolMessage)):
+            return orig(input_messages, *args, **kwargs)
+        lead = []
+        for m in msgs:
+            if not isinstance(m, ToolMessage):
+                break
+            lead.append(m)
+        sentinel = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": m.name or "", "args": {}, "id": m.tool_call_id} for m in lead
+            ],
+        )
+        system, contents = orig([sentinel, *msgs], *args, **kwargs)
+        return system, contents[1:]
+
+    guarded._airc_tool_first_guard = True
+    cm._parse_chat_history = guarded
+
+
+def _make_genai_vertex(model_id: str, kwargs: dict):
+    """A google_vertexai: id served by ChatGoogleGenerativeAI (google-genai
+    SDK) when AIRC_GOOGLE_SDK=genai.
+
+    Backend selection is delegated to the class's own detection rather than
+    forcing vertexai=True: a project kwarg (present whenever
+    GOOGLE_CLOUD_PROJECT is set, i.e. prod) selects Vertex over ADC -- the
+    same endpoints the vertexai stack hits -- while a box with only
+    GOOGLE_API_KEY reaches the Developer API, which runs the identical client
+    code. That fallback is what makes the stack verifiable on a machine
+    without Vertex access.
+
+    The sandbox proxy seam is wired but UNVERIFIED on this stack (the genai
+    client is httpx with a configurable base_url, so the rest_asyncio and
+    anonymous-credential contortions of the vertexai path should be
+    unnecessary); until it is proven, sandboxed deployments stay on
+    AIRC_GOOGLE_SDK=vertexai.
+    """
+    _install_genai_tool_first_guard()
+    name = model_id.split(":", 1)[1]
+    if (proxy := os.environ.get(_VERTEX_PROXY_ENV)) and "base_url" not in kwargs:
+        kwargs["base_url"] = proxy
+    if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        kwargs.setdefault("project", proj)
+        kwargs.setdefault(
+            "location", os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
+        )
+    # Same three call-time defaults as the vertexai path, same rationale (see
+    # make_model below); the kwarg names match across the two classes.
+    kwargs.setdefault("include_thoughts", False)
+    kwargs.setdefault("max_retries", 1)
+    kwargs.setdefault("timeout", _VERTEX_CALL_TIMEOUT_S)
+    return init_chat_model(f"google_genai:{name}", **kwargs)
+
+
 def make_model(model_id: str, **kwargs):
     if problem := check_model_id(model_id):
         raise ValueError(f"{problem}; {supported_models_hint()}")
@@ -477,6 +566,8 @@ def make_model(model_id: str, **kwargs):
             kwargs["api_key"] = key
         return init_chat_model(f"openai:{name}", **kwargs)
     if model_id.startswith("google_vertexai:"):
+        if _google_sdk() == "genai":
+            return _make_genai_vertex(model_id, kwargs)
         # Construction is the universal Vertex chokepoint (every agent/review
         # graph builds its model here), so silence the benign call-time warnings
         # and install the tool-first converter guard once, for every component.
