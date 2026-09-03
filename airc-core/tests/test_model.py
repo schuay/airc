@@ -203,6 +203,30 @@ def test_google_sdk_flag_routes_vertex_ids_to_genai(monkeypatch):
     assert make_model("google_vertexai:gemini-3.8-flash").project is None
 
 
+def test_proxy_placeholder_credentials_never_refresh():
+    # google-genai refreshes any credential without a token, and google-auth's
+    # AnonymousCredentials RAISE on refresh -- so the placeholder must present
+    # as permanently valid, or the first in-box call dies before the proxy.
+    from airc_core.model import proxy_placeholder_credentials
+
+    creds = proxy_placeholder_credentials()
+    assert creds.valid and not creds.expired
+    creds.refresh(None)  # a no-op, not an error
+    assert creds.token
+
+
+def test_genai_proxy_env_routes_base_url_and_credentials(monkeypatch):
+    from airc_core.model import _VERTEX_PROXY_ENV
+
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:1")
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    m = make_model("google_vertexai:gemini-3.8-flash")
+    assert m.base_url == "http://127.0.0.1:1"
+    # The placeholder also flips the class's backend detection to Vertex.
+    assert m.credentials is not None and m.credentials.valid
+
+
 def test_google_sdk_defaults_to_vertexai(monkeypatch):
     from airc_core.model import _google_sdk
 

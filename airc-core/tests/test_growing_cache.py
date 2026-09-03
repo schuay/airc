@@ -663,4 +663,7 @@ async def test_genai_cache_create_builds_config_and_returns_full_name(monkeypatc
     assert cfg.tools[0].function_declarations[0].name == "look"
 
     await agent_mod._genai_cache_delete(name)
-    assert captured["deleted"] == name
+    # Bare id, not the number-name create returned: the client rebuilds the
+    # path under the configured project NAME, which is what the sandbox
+    # proxy's allowlist is anchored to.
+    assert captured["deleted"] == "42"

@@ -462,6 +462,34 @@ def _install_vertex_tool_first_guard() -> None:
     cm._parse_chat_history_gemini = guarded
 
 
+def proxy_placeholder_credentials():
+    """A bearer that authenticates nothing, for the genai client in the box.
+
+    The sandbox proxy builds its own request headers and attaches the real
+    credential host-side, so whatever the box sends is inert -- but the client
+    refuses to run bare: google-genai refreshes any credential without a
+    token, and google-auth's AnonymousCredentials raise on refresh. A fixed
+    placeholder token satisfies both (always valid, so the refresh path is
+    never entered), with no ADC lookup that could not succeed in there."""
+    from google.auth.credentials import Credentials
+
+    class _PlaceholderCredentials(Credentials):
+        def __init__(self):
+            super().__init__()
+            # Not a secret (S105): the whole point is that this value grants
+            # nothing; the proxy discards it and attaches the real bearer.
+            self.token = "sandbox-proxy-placeholder"  # noqa: S105
+
+        @property
+        def expired(self):
+            return False
+
+        def refresh(self, request):
+            pass
+
+    return _PlaceholderCredentials()
+
+
 def _google_sdk() -> str:
     """Which client stack backs google_vertexai: ids: "vertexai" (the
     deprecated langchain-google-vertexai path) or "genai"
@@ -542,6 +570,10 @@ def _make_genai_vertex(model_id: str, kwargs: dict):
     name = model_id.split(":", 1)[1]
     if (proxy := os.environ.get(_VERTEX_PROXY_ENV)) and "base_url" not in kwargs:
         kwargs["base_url"] = proxy
+        # The box holds no credential; the proxy attaches the real one (see
+        # proxy_placeholder_credentials). Passing one here also tells the
+        # class's backend detection this is Vertex.
+        kwargs.setdefault("credentials", proxy_placeholder_credentials())
     if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
         kwargs.setdefault("project", proj)
         kwargs.setdefault(

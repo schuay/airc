@@ -1408,19 +1408,33 @@ def _genai_client():
     a set GOOGLE_CLOUD_PROJECT selects Vertex over ADC (prod), else the
     Developer API via GOOGLE_API_KEY -- the local-verification path, running
     the identical client code against the other backend. The sandbox proxy
-    rides base_url and is UNVERIFIED on this stack (see
-    model._make_genai_vertex)."""
+    rides base_url with a placeholder credential (the proxy attaches the real
+    bearer; see model.proxy_placeholder_credentials).
+
+    The async transport is pinned to httpx: genai prefers aiohttp whenever it
+    is importable, and newer releases run client-cert (mTLS) discovery on that
+    path -- the machinery GOOGLE_API_USE_CLIENT_CERTIFICATE=false exists to
+    keep away from the segfaulting corp device-cert provider. An explicit
+    transport is the SDK's own escape hatch, and makes the behavior the same
+    across genai versions."""
+    import httpx
     from google import genai
     from google.genai import types
 
-    http_options = None
+    opts: dict = {"async_client_args": {"transport": httpx.AsyncHTTPTransport()}}
+    credentials = None
     if endpoint := os.environ.get(_VERTEX_PROXY_ENV):
-        http_options = types.HttpOptions(base_url=endpoint)
+        from .model import proxy_placeholder_credentials
+
+        opts["base_url"] = endpoint
+        credentials = proxy_placeholder_credentials()
+    http_options = types.HttpOptions(**opts)
     if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
         return genai.Client(
             vertexai=True,
             project=proj,
             location=os.environ.get("GOOGLE_CLOUD_LOCATION") or "global",
+            credentials=credentials,
             http_options=http_options,
         )
     return genai.Client(http_options=http_options)
@@ -1458,7 +1472,12 @@ async def _genai_cache_create(model_id, prefix, tools, ttl_minutes) -> str:
 
 
 async def _genai_cache_delete(name: str) -> None:
-    await _genai_client().aio.caches.delete(name=name)
+    # By bare id, letting the client rebuild the path under ITS project NAME:
+    # create returns a name carrying the project NUMBER, and the sandbox
+    # proxy's allowlist is anchored to the configured name, so a number-path
+    # delete would be refused in the box. The same mixed-identity dance
+    # _cache_create_rest documents, at the other end of the lifecycle.
+    await _genai_client().aio.caches.delete(name=name.rsplit("/", 1)[-1])
 
 
 def _growing_cache_fns(model_id, tools, ttl_minutes):
