@@ -673,6 +673,53 @@ async def test_genai_cache_create_builds_config_and_returns_full_name(monkeypatc
     assert captured["deleted"] == "42"
 
 
+async def test_genai_cache_ops_outlive_the_client_they_were_built_from():
+    # genai.Client.__del__ closes the transport, and its sub-clients hold the api
+    # client rather than the Client -- so a `_genai_client().aio.caches.X(...)`
+    # temporary is collected while the coroutine is still being built, and the
+    # request goes out on a closed transport. The stub mirrors that ownership: the
+    # caches object reaches the transport, nothing reaches the client. Prod ran
+    # fully uncached on this ("growing cache create failed (RuntimeError: Cannot
+    # send a request, as the client has been closed.)").
+    from airc_core import agent as agent_mod
+
+    class _Transport:
+        closed = False
+
+    class _Caches:
+        def __init__(self, transport):
+            self._transport = transport
+
+        async def _call(self):
+            if self._transport.closed:
+                raise RuntimeError(
+                    "Cannot send a request, as the client has been closed."
+                )
+
+        async def create(self, *, model, config):
+            await self._call()
+            return type("C", (), {"name": "projects/p/locations/l/cachedContents/7"})()
+
+        async def delete(self, *, name):
+            await self._call()
+
+    class _Client:
+        def __init__(self):
+            self._transport = _Transport()
+            self.aio = type("A", (), {"caches": _Caches(self._transport)})()
+
+        def __del__(self):
+            self._transport.closed = True
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(agent_mod, "_genai_client", _Client)
+        name = await agent_mod._genai_cache_create(
+            "google_vertexai:gemini-3.8-flash", [SYS], [], ttl_minutes=15
+        )
+        assert name == "projects/p/locations/l/cachedContents/7"
+        await agent_mod._genai_cache_delete(name)
+
+
 # ── serve-time cache rejection ───────────────────────────────────────────────
 
 

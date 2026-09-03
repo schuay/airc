@@ -1459,7 +1459,14 @@ async def _genai_cache_create(model_id, prefix, tools, ttl_minutes) -> str:
     name = model_id.split(":", 1)[1]
     system, contents = cm._parse_chat_history(prefix, model=name)
     decls = [_format_to_genai_function_declaration(t) for t in tools]
-    cache = await _genai_client().aio.caches.create(
+    # Bind the client to a local for the whole await. genai.Client.__del__ closes
+    # the underlying httpx client, and the sub-clients hold the api client but not
+    # the Client itself -- so `_genai_client().aio.caches.create(...)` drops the
+    # last reference while building the coroutine, and refcounting closes the
+    # transport before the request is ever sent ("Cannot send a request, as the
+    # client has been closed").
+    client = _genai_client()
+    cache = await client.aio.caches.create(
         model=name,
         config=types.CreateCachedContentConfig(
             system_instruction=system,
@@ -1477,7 +1484,8 @@ async def _genai_cache_delete(name: str) -> None:
     # proxy's allowlist is anchored to the configured name, so a number-path
     # delete would be refused in the box. The same mixed-identity dance
     # _cache_create_rest documents, at the other end of the lifecycle.
-    await _genai_client().aio.caches.delete(name=name.rsplit("/", 1)[-1])
+    client = _genai_client()  # a local for the await; see _genai_cache_create
+    await client.aio.caches.delete(name=name.rsplit("/", 1)[-1])
 
 
 def _growing_cache_fns(model_id, tools, ttl_minutes):
