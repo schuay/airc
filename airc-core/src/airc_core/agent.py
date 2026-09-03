@@ -249,6 +249,11 @@ def _response_cache_read(response) -> int:
 _SHORT_ERROR_CAUSE_CHARS = 160
 
 
+def _clip(text: str, limit: int) -> str:
+    # Marked, so a cut clause cannot read as the complete reason.
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def _short_error(exc: Exception) -> str:
     """A one-line reason for a model/cache error, for logs.
 
@@ -262,11 +267,16 @@ def _short_error(exc: Exception) -> str:
     and every path that reports one (cache create, a lost review pass, a
     re-dispatch) logs through here. Dropping it left a permanent INVALID_ARGUMENT
     recorded as the word "INVALID_ARGUMENT" and nothing else, which no amount of
-    log reading can diagnose. google-api-core carries the server's own reason on
-    .message, with the dump confined to str(), so take it from there rather than
-    re-parsing the dump."""
+    log reading can diagnose. The dump is part of the server's status string
+    itself, so no field selection avoids it: the cap bounds the line, and the
+    reason survives because the server puts it first. .message is preferred
+    over str() only because google-api-core's str() prepends the numeric code,
+    which the status name already conveys."""
     s = " ".join(str(exc).split())
-    cause = " ".join(str(getattr(exc, "message", "") or s).split())
+    cause = _clip(
+        " ".join(str(getattr(exc, "message", "") or s).split()),
+        _SHORT_ERROR_CAUSE_CHARS,
+    )
     for status in (
         "RESOURCE_EXHAUSTED",
         "PREFILL_QUEUE_OVERLOADED",
@@ -279,8 +289,8 @@ def _short_error(exc: Exception) -> str:
         "INTERNAL",
     ):
         if status in s:
-            return f"{type(exc).__name__}: {status}: {cause[:_SHORT_ERROR_CAUSE_CHARS]}"
-    return f"{type(exc).__name__}: {s[:120]}"
+            return f"{type(exc).__name__}: {status}: {cause}"
+    return f"{type(exc).__name__}: {_clip(s, 120)}"
 
 
 def _is_transient(exc: Exception) -> bool:
