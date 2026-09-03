@@ -271,12 +271,11 @@ def _short_error(exc: Exception) -> str:
     itself, so no field selection avoids it: the cap bounds the line, and the
     reason survives because the server puts it first. .message is preferred
     over str() only because google-api-core's str() prepends the numeric code,
-    which the status name already conveys."""
+    which the status name already conveys; the cause chain is consulted for
+    the same reason _is_transient consults it (the genai stack wraps)."""
     s = " ".join(str(exc).split())
-    cause = _clip(
-        " ".join(str(getattr(exc, "message", "") or s).split()),
-        _SHORT_ERROR_CAUSE_CHARS,
-    )
+    message = getattr(exc, "message", "") or getattr(exc.__cause__, "message", "")
+    cause = _clip(" ".join(str(message or s).split()), _SHORT_ERROR_CAUSE_CHARS)
     for status in (
         "RESOURCE_EXHAUSTED",
         "PREFILL_QUEUE_OVERLOADED",
@@ -306,10 +305,14 @@ def _is_transient(exc: Exception) -> bool:
     any 5xx (see _VERTEX_CALL_TIMEOUT_S).
 
     Word matching remains only as the fallback for text-only exceptions
-    (provider wording varies), with the bare digit strings gone."""
-    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if isinstance(code, int):
-        return code in (429, 500, 502, 503, 504)
+    (provider wording varies), with the bare digit strings gone. The cause
+    chain is consulted because langchain-google-genai re-raises API errors as
+    a plain ChatGoogleGenerativeAIError with the structured original chained
+    underneath -- on that stack the wrapper is the common case."""
+    for e in (exc, exc.__cause__):
+        code = getattr(e, "code", None) or getattr(e, "status_code", None)
+        if isinstance(code, int):
+            return code in (429, 500, 502, 503, 504)
     msg = str(exc).lower()
     return any(
         k in msg

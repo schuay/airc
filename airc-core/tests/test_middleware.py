@@ -124,6 +124,26 @@ def test_is_transient_decides_on_structured_code_when_present():
     assert _is_transient(generr.APIError(503, {"error": {"message": "busy"}}))
 
 
+def test_is_transient_and_short_error_follow_the_cause_chain():
+    # The genai stack re-raises API errors as a plain wrapper with the
+    # structured original chained underneath; both helpers must see through it.
+    from airc_core.agent import _is_transient, _short_error
+    from google.genai import errors as generr
+
+    def wrapped(code, status, message):
+        cause = generr.APIError(code, {"error": {"message": message, "status": status}})
+        exc = RuntimeError(f"Error calling model 'm' ({status}): {cause}")
+        exc.__cause__ = cause
+        return exc
+
+    assert _is_transient(wrapped(429, "RESOURCE_EXHAUSTED", "quota"))
+    exc = wrapped(400, "INVALID_ARGUMENT", "model turn; request_id=4297bd11")
+    assert not _is_transient(exc)
+    out = _short_error(exc)
+    assert out.startswith("RuntimeError: INVALID_ARGUMENT: ")
+    assert "model turn" in out and "4297bd11" in out
+
+
 def test_is_transient_text_fallback_needs_words_not_digits():
     from airc_core.agent import _is_transient
 
