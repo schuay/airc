@@ -108,10 +108,28 @@ def test_short_error_extracts_status_from_verbose_dump():
     from airc_core.agent import _short_error
 
     huge = RuntimeError("500 RpcClientException ... RESOURCE_EXHAUSTED " + "x" * 3000)
-    assert _short_error(huge) == "RuntimeError: RESOURCE_EXHAUSTED"
+    out = _short_error(huge)
+    assert out.startswith("RuntimeError: RESOURCE_EXHAUSTED: ")
+    assert len(out) < 240  # status + a bounded cause, never the 3k dump
     # No known status: falls back to a truncated first line, still bounded.
     other = RuntimeError("something unusual happened " * 50)
     assert len(_short_error(other)) < 160
+
+
+def test_short_error_keeps_the_cause_of_a_permanent_400():
+    """A bare status cannot diagnose a 400 -- the reason is the whole signal, and
+    every 400 report (cache create, lost pass, re-dispatch) logs through here."""
+    from airc_core.agent import _short_error
+    from google.api_core.exceptions import InvalidArgument
+
+    exc = InvalidArgument(
+        "Requests ending with a model turn are not supported."
+        " RPC to BAG server failed: INVALID_ARGUMENT: " + "x" * 3000
+    )
+    out = _short_error(exc)
+    assert out.startswith("InvalidArgument: INVALID_ARGUMENT: ")
+    assert "Requests ending with a model turn are not supported." in out
+    assert len(out) < 240
 
 
 class _Req:

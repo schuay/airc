@@ -243,14 +243,30 @@ def _response_cache_read(response) -> int:
     return 0
 
 
+# Bound on the cause appended after the status. Wide enough for a real Vertex
+# reason ("Requests ending with a model turn are not supported"), narrow enough
+# that a per-call transient still costs one log line.
+_SHORT_ERROR_CAUSE_CHARS = 160
+
+
 def _short_error(exc: Exception) -> str:
     """A one-line reason for a model/cache error, for logs.
 
     Vertex wraps failures in multi-kilobyte RPC dumps (nested original error,
     stack, source-location trace). The signal is the status and a short cause;
     this pulls those out so a transient overload does not print a 3k-char block
-    on every occurrence. Falls back to a truncated first line."""
+    on every occurrence. Falls back to a truncated first line.
+
+    The cause is not decoration. A bare status triages a transient fine -- every
+    RESOURCE_EXHAUSTED is the same blip -- but on a 400 the reason IS the bug,
+    and every path that reports one (cache create, a lost review pass, a
+    re-dispatch) logs through here. Dropping it left a permanent INVALID_ARGUMENT
+    recorded as the word "INVALID_ARGUMENT" and nothing else, which no amount of
+    log reading can diagnose. google-api-core carries the server's own reason on
+    .message, with the dump confined to str(), so take it from there rather than
+    re-parsing the dump."""
     s = " ".join(str(exc).split())
+    cause = " ".join(str(getattr(exc, "message", "") or s).split())
     for status in (
         "RESOURCE_EXHAUSTED",
         "PREFILL_QUEUE_OVERLOADED",
@@ -263,7 +279,7 @@ def _short_error(exc: Exception) -> str:
         "INTERNAL",
     ):
         if status in s:
-            return f"{type(exc).__name__}: {status}"
+            return f"{type(exc).__name__}: {status}: {cause[:_SHORT_ERROR_CAUSE_CHARS]}"
     return f"{type(exc).__name__}: {s[:120]}"
 
 
