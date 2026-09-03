@@ -65,7 +65,9 @@ async def test_retrying_retries_transient_then_succeeds(monkeypatch):
     from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
-    model = _FlakyModel([RuntimeError("429 resource_exhausted"), RuntimeError("503")])
+    model = _FlakyModel(
+        [RuntimeError("429 resource_exhausted"), RuntimeError("503 unavailable")]
+    )
     out = await retrying(model).ainvoke("hi")
     assert out.text == "ok"
     assert model.calls == 3  # two transient failures, then success
@@ -102,6 +104,32 @@ async def test_retrying_propagates_after_exhausting(monkeypatch):
 
 async def _noop_sleep(_):
     return None
+
+
+def test_is_transient_decides_on_structured_code_when_present():
+    from airc_core.agent import _is_transient
+    from google.api_core import exceptions as gexc
+    from google.genai import errors as generr
+
+    # The finding-7 regression: digits inside a request id or token count no
+    # longer launder a permanent 400 into a transient, whatever the text says.
+    dump = "model turn not supported; request_id=4297bd11 prompt_tokens=8503"
+    assert not _is_transient(gexc.InvalidArgument(dump))
+    assert not _is_transient(generr.APIError(400, {"error": {"message": dump}}))
+    # Both stacks' real transients decide on the code alone.
+    assert _is_transient(gexc.ResourceExhausted("busy"))
+    assert _is_transient(gexc.ServiceUnavailable("overloaded"))
+    assert _is_transient(gexc.DeadlineExceeded("hung stream reaped"))
+    assert _is_transient(generr.APIError(429, {"error": {"message": "quota"}}))
+    assert _is_transient(generr.APIError(503, {"error": {"message": "busy"}}))
+
+
+def test_is_transient_text_fallback_needs_words_not_digits():
+    from airc_core.agent import _is_transient
+
+    assert _is_transient(RuntimeError("rate limit exceeded, retry later"))
+    assert _is_transient(RuntimeError("the model is overloaded"))
+    assert not _is_transient(RuntimeError("request 4297bd11 failed writing 8503"))
 
 
 def test_short_error_extracts_status_from_verbose_dump():

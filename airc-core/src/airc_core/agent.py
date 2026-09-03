@@ -294,16 +294,30 @@ def _short_error(exc: Exception) -> str:
 
 
 def _is_transient(exc: Exception) -> bool:
+    """Is this a retry-worthy provider blip, as opposed to a permanent error?
+
+    A structured status wins when the exception carries one: google-api-core
+    sets .code and google.genai .code/.status_code to the HTTP status, and a
+    number decides cleanly. The old substring pass over the full error text
+    matched "429"/"503" inside request ids and token counts, laundering a
+    permanent 400 into a transient -- prod burned _MAX_REVIEW_ATTEMPTS
+    redeliveries re-spending a whole review on exactly that. 504 is in the
+    set deliberately: a deadline reaping a hung stream is a transient like
+    any 5xx (see _VERTEX_CALL_TIMEOUT_S).
+
+    Word matching remains only as the fallback for text-only exceptions
+    (provider wording varies), with the bare digit strings gone."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code in (429, 500, 502, 503, 504)
     msg = str(exc).lower()
     return any(
         k in msg
         for k in (
-            "429",
             "quota",
             "rate limit",
             "resource_exhausted",
             "exhausted",
-            "503",
             "unavailable",
             "overloaded",
             "internal server error",
@@ -360,9 +374,9 @@ def _is_retryable(exc: Exception) -> bool:
     _EmptyCandidateRetry owns that path and mutates the request on its single
     retry (drop the cached prefix + append a nudge), because an identical resend
     reproduces the deterministic empty (observed: 6 identical calls, 0 output
-    tokens). _is_transient stays string-matched (provider-dependent wording) for
-    the bare retrying() helper which never sees empty candidates (single-shot
-    calls, no ToolStrategy).
+    tokens). _is_transient falls back to string matching (provider-dependent
+    wording) for the bare retrying() helper which never sees empty candidates
+    (single-shot calls, no ToolStrategy).
 
     The type check is what enforces that, and it has to come first: the raise
     embeds the provider's finish_reason in the message, so a reason reading
