@@ -60,7 +60,7 @@ def test_tool_first_guard_converts_a_tool_opening_history():
     # function call; without the guard the converter raises IndexError on that
     # shape (langchain-google issue #392).
     from airc_core.model import _install_vertex_tool_first_guard
-    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_vertexai import chat_models as cm
     from langchain_google_vertexai._image_utils import ImageBytesLoader
 
@@ -74,12 +74,21 @@ def test_tool_first_guard_converts_a_tool_opening_history():
         ToolMessage("42", tool_call_id="c2", name="count"),
         AIMessage("both read"),
     ]
-    system, contents = cm._parse_chat_history_gemini(tail, ImageBytesLoader())
-    assert system is None
-    assert [c.role for c in contents] == ["user", "model"]
-    # Parallel responses merge into one user content; the sentinel is stripped.
-    assert [p.function_response.name for p in contents[0].parts] == ["look", "count"]
-    assert all(not p.text for p in contents[0].parts)
+    # Bare, and with the system turn langchain prepends after middleware runs --
+    # the latter is the shape a real request has, and matching only history[0]
+    # missed it while passing this test on the former.
+    for history in (tail, [SystemMessage("you are a reviewer"), *tail]):
+        system, contents = cm._parse_chat_history_gemini(
+            list(history), ImageBytesLoader()
+        )
+        assert (system is not None) == isinstance(history[0], SystemMessage)
+        assert [c.role for c in contents] == ["user", "model"]
+        # Parallel responses merge into one user content; the sentinel is stripped.
+        assert [p.function_response.name for p in contents[0].parts] == [
+            "look",
+            "count",
+        ]
+        assert all(not p.text for p in contents[0].parts)
 
 
 def test_tool_first_guard_leaves_normal_histories_alone():
@@ -100,7 +109,7 @@ def test_genai_tool_first_guard_converts_a_tool_opening_history():
     # Same tail shape as the vertexai guard test; the genai converter's failure
     # mode is silent DROPPING of orphan tool responses rather than a crash.
     from airc_core.model import _install_genai_tool_first_guard
-    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_genai import chat_models as cm
 
     _install_genai_tool_first_guard()
@@ -113,13 +122,20 @@ def test_genai_tool_first_guard_converts_a_tool_opening_history():
         ToolMessage("42", tool_call_id="c2", name="count"),
         AIMessage("both read"),
     ]
-    system, contents = cm._parse_chat_history(tail, model="gemini-3.8-flash")
-    assert system is None
-    assert [c.role for c in contents] == ["user", "model"]
-    # Parallel responses share one user content; the sentinel model turn that
-    # claimed their ids is gone.
-    assert [p.function_response.name for p in contents[0].parts] == ["look", "count"]
-    assert all(p.function_call is None for p in contents[0].parts)
+    # Bare, and with the leading system turn a real request carries.
+    for history in (tail, [SystemMessage("you are a reviewer"), *tail]):
+        system, contents = cm._parse_chat_history(
+            list(history), model="gemini-3.8-flash"
+        )
+        assert (system is not None) == isinstance(history[0], SystemMessage)
+        assert [c.role for c in contents] == ["user", "model"]
+        # Parallel responses share one user content; the sentinel model turn that
+        # claimed their ids is gone.
+        assert [p.function_response.name for p in contents[0].parts] == [
+            "look",
+            "count",
+        ]
+        assert all(p.function_call is None for p in contents[0].parts)
 
 
 def test_genai_tool_first_guard_leaves_normal_histories_alone():

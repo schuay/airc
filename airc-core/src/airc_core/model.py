@@ -401,6 +401,26 @@ def _silence_vertex_noise() -> None:
     logging.getLogger("langchain_google_vertexai._retry").addFilter(_RETRY_NOISE)
 
 
+def _tool_first_index(history, system_cls, tool_cls) -> int | None:
+    """Index of the leading tool response in a history the growing cache's tail
+    produced, or None when the history is not of that shape.
+
+    The tail handed to a middleware opens on the ToolMessage answering the
+    cached function call, but langchain prepends the system message AFTER every
+    middleware has run (agents/factory.py), so what reaches a provider's history
+    converter is [system, tool, ...]. Matching only on history[0] therefore
+    never fires in a real request -- the shape both converters mishandle sails
+    straight through. Leading system turns are skipped, not counted: neither
+    converter emits content for them (they become the separate
+    system_instruction), so the sentinel a caller splices in at this index still
+    lands at contents[0].
+    """
+    at = 0
+    while at < len(history) and isinstance(history[at], system_cls):
+        at += 1
+    return at if at < len(history) and isinstance(history[at], tool_cls) else None
+
+
 def _install_vertex_tool_first_guard() -> None:
     """Make a request that opens on a tool response convertible.
 
@@ -422,7 +442,7 @@ def _install_vertex_tool_first_guard() -> None:
     against this shape: today it silently DROPS a ToolMessage whose calling
     AIMessage is absent from the history.
     """
-    from langchain_core.messages import HumanMessage, ToolMessage
+    from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
     from langchain_google_vertexai import chat_models as cm
 
     orig = cm._parse_chat_history_gemini
@@ -430,9 +450,10 @@ def _install_vertex_tool_first_guard() -> None:
         return
 
     def guarded(history, *args, **kwargs):
-        if not (history and isinstance(history[0], ToolMessage)):
+        if (at := _tool_first_index(history, SystemMessage, ToolMessage)) is None:
             return orig(history, *args, **kwargs)
-        system, contents = orig([HumanMessage("-"), *history], *args, **kwargs)
+        patched = [*history[:at], HumanMessage("-"), *history[at:]]
+        system, contents = orig(patched, *args, **kwargs)
         first = contents[0]
         rebuilt = cm.Content(role=first.role, parts=list(first.parts)[1:])
         return system, [rebuilt, *contents[1:]]
@@ -466,7 +487,7 @@ def _install_genai_tool_first_guard() -> None:
     TODO: upstream the fix (this package is maintained, unlike vertexai --
     its twin is langchain-google issue #392) and retire the guard.
     """
-    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_genai import chat_models as cm
 
     orig = cm._parse_chat_history
@@ -475,10 +496,10 @@ def _install_genai_tool_first_guard() -> None:
 
     def guarded(input_messages, *args, **kwargs):
         msgs = list(input_messages)
-        if not (msgs and isinstance(msgs[0], ToolMessage)):
+        if (at := _tool_first_index(msgs, SystemMessage, ToolMessage)) is None:
             return orig(input_messages, *args, **kwargs)
         lead = []
-        for m in msgs:
+        for m in msgs[at:]:
             if not isinstance(m, ToolMessage):
                 break
             lead.append(m)
@@ -488,7 +509,11 @@ def _install_genai_tool_first_guard() -> None:
                 {"name": m.name or "", "args": {}, "id": m.tool_call_id} for m in lead
             ],
         )
-        system, contents = orig([sentinel, *msgs], *args, **kwargs)
+        patched = [*msgs[:at], sentinel, *msgs[at:]]
+        system, contents = orig(patched, *args, **kwargs)
+        # Only system turns precede the sentinel, and those leave no content --
+        # they become the separate system_instruction -- so the sentinel's own
+        # model turn is contents[0].
         return system, contents[1:]
 
     guarded._airc_tool_first_guard = True
