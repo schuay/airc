@@ -55,6 +55,34 @@ def test_retry_noise_filter_condenses_prefill_dump():
     assert len(out) < 60  # the dump is gone
 
 
+def test_tool_first_index_matches_only_a_leading_tool_response():
+    # The guards' decision, tested apart from either converter: the end-to-end
+    # cases cannot pin it, because splicing a sentinel into a history that never
+    # needed one happens to be a no-op in both converters.
+    from airc_core.model import _tool_first_index
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+
+    def at(history):
+        return _tool_first_index(history, SystemMessage, ToolMessage)
+
+    tool = ToolMessage("int main()", tool_call_id="c1", name="look")
+    sys, human = SystemMessage("sys"), HumanMessage("hi")
+    # The cache's tail, bare and behind the system turn langchain prepends.
+    assert at([tool]) == 0
+    assert at([sys, tool]) == 1
+    assert at([sys, sys, tool]) == 2
+    # Everything else is an ordinary history the converters handle themselves.
+    assert at([]) is None
+    assert at([sys]) is None
+    assert at([human, tool]) is None
+    assert at([sys, human, AIMessage("yo")]) is None
+
+
 def test_tool_first_guard_converts_a_tool_opening_history():
     # The growing cache's tail opens on the tool response(s) answering a cached
     # function call; without the guard the converter raises IndexError on that
@@ -93,16 +121,18 @@ def test_tool_first_guard_converts_a_tool_opening_history():
 
 def test_tool_first_guard_leaves_normal_histories_alone():
     from airc_core.model import _install_vertex_tool_first_guard
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from langchain_google_vertexai import chat_models as cm
     from langchain_google_vertexai._image_utils import ImageBytesLoader
 
     _install_vertex_tool_first_guard()
-    _, contents = cm._parse_chat_history_gemini(
-        [HumanMessage("hi"), AIMessage("yo")], ImageBytesLoader()
-    )
-    assert [c.role for c in contents] == ["user", "model"]
-    assert contents[0].parts[0].text == "hi"
+    turns = [HumanMessage("hi"), AIMessage("yo")]
+    # With the leading system turn too: skipping it must not make an ordinary
+    # history look tool-first and pick up a sentinel.
+    for history in (turns, [SystemMessage("sys"), *turns]):
+        _, contents = cm._parse_chat_history_gemini(list(history), ImageBytesLoader())
+        assert [c.role for c in contents] == ["user", "model"]
+        assert contents[0].parts[0].text == "hi"
 
 
 def test_genai_tool_first_guard_converts_a_tool_opening_history():
@@ -140,15 +170,15 @@ def test_genai_tool_first_guard_converts_a_tool_opening_history():
 
 def test_genai_tool_first_guard_leaves_normal_histories_alone():
     from airc_core.model import _install_genai_tool_first_guard
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from langchain_google_genai import chat_models as cm
 
     _install_genai_tool_first_guard()
-    _, contents = cm._parse_chat_history(
-        [HumanMessage("hi"), AIMessage("yo")], model="gemini-3.8-flash"
-    )
-    assert [c.role for c in contents] == ["user", "model"]
-    assert contents[0].parts[0].text == "hi"
+    turns = [HumanMessage("hi"), AIMessage("yo")]
+    for history in (turns, [SystemMessage("sys"), *turns]):
+        _, contents = cm._parse_chat_history(list(history), model="gemini-3.8-flash")
+        assert [c.role for c in contents] == ["user", "model"]
+        assert contents[0].parts[0].text == "hi"
 
 
 def test_google_sdk_flag_routes_vertex_ids_to_genai(monkeypatch):
