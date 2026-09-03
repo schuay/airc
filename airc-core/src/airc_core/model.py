@@ -491,12 +491,12 @@ def proxy_placeholder_credentials():
 
 
 def _google_sdk() -> str:
-    """Which client stack backs google_vertexai: ids: "vertexai" (the
-    deprecated langchain-google-vertexai path) or "genai"
-    (ChatGoogleGenerativeAI on the google-genai SDK). Same endpoints either
-    way. Env-shaped (seeded from [gcp] sdk) so one deployment can revert
-    without a code change while the old path still exists."""
-    return os.environ.get("AIRC_GOOGLE_SDK", "vertexai")
+    """Which client stack backs google_vertexai: ids: "genai" (the default:
+    ChatGoogleGenerativeAI on the google-genai SDK) or "vertexai" (the
+    deprecated langchain-google-vertexai path). Same endpoints either way.
+    Env-shaped (seeded from [gcp] sdk) so one deployment can revert without a
+    code change while the old path still exists."""
+    return os.environ.get("AIRC_GOOGLE_SDK", "genai")
 
 
 def _install_genai_tool_first_guard() -> None:

@@ -566,6 +566,9 @@ def test_seed_vertex_cache_globals_never_touches_credentials(monkeypatch):
 
 
 async def test_growing_cache_fns_create_and_delete_seed_globals(monkeypatch):
+    # The vertexai stack's create/delete path; the genai default has its own
+    # (test_genai_cache_create_builds_config_and_returns_full_name).
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "vertexai")
     import langchain_google_vertexai as lgv
     from airc_core.agent import _growing_cache_fns
     from google.cloud.aiplatform import initializer

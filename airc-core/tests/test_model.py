@@ -227,11 +227,13 @@ def test_genai_proxy_env_routes_base_url_and_credentials(monkeypatch):
     assert m.credentials is not None and m.credentials.valid
 
 
-def test_google_sdk_defaults_to_vertexai(monkeypatch):
+def test_google_sdk_defaults_to_genai(monkeypatch):
+    # The vertexai stack remains reachable as the revert path ([gcp] sdk /
+    # AIRC_GOOGLE_SDK=vertexai) until it is deleted.
     from airc_core.model import _google_sdk
 
     monkeypatch.delenv("AIRC_GOOGLE_SDK", raising=False)
-    assert _google_sdk() == "vertexai"
+    assert _google_sdk() == "genai"
 
 
 def test_retry_noise_filter_passes_unrelated_records():
@@ -478,6 +480,15 @@ def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
     monkeypatch.setattr("airc_core.model.init_chat_model", fake_init)
     from airc_core.model import make_model
 
+    # The genai stack (the default): loopback base_url and a placeholder
+    # bearer that authenticates nothing.
+    make_model("google_vertexai:gemini-3.1-pro-preview")
+    assert captured["base_url"] == "http://127.0.0.1:9999"
+    assert captured["credentials"].token == "sandbox-proxy-placeholder"
+
+    # The vertexai revert path keeps its own arrangement.
+    captured.clear()
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "vertexai")
     make_model("google_vertexai:gemini-3.1-pro-preview")
     assert captured["api_endpoint"] == "http://127.0.0.1:9999"
     assert captured["api_transport"] == "rest_asyncio"
