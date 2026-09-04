@@ -539,3 +539,16 @@ async def test_runner_hands_the_index_to_the_graph(tmp_path, monkeypatch):
 
     assert _IDX in payloads[0]["memory_index"]
     assert "memory_index" not in payloads[1]  # no middleware, no state key
+
+
+def test_reminder_interval_stays_inside_the_compaction_keep_window():
+    # The refresh interval is what keeps a copy of the block inside the tail a
+    # summarization keeps, so absence stays a backstop rather than the usual
+    # path. Reaching across packages for a private constant is the point: the
+    # relationship is invisible from either side alone, and lowering
+    # _SUMMARY_KEEP_TOKENS without looking here would degrade recall silently
+    # (every long thread losing the index at each compaction, recovering only on
+    # the next call) rather than fail anything.
+    from airc_core.agent import _SUMMARY_KEEP_TOKENS
+
+    assert _REMINDER_TOKENS < _SUMMARY_KEEP_TOKENS
