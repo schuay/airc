@@ -216,10 +216,13 @@ def build_turn_content(
     changed every turn would bust the prefix cache. As uncached tail content it is
     free. `now` is injectable for tests; None reads the wall clock.
 
-    memory_index, when memory is enabled, is the derived table of contents of the
-    room's long-term memory (a line per note). It rides the same uncached tail for
-    the same reason -- and there it stays fresh (a note written this turn shows up
-    next turn), which a cached system-prompt placement could not do.
+    memory_index, when memory is enabled and the index has CHANGED since this
+    conversation last saw it, is the derived table of contents of the room's
+    long-term memory (a line per note). It rides the same uncached tail for the
+    same reason -- and there it stays fresh (a note written this turn shows up
+    next turn), which a cached system-prompt placement could not do. None on the
+    turns in between: the persona's history still holds the latest block, and
+    repeating it every turn only fed near-identical copies to the prefix cache.
 
     When addressed is set, a human named this agent directly, so the
     NOTHING_TO_ADD escape hatch is withdrawn for this turn. task_prompt carries a
@@ -338,6 +341,13 @@ class AgentRunner:
         self._structured_agents: dict[str, object] = {}
         self._structured_locks: dict[str, asyncio.Lock] = {}
         self._voice_cache: dict[str, str] = {}  # state_key -> cleaned voice body
+        # Memory index injection, deduped per conversation. Built here (not per
+        # turn) because the dedup state is what makes it worth having.
+        self._memory_index = None
+        if cfg.memory.enabled and cfg.memory.path is not None:
+            from .memory import TurnIndex
+
+            self._memory_index = TurnIndex(cfg.memory.path)
 
     @property
     def agents(self) -> dict[str, Persona]:
@@ -574,14 +584,20 @@ class AgentRunner:
             for m in self._store.thread_messages(thread_id)
             if m.id > seen and m.sender != agent_name and m.kind != MessageKind.PING
         ]
+        # The context generation folds into the checkpoint id, so a memory
+        # compaction (which bumps the generation after summarizing the thread to
+        # durable memory) starts this persona from a fresh checkpoint on its next
+        # turn. Race-free: an in-flight turn keeps writing to the old id; only the
+        # next turn reads the bumped one.
+        gen = self._store.context_generation(thread_id)
         # Prime recall: inject the memory index into the uncached tail when this
-        # persona has memory. One git-grep per memory turn, threaded; empty for a
-        # fresh store, in which case nothing is injected.
+        # persona has memory AND the index changed since this conversation last
+        # saw it. One git-grep per memory turn, threaded; None for a fresh store
+        # or an unchanged one, in which case nothing is injected.
+        mem_key = (thread_id, skey)
         mem_index = None
-        if self._memory_enabled(entry.persona):
-            from .memory import memory_index
-
-            mem_index = await memory_index(self._cfg.memory.path)
+        if self._memory_index is not None and self._memory_enabled(entry.persona):
+            mem_index = await self._memory_index.for_turn(mem_key, gen)
         content = build_turn_content(
             unseen,
             addressed=addressed,
@@ -589,12 +605,6 @@ class AgentRunner:
             memory_index=mem_index,
         )
 
-        # The context generation folds into the checkpoint id, so a memory
-        # compaction (which bumps the generation after summarizing the thread to
-        # durable memory) starts this persona from a fresh checkpoint on its next
-        # turn. Race-free: an in-flight turn keeps writing to the old id; only the
-        # next turn reads the bumped one.
-        gen = self._store.context_generation(thread_id)
         config = {"configurable": turn_config(thread_id, skey, gen, trigger_id)}
         text, usage = await self._stream(
             entry.graph,
@@ -624,6 +634,12 @@ class AgentRunner:
             usage.calls,
             usage.max_call_input,
         )
+        # Record the injected index only now: a turn that raised may have left
+        # nothing in the persona's history, and re-injecting costs one duplicate
+        # block where recording a block that never landed would hide the index
+        # until the next memory write.
+        if mem_index is not None:
+            self._memory_index.injected(mem_key, gen, mem_index)
         if unseen:
             self._store.set_agent_seen(thread_id, skey, unseen[-1].id)
         text = strip_self_attribution(text, agent_name)

@@ -15,13 +15,15 @@ Public surface:
 - make_memory_tools(root) -- the jailed search/read/write/edit/delete tools
   (auto-commit).
 - memory_index(root) -- the derived one-line index for per-turn injection.
+- TurnIndex(root) -- that index with per-conversation change dedup, so an
+  unchanged table of contents is not re-injected every turn.
 - MEMORY_RULES -- the default write-discipline block appended to a memory-enabled
   persona's system prompt.
 """
 
 from __future__ import annotations
 
-from .index import memory_index
+from .index import TurnIndex, memory_index
 from .tools import make_memory_tools
 
 # The tool_group name that grants the memory tools. Reserved by core when
@@ -38,9 +40,11 @@ MEMORY_RULES = """\
 ## Long-term memory
 
 You have a durable memory: a small store of notes you maintain yourself, one fact
-per note. Its index (a line per note) is injected each turn under "Memory"; read a
-note in full with memory_read before you rely on it -- the index line is a hook,
-not the fact.
+per note. Its index (a line per note) appears under "Memory" whenever it has
+changed, so it is not repeated on every turn: the most recent "Memory" block in
+this conversation is the current one, and no block this turn means nothing about
+the store changed, NOT that you have no memory. Read a note in full with
+memory_read before you rely on it -- the index line is a hook, not the fact.
 
 Write a note when, and only when, something durable is worth carrying to a later
 conversation:
@@ -64,4 +68,10 @@ and the entry stays in git history. If the fact merely changed, update the note
 instead, so its history stays in one place. Never blank a note to "remove" it: an
 empty entry still shows up in the index and reads as a fact you have forgotten."""
 
-__all__ = ["MEMORY_GROUP", "MEMORY_RULES", "make_memory_tools", "memory_index"]
+__all__ = [
+    "MEMORY_GROUP",
+    "MEMORY_RULES",
+    "TurnIndex",
+    "make_memory_tools",
+    "memory_index",
+]

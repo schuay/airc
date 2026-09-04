@@ -11,6 +11,7 @@ import pytest
 from airc_room.memory import (
     MEMORY_GROUP,
     MEMORY_RULES,
+    TurnIndex,
     make_memory_tools,
     memory_index,
 )
@@ -389,3 +390,191 @@ def test_memory_config_parses_enabled_path(tmp_path):
 def test_memory_enabled_without_path_is_a_config_error(tmp_path):
     with pytest.raises(SystemExit):
         _cfg_from_toml(tmp_path, "[airc.memory]\nenabled = true\n")
+
+
+# --- change dedup ----------------------------------------------------------
+
+_KEY = (1, "perf")
+
+
+async def test_index_injected_once_until_it_changes(tmp_path):
+    # The point of the dedup: an unchanged index is injected on the first turn
+    # that sees it and on no turn after, so a long thread stops accruing a copy
+    # per turn in the prefix cache.
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    idx = TurnIndex(tmp_path)
+
+    first = await idx.for_turn(_KEY, 0)
+    assert first == "- note.md -- prefers explicit type annotations"
+    idx.injected(_KEY, 0, first)
+
+    assert await idx.for_turn(_KEY, 0) is None
+    assert await idx.for_turn(_KEY, 0) is None
+
+    # A new note changes the table of contents, so the next turn sees it.
+    second = _VALID.replace("prefers explicit type annotations", "runs the suite first")
+    await tools["memory_write"].ainvoke(
+        {"path": "other.md", "content": second, "message": "add"}
+    )
+    changed = await idx.for_turn(_KEY, 0)
+    assert changed is not None
+    assert "other.md" in changed
+
+
+async def test_dedup_is_per_conversation(tmp_path):
+    # State is keyed on (thread, persona): one persona seeing the index must not
+    # suppress it for another, whose own history holds no copy of it.
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    idx = TurnIndex(tmp_path)
+
+    first = await idx.for_turn(_KEY, 0)
+    idx.injected(_KEY, 0, first)
+    assert await idx.for_turn((1, "gc"), 0) is not None  # other persona, same thread
+    assert await idx.for_turn((2, "perf"), 0) is not None  # same persona, other thread
+
+
+async def test_generation_bump_reinjects(tmp_path):
+    # A compaction bumps the generation and starts the persona from a fresh
+    # checkpoint, so the copy in its old history is gone with it.
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    idx = TurnIndex(tmp_path)
+    first = await idx.for_turn(_KEY, 0)
+    idx.injected(_KEY, 0, first)
+
+    assert await idx.for_turn(_KEY, 0) is None
+    assert await idx.for_turn(_KEY, 1) is not None
+
+
+async def test_uninjected_index_is_not_recorded(tmp_path):
+    # for_turn must not record on its own: a turn that raises before the block
+    # reaches the persona has to re-inject, or the index is hidden until the next
+    # memory write.
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    idx = TurnIndex(tmp_path)
+    assert await idx.for_turn(_KEY, 0) is not None
+    assert await idx.for_turn(_KEY, 0) is not None  # still pending: never recorded
+
+
+async def test_empty_store_injects_nothing_and_records_nothing(tmp_path):
+    _make_store(tmp_path)
+    idx = TurnIndex(tmp_path)
+    assert await idx.for_turn(_KEY, 0) is None
+    # A note added later is still injected -- the empty pass recorded no state.
+    tools = _tools(tmp_path)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    assert await idx.for_turn(_KEY, 0) is not None
+
+
+# --- dedup through the real runner ------------------------------------------
+
+
+def _memory_runner(tmp_path, store_root):
+    """A real AgentRunner wired to a memory store, with one memory-enabled
+    persona. Mirrors test_timers' harness: everything but _stream is the real
+    turn path, which is the half the TurnIndex unit tests cannot cover."""
+    from airc_room.config import Config
+    from airc_room.personas import Persona
+    from airc_room.runner import AgentRunner, _AgentEntry
+    from airc_room.store import Store
+
+    store = Store(tmp_path / "airc.db")
+    thread = store.create_thread("t")
+    cfg = Config()
+    cfg.token_db_path = tmp_path / "tokens.db"
+    cfg.memory.enabled = True
+    cfg.memory.path = store_root
+    runner = AgentRunner(cfg, {}, object(), store)
+    persona = Persona(
+        name="Sonic",
+        display_name="Sonic",
+        description="d",
+        system_prompt="",
+        key="perf",
+        tool_groups=(MEMORY_GROUP,),
+    )
+    runner._agents = {"Sonic": _AgentEntry(persona=persona, graph=object())}
+    return runner, store, thread
+
+
+async def test_runner_injects_the_index_once_then_omits_it(tmp_path, monkeypatch):
+    from airc_room.runner import _TurnUsage
+
+    root = tmp_path / "store"
+    root.mkdir()
+    _make_store(root)
+    tools = _tools(root)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    runner, store, thread = _memory_runner(tmp_path, root)
+
+    sent: list[str] = []
+
+    async def _fake_stream(graph, agent_name, payload, config):
+        sent.append(payload["messages"][0]["content"])
+        return "ok", _TurnUsage()
+
+    monkeypatch.setattr(runner, "_stream", _fake_stream)
+
+    store.add_message(thread.id, "human", "human", "one")
+    await runner.run_turn("Sonic", thread.id, addressed=True)
+    store.add_message(thread.id, "human", "human", "two")
+    await runner.run_turn("Sonic", thread.id, addressed=True)
+    store.close()
+
+    assert "prefers explicit type annotations" in sent[0]
+    assert "Memory (" not in sent[1]  # unchanged: not repeated into the history
+
+
+async def test_runner_reinjects_after_a_failed_turn(tmp_path, monkeypatch):
+    # A turn that raised may have left nothing in the persona's history, so the
+    # index it carried must come back on the retry rather than be marked seen.
+    from airc_room.runner import _TurnUsage
+
+    root = tmp_path / "store"
+    root.mkdir()
+    _make_store(root)
+    tools = _tools(root)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
+    runner, store, thread = _memory_runner(tmp_path, root)
+
+    sent: list[str] = []
+
+    async def _boom(graph, agent_name, payload, config):
+        sent.append(payload["messages"][0]["content"])
+        raise RuntimeError("model died")
+
+    monkeypatch.setattr(runner, "_stream", _boom)
+    store.add_message(thread.id, "human", "human", "one")
+    with pytest.raises(RuntimeError):
+        await runner.run_turn("Sonic", thread.id, addressed=True)
+
+    async def _ok(graph, agent_name, payload, config):
+        sent.append(payload["messages"][0]["content"])
+        return "ok", _TurnUsage()
+
+    monkeypatch.setattr(runner, "_stream", _ok)
+    await runner.run_turn("Sonic", thread.id, addressed=True)
+    store.close()
+
+    assert all("prefers explicit type annotations" in s for s in sent)
