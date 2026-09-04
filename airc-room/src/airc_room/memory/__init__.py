@@ -15,15 +15,17 @@ Public surface:
 - make_memory_tools(root) -- the jailed search/read/write/edit/delete tools
   (auto-commit).
 - memory_index(root) -- the derived one-line index for per-turn injection.
-- TurnIndex(root) -- that index with per-conversation change dedup, so an
-  unchanged table of contents is not re-injected every turn.
+- MemoryIndexMiddleware -- places that index in a persona's conversation when
+  it is missing, stale, or has drifted too far back, so an unchanged table of
+  contents is not repeated every turn.
 - MEMORY_RULES -- the default write-discipline block appended to a memory-enabled
   persona's system prompt.
 """
 
 from __future__ import annotations
 
-from .index import TurnIndex, memory_index
+from .index import memory_index
+from .middleware import MemoryIndexMiddleware
 from .tools import make_memory_tools
 
 # The tool_group name that grants the memory tools. Reserved by core when
@@ -40,10 +42,10 @@ MEMORY_RULES = """\
 ## Long-term memory
 
 You have a durable memory: a small store of notes you maintain yourself, one fact
-per note. Its index (a line per note) appears under "Memory" whenever it has
-changed, so it is not repeated on every turn: the most recent "Memory" block in
-this conversation is the current one, and no block this turn means nothing about
-the store changed, NOT that you have no memory. Read a note in full with
+per note. Its index (a line per note) appears under "Memory" when it changes and
+periodically thereafter, rather than on every turn: the most recent "Memory"
+block in this conversation is the current one, and a turn without one means the
+index is unchanged, NOT that you have no memory. Read a note in full with
 memory_read before you rely on it -- the index line is a hook, not the fact.
 
 Write a note when, and only when, something durable is worth carrying to a later
@@ -71,7 +73,7 @@ empty entry still shows up in the index and reads as a fact you have forgotten."
 __all__ = [
     "MEMORY_GROUP",
     "MEMORY_RULES",
-    "TurnIndex",
+    "MemoryIndexMiddleware",
     "make_memory_tools",
     "memory_index",
 ]

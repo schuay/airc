@@ -197,7 +197,6 @@ def build_turn_content(
     addressed: bool = False,
     task_prompt: str | None = None,
     now: datetime | None = None,
-    memory_index: str | None = None,
 ) -> str:
     """The user-role content injected for a turn.
 
@@ -216,13 +215,10 @@ def build_turn_content(
     changed every turn would bust the prefix cache. As uncached tail content it is
     free. `now` is injectable for tests; None reads the wall clock.
 
-    memory_index, when memory is enabled and the index has CHANGED since this
-    conversation last saw it, is the derived table of contents of the room's
-    long-term memory (a line per note). It rides the same uncached tail for the
-    same reason -- and there it stays fresh (a note written this turn shows up
-    next turn), which a cached system-prompt placement could not do. None on the
-    turns in between: the persona's history still holds the latest block, and
-    repeating it every turn only fed near-identical copies to the prefix cache.
+    The memory index is deliberately NOT here. It travels as its own marked
+    message so MemoryIndexMiddleware can find the last copy in the conversation
+    and skip repeating it; folded into this text it would be indistinguishable
+    from the turn around it, and so repeated every turn.
 
     When addressed is set, a human named this agent directly, so the
     NOTHING_TO_ADD escape hatch is withdrawn for this turn. task_prompt carries a
@@ -232,11 +228,6 @@ def build_turn_content(
     """
     stamp = (now or datetime.now().astimezone()).strftime("%A %Y-%m-%d %H:%M %Z")
     when = f"Current time: {stamp.strip()}.\n\n"
-    if memory_index:
-        # The memory table of contents, between the time line and the transcript.
-        # A hook, not the fact: the persona reads a note in full before relying on
-        # it (stated in MEMORY_RULES).
-        when += f"Memory (read a note with memory_read before relying on it):\n{memory_index}\n\n"
     if not unseen:
         body = when + "(You were asked to respond; see the conversation above.)"
     else:
@@ -341,13 +332,6 @@ class AgentRunner:
         self._structured_agents: dict[str, object] = {}
         self._structured_locks: dict[str, asyncio.Lock] = {}
         self._voice_cache: dict[str, str] = {}  # state_key -> cleaned voice body
-        # Memory index injection, deduped per conversation. Built here (not per
-        # turn) because the dedup state is what makes it worth having.
-        self._memory_index = None
-        if cfg.memory.enabled and cfg.memory.path is not None:
-            from .memory import TurnIndex
-
-            self._memory_index = TurnIndex(cfg.memory.path)
 
     @property
     def agents(self) -> dict[str, Persona]:
@@ -496,6 +480,15 @@ class AgentRunner:
             summarizer_model_id=self._cfg.filter_model,
             grounding_tokens=self._cfg.grounding_reminder_tokens,
         )
+        # After base_middleware, so it runs after the summarizer inside it: a
+        # compaction that dropped the last index block is then seen as an absence
+        # in the same pass rather than the next one. Only correctness-neutral
+        # ordering -- absence is re-checked every call either way -- but it keeps
+        # the persona from spending a call without the index it just lost.
+        if not extra_system and self._memory_enabled(persona):
+            from .memory import MemoryIndexMiddleware
+
+            middleware.append(MemoryIndexMiddleware())
         # The growing-prefix cache, then the call budget. The cache is outer to
         # the budget so the ephemeral nudge the budget appends lands in the tail,
         # never the cached prefix.
@@ -590,28 +583,24 @@ class AgentRunner:
         # turn. Race-free: an in-flight turn keeps writing to the old id; only the
         # next turn reads the bumped one.
         gen = self._store.context_generation(thread_id)
-        # Prime recall: inject the memory index into the uncached tail when this
-        # persona has memory AND the index changed since this conversation last
-        # saw it. One git-grep per memory turn, threaded; None for a fresh store
-        # or an unchanged one, in which case nothing is injected.
-        mem_key = (thread_id, skey)
-        mem_index = None
-        if self._memory_index is not None and self._memory_enabled(entry.persona):
-            mem_index = await self._memory_index.for_turn(mem_key, gen)
         content = build_turn_content(
             unseen,
             addressed=addressed,
             task_prompt=task_prompt,
-            memory_index=mem_index,
         )
+        # Prime recall: the index is read once per turn here (one git-grep,
+        # threaded) and handed to MemoryIndexMiddleware, which decides from the
+        # conversation whether the persona still has a current copy. Passed only
+        # for a memory-enabled persona -- the state key exists only on graphs
+        # carrying that middleware.
+        payload: dict = {"messages": [{"role": "user", "content": content}]}
+        if self._memory_enabled(entry.persona):
+            from .memory import memory_index
+
+            payload["memory_index"] = await memory_index(self._cfg.memory.path)
 
         config = {"configurable": turn_config(thread_id, skey, gen, trigger_id)}
-        text, usage = await self._stream(
-            entry.graph,
-            agent_name,
-            {"messages": [{"role": "user", "content": content}]},
-            config,
-        )
+        text, usage = await self._stream(entry.graph, agent_name, payload, config)
         self._tokens.add(
             thread_id,
             agent_name,
@@ -634,12 +623,6 @@ class AgentRunner:
             usage.calls,
             usage.max_call_input,
         )
-        # Record the injected index only now: a turn that raised may have left
-        # nothing in the persona's history, and re-injecting costs one duplicate
-        # block where recording a block that never landed would hide the index
-        # until the next memory write.
-        if mem_index is not None:
-            self._memory_index.injected(mem_key, gen, mem_index)
         if unseen:
             self._store.set_agent_seen(thread_id, skey, unseen[-1].id)
         text = strip_self_attribution(text, agent_name)

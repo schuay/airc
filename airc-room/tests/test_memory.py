@@ -11,12 +11,14 @@ import pytest
 from airc_room.memory import (
     MEMORY_GROUP,
     MEMORY_RULES,
-    TurnIndex,
+    MemoryIndexMiddleware,
     make_memory_tools,
     memory_index,
 )
 from airc_room.memory.jail import Jailbreak, jail
+from airc_room.memory.middleware import _REMINDER_TOKENS, _SRC
 from airc_room.runner import build_turn_content
+from langchain_core.messages import AIMessage, HumanMessage
 
 _VALID = (
     "---\ntitle: T\ntype: user\ndate: 2026-07-23\n"
@@ -345,15 +347,12 @@ async def test_index_excludes_templates_and_underscore_files(tmp_path):
 # --- injection into the per-turn tail --------------------------------------
 
 
-def test_build_turn_content_injects_index_after_time_line():
-    body = build_turn_content([], memory_index="- note.md -- prefers X", now=None)
-    assert "Current time:" in body
-    assert "Memory (read a note" in body
-    assert "- note.md -- prefers X" in body
-
-
-def test_build_turn_content_omits_memory_when_absent():
+def test_build_turn_content_never_carries_the_index():
+    # The composed turn text must stay free of the block: folded in here it
+    # would be indistinguishable from the turn around it, which is what made it
+    # repeat every turn.
     body = build_turn_content([], now=None)
+    assert "Current time:" in body
     assert "Memory (" not in body
 
 
@@ -392,115 +391,120 @@ def test_memory_enabled_without_path_is_a_config_error(tmp_path):
         _cfg_from_toml(tmp_path, "[airc.memory]\nenabled = true\n")
 
 
-# --- change dedup ----------------------------------------------------------
+# --- placement: middleware decides from the conversation ---------------------
 
-_KEY = (1, "perf")
+_IDX = "- note.md -- prefers explicit type annotations"
 
 
-async def test_index_injected_once_until_it_changes(tmp_path):
-    # The point of the dedup: an unchanged index is injected on the first turn
-    # that sees it and on no turn after, so a long thread stops accruing a copy
-    # per turn in the prefix cache.
-    _make_store(tmp_path)
-    tools = _tools(tmp_path)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
+def _block(index: str = _IDX) -> HumanMessage:
+    return HumanMessage(
+        MemoryIndexMiddleware()._block(index), additional_kwargs={"lc_source": _SRC}
     )
-    idx = TurnIndex(tmp_path)
 
-    first = await idx.for_turn(_KEY, 0)
-    assert first == "- note.md -- prefers explicit type annotations"
-    idx.injected(_KEY, 0, first)
 
-    assert await idx.for_turn(_KEY, 0) is None
-    assert await idx.for_turn(_KEY, 0) is None
-
-    # A new note changes the table of contents, so the next turn sees it.
-    second = _VALID.replace("prefers explicit type annotations", "runs the suite first")
-    await tools["memory_write"].ainvoke(
-        {"path": "other.md", "content": second, "message": "add"}
+def _decide(messages: list, index: str = _IDX):
+    """What the middleware would add to state, given a history and an index."""
+    return MemoryIndexMiddleware().before_model(
+        {"messages": messages, "memory_index": index}, None
     )
-    changed = await idx.for_turn(_KEY, 0)
-    assert changed is not None
-    assert "other.md" in changed
 
 
-async def test_dedup_is_per_conversation(tmp_path):
-    # State is keyed on (thread, persona): one persona seeing the index must not
-    # suppress it for another, whose own history holds no copy of it.
-    _make_store(tmp_path)
-    tools = _tools(tmp_path)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
+def _injected(result) -> str:
+    assert result is not None, "expected the index to be injected"
+    return str(result["messages"][0].content)
+
+
+def test_a_conversation_that_has_never_seen_the_index_gets_it():
+    assert _IDX in _injected(_decide([HumanMessage("first turn")]))
+
+
+def test_a_conversation_that_has_it_is_not_given_it_again():
+    assert _decide([HumanMessage("first turn"), _block(), AIMessage("ok")]) is None
+
+
+def test_a_changed_index_is_injected_again():
+    grown = _IDX + "\n- other.md -- runs the suite first"
+    assert "other.md" in _injected(_decide([_block(), AIMessage("ok")], grown))
+
+
+def test_a_summarized_away_block_comes_back():
+    # What the retired side-dict got wrong: a compaction replaces old history
+    # with a summary, so the block is gone while the store is unchanged. Absence
+    # is the trigger, so it returns on the next call with no state to reset.
+    summarized = [
+        HumanMessage("Summary of earlier conversation: they discussed X."),
+        AIMessage("ok"),
+    ]
+    assert _IDX in _injected(_decide(summarized))
+
+
+def test_a_buried_block_is_refreshed():
+    # Still present, but far enough back that the persona has stopped seeing it.
+    filler = AIMessage("x" * (_REMINDER_TOKENS * 4 + 100))
+    assert _IDX in _injected(_decide([_block(), filler]))
+
+
+def test_a_recent_block_is_not_refreshed():
+    filler = AIMessage("x" * 400)
+    assert _decide([_block(), filler]) is None
+
+
+def test_no_index_no_block():
+    # An empty store (or a persona without memory) contributes nothing.
+    assert _decide([HumanMessage("first turn")], "") is None
+
+
+async def test_dedup_holds_across_real_turns(tmp_path):
+    # The unit tests above assert the decision; this asserts it survives a real
+    # graph, checkpointer and state reducer -- that the block persists into the
+    # checkpoint and is found again on the next turn.
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    model = GenericFakeChatModel(messages=iter([AIMessage("a"), AIMessage("b")]))
+    graph = create_agent(
+        model,
+        tools=[],
+        middleware=[MemoryIndexMiddleware()],
+        checkpointer=InMemorySaver(),
     )
-    idx = TurnIndex(tmp_path)
+    cfg = {"configurable": {"thread_id": "t1"}}
 
-    first = await idx.for_turn(_KEY, 0)
-    idx.injected(_KEY, 0, first)
-    assert await idx.for_turn((1, "gc"), 0) is not None  # other persona, same thread
-    assert await idx.for_turn((2, "perf"), 0) is not None  # same persona, other thread
-
-
-async def test_generation_bump_reinjects(tmp_path):
-    # A compaction bumps the generation and starts the persona from a fresh
-    # checkpoint, so the copy in its old history is gone with it.
-    _make_store(tmp_path)
-    tools = _tools(tmp_path)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
+    await graph.ainvoke({"messages": [HumanMessage("one")], "memory_index": _IDX}, cfg)
+    out = await graph.ainvoke(
+        {"messages": [HumanMessage("two")], "memory_index": _IDX}, cfg
     )
-    idx = TurnIndex(tmp_path)
-    first = await idx.for_turn(_KEY, 0)
-    idx.injected(_KEY, 0, first)
-
-    assert await idx.for_turn(_KEY, 0) is None
-    assert await idx.for_turn(_KEY, 1) is not None
+    blocks = [
+        m for m in out["messages"] if m.additional_kwargs.get("lc_source") == _SRC
+    ]
+    assert len(blocks) == 1, "the second turn must not repeat an unchanged index"
 
 
-async def test_uninjected_index_is_not_recorded(tmp_path):
-    # for_turn must not record on its own: a turn that raises before the block
-    # reaches the persona has to re-inject, or the index is hidden until the next
-    # memory write.
-    _make_store(tmp_path)
-    tools = _tools(tmp_path)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
-    )
-    idx = TurnIndex(tmp_path)
-    assert await idx.for_turn(_KEY, 0) is not None
-    assert await idx.for_turn(_KEY, 0) is not None  # still pending: never recorded
-
-
-async def test_empty_store_injects_nothing_and_records_nothing(tmp_path):
-    _make_store(tmp_path)
-    idx = TurnIndex(tmp_path)
-    assert await idx.for_turn(_KEY, 0) is None
-    # A note added later is still injected -- the empty pass recorded no state.
-    tools = _tools(tmp_path)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
-    )
-    assert await idx.for_turn(_KEY, 0) is not None
-
-
-# --- dedup through the real runner ------------------------------------------
-
-
-def _memory_runner(tmp_path, store_root):
-    """A real AgentRunner wired to a memory store, with one memory-enabled
-    persona. Mirrors test_timers' harness: everything but _stream is the real
-    turn path, which is the half the TurnIndex unit tests cannot cover."""
+async def test_runner_hands_the_index_to_the_graph(tmp_path, monkeypatch):
+    # The runner's half of the split: read the store once per turn and pass it
+    # in. The key rides only for a memory-enabled persona -- a graph without the
+    # middleware has no such state key to accept it.
     from airc_room.config import Config
     from airc_room.personas import Persona
-    from airc_room.runner import AgentRunner, _AgentEntry
+    from airc_room.runner import AgentRunner, _AgentEntry, _TurnUsage
     from airc_room.store import Store
+
+    root = tmp_path / "store"
+    root.mkdir()
+    _make_store(root)
+    tools = _tools(root)
+    await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "add"}
+    )
 
     store = Store(tmp_path / "airc.db")
     thread = store.create_thread("t")
+    store.add_message(thread.id, "human", "human", "hello")
     cfg = Config()
     cfg.token_db_path = tmp_path / "tokens.db"
     cfg.memory.enabled = True
-    cfg.memory.path = store_root
+    cfg.memory.path = root
     runner = AgentRunner(cfg, {}, object(), store)
     persona = Persona(
         name="Sonic",
@@ -510,71 +514,28 @@ def _memory_runner(tmp_path, store_root):
         key="perf",
         tool_groups=(MEMORY_GROUP,),
     )
-    runner._agents = {"Sonic": _AgentEntry(persona=persona, graph=object())}
-    return runner, store, thread
-
-
-async def test_runner_injects_the_index_once_then_omits_it(tmp_path, monkeypatch):
-    from airc_room.runner import _TurnUsage
-
-    root = tmp_path / "store"
-    root.mkdir()
-    _make_store(root)
-    tools = _tools(root)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
+    plain = Persona(
+        name="Tails",
+        display_name="Tails",
+        description="d",
+        system_prompt="",
+        key="docs",
     )
-    runner, store, thread = _memory_runner(tmp_path, root)
+    runner._agents = {
+        "Sonic": _AgentEntry(persona=persona, graph=object()),
+        "Tails": _AgentEntry(persona=plain, graph=object()),
+    }
 
-    sent: list[str] = []
+    payloads: list[dict] = []
 
     async def _fake_stream(graph, agent_name, payload, config):
-        sent.append(payload["messages"][0]["content"])
+        payloads.append(payload)
         return "ok", _TurnUsage()
 
     monkeypatch.setattr(runner, "_stream", _fake_stream)
-
-    store.add_message(thread.id, "human", "human", "one")
     await runner.run_turn("Sonic", thread.id, addressed=True)
-    store.add_message(thread.id, "human", "human", "two")
-    await runner.run_turn("Sonic", thread.id, addressed=True)
+    await runner.run_turn("Tails", thread.id, addressed=True)
     store.close()
 
-    assert "prefers explicit type annotations" in sent[0]
-    assert "Memory (" not in sent[1]  # unchanged: not repeated into the history
-
-
-async def test_runner_reinjects_after_a_failed_turn(tmp_path, monkeypatch):
-    # A turn that raised may have left nothing in the persona's history, so the
-    # index it carried must come back on the retry rather than be marked seen.
-    from airc_room.runner import _TurnUsage
-
-    root = tmp_path / "store"
-    root.mkdir()
-    _make_store(root)
-    tools = _tools(root)
-    await tools["memory_write"].ainvoke(
-        {"path": "note.md", "content": _VALID, "message": "add"}
-    )
-    runner, store, thread = _memory_runner(tmp_path, root)
-
-    sent: list[str] = []
-
-    async def _boom(graph, agent_name, payload, config):
-        sent.append(payload["messages"][0]["content"])
-        raise RuntimeError("model died")
-
-    monkeypatch.setattr(runner, "_stream", _boom)
-    store.add_message(thread.id, "human", "human", "one")
-    with pytest.raises(RuntimeError):
-        await runner.run_turn("Sonic", thread.id, addressed=True)
-
-    async def _ok(graph, agent_name, payload, config):
-        sent.append(payload["messages"][0]["content"])
-        return "ok", _TurnUsage()
-
-    monkeypatch.setattr(runner, "_stream", _ok)
-    await runner.run_turn("Sonic", thread.id, addressed=True)
-    store.close()
-
-    assert all("prefers explicit type annotations" in s for s in sent)
+    assert _IDX in payloads[0]["memory_index"]
+    assert "memory_index" not in payloads[1]  # no middleware, no state key

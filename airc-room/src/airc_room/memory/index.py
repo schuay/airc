@@ -15,14 +15,13 @@ relevant. Cheap enough (one subprocess, threaded) to run every memory-enabled
 persona turn against a small store; when it stops being cheap the block clips,
 which is the documented signal to graduate to query-keyed retrieval.
 
-The grep runs every turn, but the block is injected only when it changed since
-the conversation last saw it -- see TurnIndex.
+The grep runs every turn; whether its result is put in front of the persona is
+MemoryIndexMiddleware's decision, made from the conversation's own history.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import subprocess
 from pathlib import Path
 
@@ -95,64 +94,3 @@ def _build(root: Path) -> str:
     if len(body) > _MAX_INDEX_BYTES:
         body = body[:_MAX_INDEX_BYTES] + "\n[... memory index truncated ...]"
     return body
-
-
-class TurnIndex:
-    """The per-turn index source, with change dedup.
-
-    Injecting the index on EVERY turn was a copy per turn, forever: each one
-    lands in a user-role message that the growing prefix cache then absorbs as
-    ordinary history (_last_step_boundary accepts a HumanMessage slice point), so
-    a long thread paid for the same table of contents dozens of times over. That
-    cost scales with turn count, which no store-size bound can catch.
-
-    So a turn injects the index only when it DIFFERS from the one this
-    (thread, persona) last saw. The persona still holds the most recent copy in
-    its own history, and the git grep still runs every turn -- the subprocess was
-    never the cost, and running it is what keeps a note written this turn visible
-    on the next one.
-
-    State is per process and deliberately not persisted: after a restart the
-    first turn of each conversation re-injects once. That is the harmless
-    direction (one duplicate copy) where the alternative -- a store table to
-    avoid it -- buys a migration to save a few hundred tokens.
-    """
-
-    def __init__(self, root: Path):
-        self._root = root
-        # (thread, persona stable key) -> (context generation, index digest).
-        # The generation rides in the VALUE rather than the key so a compaction
-        # bump replaces its entry instead of adding one, bounding this at
-        # threads * personas.
-        self._seen: dict[tuple[int, str], tuple[int, str]] = {}
-
-    async def for_turn(self, key: tuple[int, str], generation: int) -> str | None:
-        """The index to inject this turn, or None to inject nothing -- which
-        covers both "unchanged since this conversation last saw it" and "the
-        store is empty". Both mean the same thing to the caller.
-
-        A generation bump counts as changed: a compaction starts the persona from
-        a fresh checkpoint, so the copy in its old history is gone with it.
-        """
-        index = await memory_index(self._root)
-        if not index:
-            return None
-        prev = self._seen.get(key)
-        if prev is not None and prev == (generation, _digest(index)):
-            return None
-        return index
-
-    def injected(self, key: tuple[int, str], generation: int, index: str) -> None:
-        """Record what a turn actually put in front of the persona.
-
-        Called by the caller AFTER the turn completes, never by for_turn itself:
-        a turn that raises may leave nothing in the persona's history, and
-        re-injecting into a history that already has the block merely duplicates
-        it, where recording an injection that never happened would drop the index
-        until the next memory write.
-        """
-        self._seen[key] = (generation, _digest(index))
-
-
-def _digest(index: str) -> str:
-    return hashlib.sha256(index.encode()).hexdigest()
