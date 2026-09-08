@@ -73,3 +73,31 @@ def test_an_info_string_fence_inside_a_block_does_not_close_it():
     # The trailing prose left the block, so the last page must not be fenced open.
     assert "after" in pages[-1]
     assert not pages[-1].rstrip().endswith("```")
+
+
+def test_truncate_to_pages_bounds_text_that_a_character_budget_would_not():
+    from airc_room.paging import truncate_to_pages
+
+    # One unbroken line: _cut can only hard-split it, and a diff whose lines are
+    # long leaves each page short of its budget -- the case a tuned constant
+    # misses. 40k characters is well past three pages at any of our limits.
+    text = "*headline*\n\n```diff\n" + "x" * 40000 + "\n```\n"
+    cut = truncate_to_pages(text, 3, note="\n\n_(truncated)_")
+    assert len(paginate(cut)) <= 3
+    assert cut.endswith("_(truncated)_")
+    assert cut.startswith("*headline*")
+
+
+def test_truncate_to_pages_leaves_text_that_already_fits_alone():
+    from airc_room.paging import truncate_to_pages
+
+    text = "short enough\n\nto need nothing"
+    assert truncate_to_pages(text, 3, note="_(truncated)_") == text
+
+
+def test_a_paragraph_break_near_the_start_does_not_cost_a_whole_page():
+    # A repro post opens "headline\n\n" and then runs unbroken diff lines. The
+    # break after the headline must not be the one chosen for page one.
+    text = "headline\n\n" + "\n".join("+ diff line here" for _ in range(400))
+    pages = paginate(text, limit=600)
+    assert len(pages[0]) > 400

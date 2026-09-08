@@ -22,6 +22,56 @@ def page_token(scope: str, message_id: int, part: int) -> str:
     return sha256(material).hexdigest()
 
 
+def _budget_for_pages(pages: int, *, limit: int = DEFAULT_PAGE_LIMIT) -> int:
+    """The most text that could fit in `pages` pages, if every page filled.
+
+    The overheads are the ones _page_pairs charges: the part marker on every
+    page (widest count, so the answer does not depend on which page it lands
+    on) and a fence that may reopen and close.
+
+    A ceiling, not a promise, which is why it is private: _cut stops at a clean
+    boundary, so a page closes early whenever the text has no break near its
+    end, and the spilled remainder can still need one more page. A caller that
+    needs the bound to hold has to measure -- see truncate_to_pages.
+    """
+    if pages < 1:
+        raise ValueError("page count must be positive")
+    overhead = len(f"\n\n{part_marker(pages, pages)}") + _FENCE_OVERHEAD
+    return pages * (limit - overhead)
+
+
+def truncate_to_pages(
+    text: str,
+    pages: int,
+    *,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    note: str = "",
+) -> str:
+    """`text`, cut until it pages into at most `pages` pages. Appends `note`.
+
+    Measured rather than budgeted. The arithmetic ceiling assumes every page
+    fills, and a page that ends on a clean break does not: a repro whose diff
+    is one long minified line can leave most of a page unused, so a character
+    cap picked to look right is a cap that holds for the text it was tuned on.
+    This asks the pager instead, so the bound is the one the caller stated.
+
+    Shrinks by a fraction of a page at a time. The loop is entered only by text
+    already over the bound, and each step re-pages a string that is only
+    getting shorter, so it costs a handful of passes at the point where a post
+    was going to be cut anyway.
+    """
+    if len(paginate(text, limit=limit)) <= pages:
+        return text
+    room = _budget_for_pages(pages, limit=limit)
+    step = max(1, limit // 8)
+    while room > len(note):
+        candidate = text[: room - len(note)] + note
+        if len(paginate(candidate, limit=limit)) <= pages:
+            return candidate
+        room -= step
+    return note
+
+
 def _cut(text: str, limit: int) -> int:
     """Choose a nonempty prefix no longer than limit, preferring clean breaks."""
     if len(text) <= limit:
@@ -31,11 +81,19 @@ def _cut(text: str, limit: int) -> int:
     # enough to breach, because a fenced page already spends its whole
     # _FENCE_OVERHEAD allowance and has no slack left to absorb it.
     window = text[:limit]
+    # The LATEST break, not the strongest one anywhere in the window. Ranking the
+    # needles instead costs a whole page whenever a paragraph break sits early:
+    # a repro post opens "headline\n\n" and then runs thousands of unbroken diff
+    # lines, so preferring "\n\n" put the headline alone on page one and pushed
+    # everything after it one message further along. Every candidate here is
+    # already a clean boundary, so the tie between them is worth less than the
+    # room lost, and a tie on the same end position keeps the widest needle.
+    best = 0
     for needle in ("\n\n", "\n", ". ", " "):
         at = window.rfind(needle)
         if at > 0:
-            return at + len(needle)
-    return limit
+            best = max(best, at + len(needle))
+    return best or limit
 
 
 def _split(text: str, limit: int) -> list[str]:
