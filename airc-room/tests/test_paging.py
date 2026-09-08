@@ -59,3 +59,17 @@ def test_a_clean_break_at_the_budget_edge_stays_inside_it():
     text = "b.  a\n```\n\n\n\na. a. \n\n\n "
     pages = paginate(text, limit=30)
     assert all(len(page) <= 30 for page in pages)
+
+
+def test_an_info_string_fence_inside_a_block_does_not_close_it():
+    # A diff inlined in a ```diff block can carry a ```js context line. Markdown
+    # closes only on bare backticks, so that line is content -- counting it as a
+    # toggle would leave every later page's fence decoration inverted.
+    body = "\n".join(f"+ line {i}" for i in range(60))
+    text = "```diff\n ```js\n" + body + "\n```\nafter"
+    pages = paginate(text, limit=120)
+    assert len(pages) > 1
+    assert all(len(page) <= 120 for page in pages)
+    # The trailing prose left the block, so the last page must not be fenced open.
+    assert "after" in pages[-1]
+    assert not pages[-1].rstrip().endswith("```")

@@ -50,8 +50,25 @@ def _split(text: str, limit: int) -> list[str]:
     return pages or [""]
 
 
-def _fence_count(text: str) -> int:
-    return sum(line.lstrip().startswith("```") for line in text.splitlines())
+def _fence_open_after(text: str, opened: bool) -> bool:
+    """Whether a fence is open at the end of text, given its state at the start.
+
+    A walk rather than a parity count, because the two directions do not obey
+    the same rule: a fence line carrying an info string (```js) can only OPEN a
+    block. Markdown closes only on backticks and whitespace, so a ```js inside
+    an inlined diff is content, and counting it as a toggle would close a block
+    the renderer leaves open -- then every later page is decorated inside out.
+    Indentation is stripped because an indented fence still is one.
+    """
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("```"):
+            continue
+        if not opened:
+            opened = True
+        elif not stripped.removeprefix("```").strip():
+            opened = False
+    return opened
 
 
 def _balance_fences(bodies: list[str]) -> list[str]:
@@ -60,7 +77,7 @@ def _balance_fences(bodies: list[str]) -> list[str]:
     opened = False
     for body in bodies:
         starts_open = opened
-        opened = opened ^ bool(_fence_count(body) % 2)
+        opened = _fence_open_after(body, starts_open)
         page = body
         if starts_open:
             page = "```\n" + page
