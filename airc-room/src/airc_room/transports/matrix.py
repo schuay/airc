@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import logging
 import re
+from dataclasses import replace
 from html import escape
 
 import mistune
@@ -44,6 +45,7 @@ from nio import (
     RoomMessageText,
 )
 
+from ..paging import page_token, paginate_message
 from ..room import Room
 from ..store import Message, MessageKind, Store
 
@@ -201,34 +203,34 @@ class MatrixTransport:
             return
         room_id, root = self._room_and_thread(msg.thread_id)
         if not room_id:
-            log.warning(
-                "matrix: no room mapped for thread %d; dropping %s",
-                msg.thread_id,
-                msg.kind,
+            raise RuntimeError(
+                f"matrix: no room mapped for thread {msg.thread_id};"
+                f" cannot deliver {msg.kind}"
             )
-            return
-        body, html = _render(msg)
-        content: dict = {"msgtype": "m.text", "body": body}
-        if html is not None:
-            content["format"] = "org.matrix.custom.html"
-            content["formatted_body"] = html
-        # Thread the message only when threads are enabled AND this room thread
-        # already has a root; the first message for a thread is sent flat and
-        # becomes that root (linked below), so later ones relate back to it.
-        if self._cfg.use_threads and root:
-            content.update(self._thread_relation(root))
-        resp = await self._client.room_send(
-            room_id, message_type="m.room.message", content=content
+        pages = paginate_message(
+            msg.text, render=lambda body: _render(replace(msg, text=body))[0]
         )
-        event_id = getattr(resp, "event_id", None)
-        if not event_id:
-            log.error("matrix: send to %s failed: %s", room_id, resp)
-            return
-        log.info("matrix: sent %s to %s", msg.kind, room_id)
-        # First send for this room thread: record it as the thread root so
-        # subsequent sends (and, with threads on, the relation) converge on it.
-        if self._cfg.use_threads and not root:
-            self._store.link_chat_thread(room_id, event_id, msg.thread_id)
+        for part, (page, _) in enumerate(pages, 1):
+            body, html = _render(replace(msg, text=page))
+            content: dict = {"msgtype": "m.text", "body": body}
+            if html is not None:
+                content["format"] = "org.matrix.custom.html"
+                content["formatted_body"] = html
+            if self._cfg.use_threads and root:
+                content.update(self._thread_relation(root))
+            resp = await self._client.room_send(
+                room_id,
+                message_type="m.room.message",
+                content=content,
+                tx_id=page_token(f"matrix:{room_id}", msg.id, part),
+            )
+            event_id = getattr(resp, "event_id", None)
+            if not event_id:
+                raise RuntimeError(f"matrix send to {room_id} returned no event id")
+            log.info("matrix: sent %s page to %s", msg.kind, room_id)
+            if self._cfg.use_threads and not root:
+                self._store.link_chat_thread(room_id, event_id, msg.thread_id)
+                root = event_id
 
     async def typing(
         self, thread_id: int, sender: str, active: bool, budget: float | None = None

@@ -28,6 +28,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import print_formatted_text
 
+from ..paging import paginate
 from ..room import Room, Transport
 from ..store import Message, MessageKind
 
@@ -78,13 +79,14 @@ class ConsoleTransport(Transport):
         # id is opaque here, so only the email fallback reads usefully -- both are
         # rendered the same, prefixed, so the intent is visible.
         text = f"ping {msg.text}" if msg.kind == MessageKind.PING else msg.text
-        line = [
-            ("ansibrightblack", f"{ts} "),
-            ("ansibrightblack", f"[t{msg.thread_id}] "),
-            (_color(msg.sender), f"[{msg.sender}] "),
-            (style, text),
-        ]
-        print_formatted_text(FormattedText(line))
+        for page in paginate(text):
+            line = [
+                ("ansibrightblack", f"{ts} "),
+                ("ansibrightblack", f"[t{msg.thread_id}] "),
+                (_color(msg.sender), f"[{msg.sender}] "),
+                (style, page),
+            ]
+            print_formatted_text(FormattedText(line))
 
     async def on_event(self, agent: str, event: str, detail: str) -> None:
         print_formatted_text(

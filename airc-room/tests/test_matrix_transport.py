@@ -74,7 +74,7 @@ class _FakeClient:
     async def sync(self, **k):
         return SimpleNamespace(next_batch="s1")
 
-    async def room_send(self, room_id, message_type, content):
+    async def room_send(self, room_id, message_type, content, tx_id=None):
         self._next_event_id += 1
         eid = f"$sent{self._next_event_id}:example.org"
         self.sent.append((room_id, content))
