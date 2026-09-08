@@ -50,3 +50,12 @@ def test_a_fence_is_closed_and_reopened_on_every_page():
 def test_page_tokens_are_stable_and_page_specific():
     assert page_token("chat", 42, 1) == page_token("chat", 42, 1)
     assert page_token("chat", 42, 1) != page_token("chat", 42, 2)
+
+
+def test_a_clean_break_at_the_budget_edge_stays_inside_it():
+    # A break candidate ending one past the budget must not be taken: the page
+    # body it yields is over by one, and a fenced page spends its whole fence
+    # allowance, so the overflow lands on the rendered page.
+    text = "b.  a\n```\n\n\n\na. a. \n\n\n "
+    pages = paginate(text, limit=30)
+    assert all(len(page) <= 30 for page in pages)

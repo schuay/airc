@@ -26,9 +26,13 @@ def _cut(text: str, limit: int) -> int:
     """Choose a nonempty prefix no longer than limit, preferring clean breaks."""
     if len(text) <= limit:
         return len(text)
-    window = text[: limit + 1]
+    # The break must END within the budget, not start there: a needle whose last
+    # character sits at index `limit` yields a prefix of limit + 1. One over is
+    # enough to breach, because a fenced page already spends its whole
+    # _FENCE_OVERHEAD allowance and has no slack left to absorb it.
+    window = text[:limit]
     for needle in ("\n\n", "\n", ". ", " "):
-        at = window.rfind(needle, 0, limit + 1)
+        at = window.rfind(needle)
         if at > 0:
             return at + len(needle)
     return limit
