@@ -52,6 +52,39 @@ class ArtifactLog:
             return False
         return any((self._root / category).glob(f"*-{slug(key)}.{ext}"))
 
+    def write_now(
+        self, category: str, key: str, text: str, ext: str = "md"
+    ) -> Path | None:
+        """`write`, synchronously. For a caller that cannot await: the one real
+        case is a cancellation handler preserving its artifact during shutdown,
+        where an await invites a second cancel and the file is the only thing
+        standing between a human and losing the work.
+
+        The write is a single small file, so blocking a caller that COULD await
+        costs it nothing measurable -- `write` exists for tidiness, not because
+        the thread is load-bearing.
+        """
+        if self._root is None:
+            return None
+        try:
+            folder = self._root / category
+            folder.mkdir(parents=True, exist_ok=True)
+            name = f"{time.strftime('%Y-%m-%d')}-{slug(key)}.{ext}"
+            path = folder / name
+            # Always UTF-8: model output and code carry non-ASCII, and a service
+            # without LANG set defaults write_text to the locale (often ASCII),
+            # which would raise UnicodeEncodeError on the first such char.
+            path.write_text(text, encoding="utf-8")
+        except Exception as e:
+            # Best-effort trace: any failure (disk full, bad path, an encode
+            # error) is logged and swallowed -- it must never sink, or re-loop,
+            # the work it traces. Broad on purpose: a non-OSError here (e.g.
+            # UnicodeEncodeError, a ValueError) used to escape and fail the turn.
+            log.warning("artifacts: %s/%s: not written: %s", category, key, e)
+            return None
+        log.info("artifacts: wrote %s", path)
+        return path
+
     async def write(
         self, category: str, key: str, text: str, ext: str = "md"
     ) -> Path | None:
@@ -64,23 +97,4 @@ class ArtifactLog:
         file in the message telling a human to go read it -- and to say so
         loudly when there is no file to name.
         """
-        if self._root is None:
-            return None
-        try:
-            folder = self._root / category
-            folder.mkdir(parents=True, exist_ok=True)
-            name = f"{time.strftime('%Y-%m-%d')}-{slug(key)}.{ext}"
-            path = folder / name
-            # Always UTF-8: model output and code carry non-ASCII, and a service
-            # without LANG set defaults write_text to the locale (often ASCII),
-            # which would raise UnicodeEncodeError on the first such char.
-            await asyncio.to_thread(path.write_text, text, encoding="utf-8")
-        except Exception as e:
-            # Best-effort trace: any failure (disk full, bad path, an encode
-            # error) is logged and swallowed -- it must never sink, or re-loop,
-            # the work it traces. Broad on purpose: a non-OSError here (e.g.
-            # UnicodeEncodeError, a ValueError) used to escape and fail the turn.
-            log.warning("artifacts: %s/%s: not written: %s", category, key, e)
-            return None
-        log.info("artifacts: wrote %s", path)
-        return path
+        return await asyncio.to_thread(self.write_now, category, key, text, ext)
