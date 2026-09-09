@@ -149,14 +149,13 @@ def _fence_open_after(text: str, opened: int) -> int:
     and counting it as a toggle would close a block the renderer leaves open --
     then every later page is decorated inside out.
 
-    The LENGTH rather than a flag, because markdown closes a fence only on a
-    run at least as long as the one that opened it: a block opened with four
-    backticks to survive quoting a fence is not closed by the three-backtick
-    line inside it. Read as a flag, that
-    line ended the block, the closing four-backtick line opened a new one, and
-    the pages in between were emitted with no fence at all -- spilling the
-    block's content into live chat markup, which is the leak the long opening
-    fence existed to prevent.
+    The LENGTH rather than a flag, because markdown closes a fence only on a run
+    at least as long as the one that opened it: a block opened with four
+    backticks to survive quoting a fence is not closed by the three-backtick line
+    inside it. Read as a flag, that line ended the block, the closing
+    four-backtick line opened a new one, and the pages in between were emitted
+    with no fence at all -- spilling the block's content into live chat markup,
+    which is the leak the long opening fence existed to prevent.
     """
     for line in text.splitlines():
         run = _fence_run(line)
