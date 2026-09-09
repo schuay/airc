@@ -30,6 +30,7 @@ from .model import register_provider
 DATA_DIR = user_data_path("airc")
 DEFAULT_BUS_ROOT = DATA_DIR / "bus"
 DEFAULT_TOKEN_DB = DATA_DIR / "tokens.db"
+DEFAULT_ARTIFACTS_DIR = DATA_DIR / "artifacts"
 
 # Maps a short group name (referenced from agent configs) to fnmatch patterns
 # over MCP tool names. Tools are named as <server_name>__<tool_name> to avoid
@@ -175,6 +176,12 @@ class CommonConfig:
     gcp: dict[str, str] = field(default_factory=dict)
     bus_root: Path = field(default_factory=lambda: DEFAULT_BUS_ROOT)
     token_db_path: Path = field(default_factory=lambda: DEFAULT_TOKEN_DB)
+    #: Root for ArtifactLog renderings (a review trail, a report for work that
+    #: had to be abandoned). Suite-wide like bus_root, and for the same reason:
+    #: more than one component writes there, and a per-component key is how two
+    #: of them end up writing to different directories after an operator moves
+    #: one. None disables the trail entirely ("" in the config).
+    artifacts_dir: Path | None = field(default_factory=lambda: DEFAULT_ARTIFACTS_DIR)
     repos: dict[str, str] = field(default_factory=dict)  # logical name -> checkout
     caching_explicit: bool = True
     cache_ttl_minutes: int = 30
@@ -252,6 +259,11 @@ def load_common(raw: Mapping) -> CommonConfig:
         cfg.bus_root = Path(v).expanduser()
     if v := raw.get("token_db_path"):
         cfg.token_db_path = Path(v).expanduser()
+    # Presence-checked rather than truth-checked: "" is the documented spelling
+    # for "no on-disk trail", and `if v :=` would silently leave the default.
+    if "artifacts_dir" in raw:
+        v = raw["artifacts_dir"]
+        cfg.artifacts_dir = Path(v).expanduser() if v else None
     cfg.repos = {k: str(Path(v).expanduser()) for k, v in raw.get("repos", {}).items()}
     if caching := raw.get("caching"):
         reject_unknown(caching, {"explicit", "ttl_minutes"}, "[caching]")

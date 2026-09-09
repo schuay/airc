@@ -72,7 +72,7 @@ DATA_DIR = user_data_path("airc")
 # outside this set is a typo (`[watchers]`, `[air]`) that would otherwise be
 # silently ignored, so load_config errors on it. The set spans the whole suite,
 # not just the room: models/model_providers/mcp/gcp/tool_groups/caching/
-# bus_root/token_db_path/repos are the shared sections
+# bus_root/token_db_path/artifacts_dir/repos are the shared sections
 # airc_core.load_common parses; handover is suite
 # policy read by airc and the processor; the sibling-daemon namespaces
 # ([watchers.*]/[processors.*]/[icompleteu.*]) live in this same file and are
@@ -90,6 +90,7 @@ _KNOWN_TOPLEVEL = frozenset(
         "caching",
         "bus_root",
         "token_db_path",
+        "artifacts_dir",
         "repos",
         "handover",
         "transport",
@@ -456,6 +457,9 @@ class Config:
     # component processes can write to it concurrently under WAL). Kept apart
     # from db_path, which holds airc's threads/messages.
     token_db_path: Path = field(default_factory=lambda: DATA_DIR / "tokens.db")
+    # Suite-wide root for ArtifactLog renderings; None disables them. Parsed in
+    # airc_core.load_common with the other shared sections.
+    artifacts_dir: Path | None = field(default_factory=lambda: DATA_DIR / "artifacts")
     # Explicit Vertex context caching of each conversation's growing
     # [system + history] prefix. A no-op for non google_vertexai:* models, and
     # degrades to uncached when a cache cannot be created (e.g. an mTLS-enforcing
@@ -524,7 +528,8 @@ def load_config(path: Path | None = None) -> Config:
         )
 
     # Shared suite sections (models, mcp, gcp, tool_groups, caching, bus_root,
-    # token_db_path, repos) are parsed once in airc_core so every component reads
+    # token_db_path, artifacts_dir, repos) are parsed once in airc_core so every
+    # component reads
     # them identically; airc overlays its own keys below.
     common = load_common(raw)
     default_model = common.models.get("default", DEFAULT_MODEL)
@@ -537,6 +542,7 @@ def load_config(path: Path | None = None) -> Config:
     )
     cfg.bus_root = common.bus_root
     cfg.token_db_path = common.token_db_path
+    cfg.artifacts_dir = common.artifacts_dir
     cfg.repos = common.repos
     cfg.caching_explicit = common.caching_explicit
     cfg.cache_ttl_minutes = common.cache_ttl_minutes
