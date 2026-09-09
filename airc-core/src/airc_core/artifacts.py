@@ -52,11 +52,20 @@ class ArtifactLog:
             return False
         return any((self._root / category).glob(f"*-{slug(key)}.{ext}"))
 
-    async def write(self, category: str, key: str, text: str, ext: str = "md") -> None:
+    async def write(
+        self, category: str, key: str, text: str, ext: str = "md"
+    ) -> Path | None:
         """Write `text` to <root>/<category>/<date>-<slug(key)>.<ext>. A same-day
-        re-run with the same key overwrites (idempotent, latest wins)."""
+        re-run with the same key overwrites (idempotent, latest wins).
+
+        Returns the path written, or None when disabled or the write failed. A
+        caller that only wants the trace can ignore it; one whose artifact is the
+        recovery path for work it is about to abandon has to be able to NAME the
+        file in the message telling a human to go read it -- and to say so
+        loudly when there is no file to name.
+        """
         if self._root is None:
-            return
+            return None
         try:
             folder = self._root / category
             folder.mkdir(parents=True, exist_ok=True)
@@ -66,10 +75,12 @@ class ArtifactLog:
             # without LANG set defaults write_text to the locale (often ASCII),
             # which would raise UnicodeEncodeError on the first such char.
             await asyncio.to_thread(path.write_text, text, encoding="utf-8")
-            log.info("artifacts: wrote %s", path)
         except Exception as e:
             # Best-effort trace: any failure (disk full, bad path, an encode
             # error) is logged and swallowed -- it must never sink, or re-loop,
             # the work it traces. Broad on purpose: a non-OSError here (e.g.
             # UnicodeEncodeError, a ValueError) used to escape and fail the turn.
             log.warning("artifacts: %s/%s: not written: %s", category, key, e)
+            return None
+        log.info("artifacts: wrote %s", path)
+        return path
