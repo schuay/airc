@@ -192,6 +192,12 @@ ttl_minutes = 30           # cache lifetime; clamped up if below the turn deadli
 # the suite; every topic lives under it.
 # bus_root = "~/.local/share/airc/bus"
 
+# Root for the on-disk trail of derived, human-readable records: the reviewers'
+# review trail, and a bug report the room had to abandon (unfiled-bugs/). Shared
+# for the same reason bus_root is -- more than one component writes there.
+# "" disables it entirely.
+# artifacts_dir = "~/.local/share/airc/artifacts"
+
 # Logical repo name -> local checkout. Shared, so components that resolve a repo
 # by name agree on where it is.
 # [repos]
