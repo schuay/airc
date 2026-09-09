@@ -9,7 +9,12 @@ from collections.abc import Callable
 from hashlib import sha256
 
 DEFAULT_PAGE_LIMIT = 3800
-_FENCE_OVERHEAD = len("```\n") + len("\n```")
+
+# The shortest run of backticks that can open a fence. Longer openings are
+# ordinary: a sender that needs a block to survive content mentioning a fence
+# opens with more than the longest run inside it, so the length is data here and
+# not a constant (see _fence_overhead).
+_MIN_FENCE = 3
 
 
 def part_marker(part: int, total: int) -> str:
@@ -22,7 +27,9 @@ def page_token(scope: str, message_id: int, part: int) -> str:
     return sha256(material).hexdigest()
 
 
-def _budget_for_pages(pages: int, *, limit: int = DEFAULT_PAGE_LIMIT) -> int:
+def _budget_for_pages(
+    pages: int, *, limit: int = DEFAULT_PAGE_LIMIT, fence_overhead: int
+) -> int:
     """The most text that could fit in `pages` pages, if every page filled.
 
     The overheads are the ones _page_pairs charges: the part marker on every
@@ -36,7 +43,7 @@ def _budget_for_pages(pages: int, *, limit: int = DEFAULT_PAGE_LIMIT) -> int:
     """
     if pages < 1:
         raise ValueError("page count must be positive")
-    overhead = len(f"\n\n{part_marker(pages, pages)}") + _FENCE_OVERHEAD
+    overhead = len(f"\n\n{part_marker(pages, pages)}") + fence_overhead
     return pages * (limit - overhead)
 
 
@@ -62,7 +69,7 @@ def truncate_to_pages(
     """
     if len(paginate(text, limit=limit)) <= pages:
         return text
-    room = _budget_for_pages(pages, limit=limit)
+    room = _budget_for_pages(pages, limit=limit, fence_overhead=_fence_overhead(text))
     step = max(1, limit // 8)
     while room > len(note):
         candidate = text[: room - len(note)] + note
@@ -108,39 +115,76 @@ def _split(text: str, limit: int) -> list[str]:
     return pages or [""]
 
 
-def _fence_open_after(text: str, opened: bool) -> bool:
-    """Whether a fence is open at the end of text, given its state at the start.
+def _fence_run(line: str) -> int:
+    """The length of the backtick run opening `line`, or 0 if it is not a fence.
 
-    A walk rather than a parity count, because the two directions do not obey
-    the same rule: a fence line carrying an info string (```js) can only OPEN a
-    block. Markdown closes only on backticks and whitespace, so a ```js inside
-    an inlined diff is content, and counting it as a toggle would close a block
-    the renderer leaves open -- then every later page is decorated inside out.
     Indentation is stripped because an indented fence still is one.
     """
+    stripped = line.lstrip()
+    run = len(stripped) - len(stripped.lstrip("`"))
+    return run if run >= _MIN_FENCE else 0
+
+
+def _fence_overhead(text: str) -> int:
+    """What _balance_fences may add to a page that splits `text` mid-block.
+
+    The longest fence in the text bounds the one that can be open at a page
+    boundary, and a page pays for it twice -- a reopen at the top and a close at
+    the bottom, each on its own line. Derived rather than fixed at three
+    backticks: a block quoting a fence is opened with more (see the sender-side
+    fencing helper), and budgeting three for a four-backtick reopen overruns the
+    wire limit by exactly the difference.
+    """
+    longest = max((_fence_run(line) for line in text.splitlines()), default=0)
+    return 2 * (max(longest, _MIN_FENCE) + len("\n"))
+
+
+def _fence_open_after(text: str, opened: int) -> int:
+    """The length of the fence open at the end of text, or 0 if none is.
+
+    Takes the state at the start in the same terms. A walk rather than a parity
+    count, because the two directions do not obey the same rule: a fence line
+    carrying an info string (```js) can only OPEN a block. Markdown closes only
+    on backticks and whitespace, so a ```js inside an inlined diff is content,
+    and counting it as a toggle would close a block the renderer leaves open --
+    then every later page is decorated inside out.
+
+    The LENGTH rather than a flag, because markdown closes a fence only on a
+    run at least as long as the one that opened it: a block opened with four
+    backticks to survive quoting a fence is not closed by the three-backtick
+    line inside it. Read as a flag, that
+    line ended the block, the closing four-backtick line opened a new one, and
+    the pages in between were emitted with no fence at all -- spilling the
+    block's content into live chat markup, which is the leak the long opening
+    fence existed to prevent.
+    """
     for line in text.splitlines():
-        stripped = line.lstrip()
-        if not stripped.startswith("```"):
+        run = _fence_run(line)
+        if not run:
             continue
         if not opened:
-            opened = True
-        elif not stripped.removeprefix("```").strip():
-            opened = False
+            opened = run
+        elif run >= opened and not line.lstrip()[run:].strip():
+            opened = 0
     return opened
 
 
 def _balance_fences(bodies: list[str]) -> list[str]:
-    """Close and reopen a Markdown fence split across adjacent pages."""
+    """Close and reopen a Markdown fence split across adjacent pages.
+
+    Reopened at the length it was opened with, so a continuation page protects
+    the remaining content as well as the first page did.
+    """
     balanced: list[str] = []
-    opened = False
+    opened = 0
     for body in bodies:
         starts_open = opened
         opened = _fence_open_after(body, starts_open)
         page = body
         if starts_open:
-            page = "```\n" + page
+            page = "`" * starts_open + "\n" + page
         if opened:
-            page += "\n```"
+            page += "\n" + "`" * opened
         balanced.append(page)
     return balanced
 
@@ -150,10 +194,11 @@ def _page_pairs(
     limit: int,
     render: Callable[[str, int, int], str],
 ) -> list[tuple[str, str]]:
+    fence_overhead = _fence_overhead(text)
     total = 1
     for _ in range(32):
         overhead = max(len(render("", part, total)) for part in range(1, total + 1))
-        bodies = _balance_fences(_split(text, limit - overhead - _FENCE_OVERHEAD))
+        bodies = _balance_fences(_split(text, limit - overhead - fence_overhead))
         new_total = len(bodies)
         if new_total != total:
             total = new_total

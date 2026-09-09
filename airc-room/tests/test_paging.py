@@ -101,3 +101,39 @@ def test_a_paragraph_break_near_the_start_does_not_cost_a_whole_page():
     text = "headline\n\n" + "\n".join("+ diff line here" for _ in range(400))
     pages = paginate(text, limit=600)
     assert len(pages[0]) > 400
+
+
+def test_a_long_fence_is_not_closed_by_a_shorter_run_inside_it():
+    # A sender that needs a block to survive content mentioning a fence opens it
+    # with four backticks, which markdown closes only on four. Read as a flag,
+    # the three-backtick line ended the block and the real closing line opened a
+    # new one -- so a page that was whole came out carrying a stray fence.
+    text = "````diff\nquoting a fence:\n```\nstill inside\n````"
+    assert paginate(text, limit=200) == [text]
+
+
+def test_a_long_fence_survives_the_pages_it_is_split_across():
+    # The leak the long opening fence exists to prevent, reintroduced by the
+    # pager: the shorter run inside was read as a close, so the middle pages
+    # were emitted with no fence at all and their content rendered as live chat
+    # markup. Every page must reopen at the length the block was opened with.
+    body = "A" * 200 + "\n```\n" + "B" * 400 + "\n"
+    text = "headline\n\n````diff\n" + body + "````"
+    pages = paginate(text, limit=200)
+    assert len(pages) > 3
+    assert all(len(page) <= 200 for page in pages)
+    for page in pages[1:]:
+        assert page.lstrip().startswith("````")
+    for page in pages[:-1]:
+        assert _payload(page).rstrip().endswith("````")
+
+
+def test_a_reopened_long_fence_is_paid_for_in_the_budget():
+    # The fence allowance was fixed at three backticks, so a four-backtick
+    # reopen overran the wire limit by exactly the difference -- and _page_pairs
+    # turns that into "page decorator is not body-linear" rather than a short
+    # page.
+    text = "`````\n" + "x\n" * 200 + "`````"
+    pages = paginate(text, limit=64)
+    assert len(pages) > 1
+    assert all(len(page) <= 64 for page in pages)
