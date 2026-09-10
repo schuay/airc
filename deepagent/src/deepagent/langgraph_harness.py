@@ -28,7 +28,7 @@ import logging
 import time
 import zlib
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from airc_core import (
@@ -419,6 +419,7 @@ class LangGraphHarness:
         shell_timeout_s: float = 300.0,
         checkpoint_db: Path | str | None = None,
         reminders: Sequence[tuple[str, str, int]] = (),
+        tool_wrapper: Callable[[list], list] | None = None,
     ) -> None:
         self._common = common
         self._model_id = common.models.get(coding_model_key) or common.models.get(
@@ -442,6 +443,16 @@ class LangGraphHarness:
         # working tail. The prose stays with the application: this package is
         # domain-neutral, and a reminder naming a toolset names a domain.
         self._reminders = list(reminders)
+        # Last chance to transform the resolved MCP tools before they are bound
+        # into a graph. The application owns what that means -- this package
+        # holds no opinion about any tool's arguments -- but it cannot do it
+        # afterwards: the tools are resolved here and baked into cached graphs,
+        # so a consumer that needs them adapted has no seam of its own.
+        #
+        # A callable rather than a declarative rule, for the layering: a rule
+        # expressive enough to be useful would have to name tools and arguments,
+        # and naming those is naming a domain.
+        self._tool_wrapper = tool_wrapper
         self._init_lock = asyncio.Lock()
         self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
         self._saver_obj = None
@@ -530,6 +541,8 @@ class LangGraphHarness:
             ts = MCPToolset(self._common.mcp_servers, self._common.tool_groups)
             await self._stack.enter_async_context(ts)
             self._v8_tools = ts.tools_for(ts.resolve_patterns(self._groups))
+            if self._tool_wrapper is not None:
+                self._v8_tools = self._tool_wrapper(self._v8_tools)
             if ts.instructions:
                 self._system = (
                     f"{self._system_base}\n\n## MCP server instructions\n\n"

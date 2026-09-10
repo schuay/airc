@@ -151,3 +151,32 @@ def test_the_durable_saver_ships_its_own_dependencies():
         if (m := re.match(r"[A-Za-z0-9._-]+", r))
     }
     assert {"aiosqlite", "langgraph-checkpoint-sqlite"} <= declared, declared
+
+
+async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
+    """The tools are resolved here and baked into cached graphs, so a consumer
+    that needs them adapted -- an argument defaulted, a call bounded -- has no
+    seam of its own once the harness is built. A callable rather than a
+    declarative rule keeps this package free of any tool's vocabulary."""
+    from deepagent import LangGraphHarness
+
+    seen = []
+
+    def wrapper(tools):
+        seen.append(list(tools))
+        return []
+
+    h = LangGraphHarness(_common(tmp_path), tool_wrapper=wrapper)
+    await h._ensure_init()
+    assert seen, "the wrapper was never consulted"
+    assert h._v8_tools == []  # what the wrapper returned, not what it was given
+    await h.aclose()
+
+
+async def test_no_wrapper_leaves_the_tools_alone(tmp_path):
+    from deepagent import LangGraphHarness
+
+    h = LangGraphHarness(_common(tmp_path))
+    await h._ensure_init()
+    assert h._tool_wrapper is None
+    await h.aclose()
