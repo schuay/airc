@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS token_usage (
     -- Subset of input_tokens served from the provider prompt cache. Lets the
     -- summaries report a cache hit rate; the cost lever for tool-heavy turns.
     cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Subset of input_tokens written to the provider prompt cache this call.
+    -- On Anthropic a write costs 1.25x base input and a read 0.1x, so writes
+    -- that never turn into reads cost more than not caching; without this
+    -- column they are booked as ordinary input and invisible. 0 for Gemini,
+    -- whose implicit cache reports no write.
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     -- Configured model id that served the call (e.g. google_vertexai:gemini-...).
     -- Separates the cheap filter model (coordinator, triage) from agent/review
     -- models. Empty for rows written before this column existed.
@@ -116,6 +122,11 @@ class TokenLog:
                 "ALTER TABLE token_usage ADD COLUMN max_call_input_tokens INTEGER"
                 " NOT NULL DEFAULT 0"
             )
+        if "cache_write_tokens" not in cols:
+            self._db.execute(
+                "ALTER TABLE token_usage ADD COLUMN cache_write_tokens INTEGER"
+                " NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         if self._db is not None:
@@ -132,6 +143,9 @@ class TokenLog:
         model: str = "",
         model_calls: int = 0,
         max_call_input_tokens: int = 0,
+        # Last: call sites pass `*usage_counts(usage), model` positionally, so
+        # a parameter inserted earlier would shift model into a token column.
+        cache_write_tokens: int = 0,
     ) -> None:
         if self._db is None:
             return
@@ -139,8 +153,8 @@ class TokenLog:
             self._db.execute(
                 "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
                 " output_tokens, cached_input_tokens, model, model_calls,"
-                " max_call_input_tokens)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " max_call_input_tokens, cache_write_tokens)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     thread_id,
@@ -152,6 +166,7 @@ class TokenLog:
                     model,
                     model_calls,
                     max_call_input_tokens,
+                    cache_write_tokens,
                 ),
             )
             self._db.commit()
@@ -216,6 +231,18 @@ class TokenLog:
         ).fetchone()
         return row[0]
 
+    def cache_write_total(self, since: float = 0.0) -> int:
+        """Tokens written to the provider prompt cache. Writes far exceeding
+        cached_input_total means paying the write premium without the reads."""
+        if self._db is None:
+            return 0
+        row = self._db.execute(
+            "SELECT COALESCE(SUM(cache_write_tokens), 0) FROM token_usage"
+            " WHERE ts >= ?",
+            (since,),
+        ).fetchone()
+        return row[0]
+
     def totals_by_kind(self, since: float = 0.0) -> list[tuple[str, int, int]]:
         if self._db is None:
             return []
@@ -226,17 +253,21 @@ class TokenLog:
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
 
-    def totals_by_model(self, since: float = 0.0) -> list[tuple[str, int, int, int]]:
-        """(model, input, output, cached), heaviest first. Empty model is '?'."""
+    def totals_by_model(
+        self, since: float = 0.0
+    ) -> list[tuple[str, int, int, int, int]]:
+        """(model, input, output, cached, cache_written), heaviest first. Empty
+        model is '?'."""
         if self._db is None:
             return []
         rows = self._db.execute(
             "SELECT COALESCE(NULLIF(model, ''), '?'), SUM(input_tokens),"
-            " SUM(output_tokens), SUM(cached_input_tokens) FROM token_usage"
+            " SUM(output_tokens), SUM(cached_input_tokens),"
+            " SUM(cache_write_tokens) FROM token_usage"
             " WHERE ts >= ? GROUP BY 1 ORDER BY SUM(input_tokens) DESC",
             (since,),
         ).fetchall()
-        return [(r[0], r[1], r[2], r[3]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def totals_by_agent(self, since: float = 0.0) -> list[tuple[str, int, int]]:
         if self._db is None:

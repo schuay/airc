@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import math
 import os
 import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import timedelta
@@ -302,17 +304,20 @@ def _is_transient(exc: Exception) -> bool:
     permanent 400 into a transient -- prod burned _MAX_REVIEW_ATTEMPTS
     redeliveries re-spending a whole review on exactly that. 504 is in the
     set deliberately: a deadline reaping a hung stream is a transient like
-    any 5xx (see _VERTEX_CALL_TIMEOUT_S).
+    any 5xx (see _VERTEX_CALL_TIMEOUT_S). 529 is Anthropic's overloaded_error,
+    which the anthropic SDK raises with that status, so the structured branch
+    has to know it; the "overloaded" word below is never reached for it.
 
     Word matching remains only as the fallback for text-only exceptions
-    (provider wording varies), with the bare digit strings gone. The cause
-    chain is consulted because langchain-google-genai re-raises API errors as
-    a plain ChatGoogleGenerativeAIError with the structured original chained
-    underneath -- on that stack the wrapper is the common case."""
+    (provider wording varies), with the bare digit strings gone. The anthropic
+    SDK's timeout and connection errors carry no status and land here. The
+    cause chain is consulted because langchain-google-genai re-raises API
+    errors as a plain ChatGoogleGenerativeAIError with the structured original
+    chained underneath -- on that stack the wrapper is the common case."""
     for e in (exc, exc.__cause__):
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
         if isinstance(code, int):
-            return code in (429, 500, 502, 503, 504)
+            return code in (429, 500, 502, 503, 504, 529)
     msg = str(exc).lower()
     return any(
         k in msg
@@ -324,6 +329,8 @@ def _is_transient(exc: Exception) -> bool:
             "unavailable",
             "overloaded",
             "internal server error",
+            "timed out",
+            "connection error",
         )
     )
 
@@ -1183,6 +1190,147 @@ class _SkipOnSummaryFailure(SummarizationMiddleware):
             return None
 
 
+# Anthropic accepts only "5m" and "1h" here. Not the [caching] ttl_minutes
+# knob, which is a free int for Vertex cachedContents.
+_ANTHROPIC_CACHE_TTL = "5m"
+
+# Session affinity: keeps a conversation's turns together so the prefix one
+# turn cached is readable by the next.
+_VERTEX_SESSION_HEADER = "X-Vertex-Ai-Session-Id"
+
+
+def _vertex_session_id(key: object) -> str:
+    """A stable, opaque routing id for the conversation `key` names.
+
+    Hashed so the value is always a legal header, survives a restart, and
+    carries no internal identifier off the process. 32 hex chars only has to
+    separate concurrent conversations."""
+    return hashlib.sha256(str(key).encode()).hexdigest()[:32]
+
+
+class _AnthropicVertexCaching(AgentMiddleware):
+    """Prompt caching for Claude on Vertex: a breakpoint on the system message
+    plus a session affinity header. Either alone is useless: a breakpoint with
+    no affinity writes an entry the next turn may not find, and affinity with
+    nothing tagged has nothing to read.
+
+    Separate from AnthropicPromptCachingMiddleware because that one gates on
+    isinstance(model, ChatAnthropic), which ChatAnthropicVertex is not, so
+    under our "ignore" setting it silently does nothing here. The two type
+    gates are exclusive, so at most one fires per request. Subclassing would
+    override a private method and reintroduce the same silent failure on the
+    next upstream refactor.
+
+    The omission is silent and expensive: Anthropic has no implicit cache, so
+    a request without a breakpoint re-bills the whole prefix every turn
+    (measured: cache_read stays 0 across identical calls). Gemini's implicit
+    cache hides the same omission.
+
+    One breakpoint, on the system message:
+
+    * It covers the tools too. The wire order is tools, system, messages, and
+      caching is prefix-based. Measured with 28 tools and a ~330-token system
+      message: cache_creation 13124, then cache_read 13124.
+    * No model_settings["cache_control"]. That tags the LAST content block,
+      which after the budget middleware is a per-turn nudge, so the breakpoint
+      would move every call. Measured to change nothing.
+    * History is not cached. A second, advancing breakpoint is unmeasured: the
+      one attempt ran at 49k-127k tokens where nothing cached at all, so a
+      write and a missed read were indistinguishable. Worth revisiting, since
+      the long flows are the ones whose history dwarfs this prefix.
+
+    No token floor: Anthropic declines to cache prefixes under ~1024 tokens
+    without erroring, so a floor here would duplicate a server-side rule.
+
+    The affinity id is per conversation, not per process, so concurrent long
+    flows (review, verify, worker loops) do not share one. Inside an
+    icompleteu box the sandbox proxy drops every client header and sends its
+    own per-box id, which is the same granularity there: one box runs one
+    conversation. Sent on every call, with or without a system message.
+
+    If affinity does not take, a write is billed at Anthropic's 1.25x premium
+    with no later read. The premium applies only to the cached span, so a long
+    turn costs ~2.5% more, not 25%. Watch cache_write_tokens against
+    cache_read in the ledger.
+    """
+
+    def __init__(self, ttl: str = _ANTHROPIC_CACHE_TTL):
+        super().__init__()
+        self._cache_control = {"type": "ephemeral", "ttl": ttl}
+        # For a request with no thread id at all: a graph that configures none
+        # (a direct, serial CommitReview, tests), where one middleware instance
+        # is one conversation. A checkpointer-less graph still reports the
+        # thread_id its config named, and the review graph names one per claim.
+        self._fallback_session = uuid.uuid4().hex
+
+    def _blocks(self, request):
+        """The system message as content blocks, or None if there is nothing
+        to tag."""
+        system = request.system_message
+        if system is None:
+            return None
+        content = system.content
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else None
+        if isinstance(content, list) and content:
+            return list(content)
+        return None
+
+    def _tagged_system(self, blocks):
+        """`blocks` with cache_control on the last one."""
+        blocks = list(blocks)
+        last = blocks[-1]
+        blocks[-1] = (
+            {**last, "cache_control": self._cache_control}
+            if isinstance(last, dict)
+            else {
+                "type": "text",
+                "text": str(last),
+                "cache_control": self._cache_control,
+            }
+        )
+        return SystemMessage(content=blocks)
+
+    def _session_id(self, request) -> str:
+        key = _thread_key(request)
+        return self._fallback_session if key is None else _vertex_session_id(key)
+
+    def _with_session_header(self, request):
+        """model_settings plus the affinity header.
+
+        extra_headers is a bind kwarg passed straight to messages.create, the
+        only per-call hook; the model's additional_headers is fixed at
+        construction. Merged, not assigned: neither the settings nor existing
+        headers are ours to drop.
+        """
+        settings = request.model_settings or {}
+        headers = settings.get("extra_headers") or {}
+        return {
+            **settings,
+            "extra_headers": {
+                **headers,
+                _VERTEX_SESSION_HEADER: self._session_id(request),
+            },
+        }
+
+    async def awrap_model_call(self, request, handler):
+        # Lazy import: an install without langchain_google_vertexai should run
+        # uncached, not fail to import the agent.
+        try:
+            from langchain_google_vertexai.model_garden import ChatAnthropicVertex
+        except ImportError:
+            return await handler(request)
+        if not isinstance(request.model, ChatAnthropicVertex):
+            return await handler(request)
+        # The header goes on every Claude-on-Vertex call; the breakpoint only
+        # when there is a system message to tag.
+        overrides = {"model_settings": self._with_session_header(request)}
+        blocks = self._blocks(request)
+        if blocks is not None:
+            overrides["system_message"] = self._tagged_system(blocks)
+        return await handler(request.override(**overrides))
+
+
 def base_middleware(
     model_id: str,
     system_prompt: str,
@@ -1249,7 +1397,10 @@ def base_middleware(
         # is NOT retryable, so the retry layer passes it straight through to
         # the harness rather than resending.
         _EmptyCandidateRetry(),
+        # One caching middleware per Anthropic transport: upstream's gates on
+        # ChatAnthropic, ours on ChatAnthropicVertex. At most one fires.
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        _AnthropicVertexCaching(),
     ]
     # After summarization in the stack, so its before_model inserts against the
     # post-compaction state (a tail append via the messages reducer -- it settles
@@ -1561,8 +1712,11 @@ def _thread_key(request) -> object:
     """The conversation a request belongs to: the LangGraph thread id, or None
     for a checkpointer-less run (review), where one Semaphore(1)-serialized graph
     instance is one logical conversation. execution_info is populated inside a
-    running model node but typed Optional, so guard it."""
-    ei = getattr(request.runtime, "execution_info", None)
+    running model node but typed Optional, so guard it, and runtime too: this
+    runs on every Claude-on-Vertex call, and a missing attribute must mean "no
+    thread", not a failed call."""
+    runtime = getattr(request, "runtime", None)
+    ei = getattr(runtime, "execution_info", None) if runtime else None
     return getattr(ei, "thread_id", None) if ei else None
 
 

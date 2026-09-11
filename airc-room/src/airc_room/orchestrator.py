@@ -58,7 +58,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from airc_core import TokenLog, make_model, retrying, usage_counts
+from airc_core import (
+    TokenLog,
+    cache_write_count,
+    make_model,
+    retrying,
+    usage_counts,
+)
 
 from .config import Config
 from .room import Room
@@ -857,6 +863,7 @@ class Orchestrator:
                 tout,
                 cached,
                 self._cfg.filter_model,
+                cache_write_tokens=cache_write_count(usage),
             )
             log.info(
                 "coordinator msg %d: %d in (%d cached) / %d out tokens",
@@ -914,6 +921,7 @@ class Orchestrator:
                 tout,
                 cached,
                 self._cfg.filter_model,
+                cache_write_tokens=cache_write_count(usage),
             )
         picked = parse_coordinator_reply(str(reply.text), set(candidates), 1)
         if not picked:

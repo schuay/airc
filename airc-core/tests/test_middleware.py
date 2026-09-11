@@ -9,6 +9,7 @@ context cache is the caller-appended growing-prefix overlay, gated to Vertex.
 """
 
 import contextlib
+from types import SimpleNamespace
 
 import pytest
 from airc_core.agent import (
@@ -21,9 +22,13 @@ from airc_core.agent import (
     growing_cache_middleware,
     retrying,
 )
-from langchain.agents.middleware import ModelRetryMiddleware, SummarizationMiddleware
+from langchain.agents.middleware import (
+    ModelRequest,
+    ModelRetryMiddleware,
+    SummarizationMiddleware,
+)
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 _NON_VERTEX = "google_genai:gemini-3.1-flash-lite"
 _VERTEX = "google_vertexai:gemini-2.5-flash"
@@ -122,6 +127,29 @@ def test_is_transient_decides_on_structured_code_when_present():
     assert _is_transient(gexc.DeadlineExceeded("hung stream reaped"))
     assert _is_transient(generr.APIError(429, {"error": {"message": "quota"}}))
     assert _is_transient(generr.APIError(503, {"error": {"message": "busy"}}))
+
+
+def test_is_transient_knows_the_anthropic_sdk_error_shapes():
+    """529 carries a status_code, so the code set must name it; the "overloaded"
+    word is never reached. A timeout or dropped connection has no code."""
+    import httpx
+    from airc_core.agent import _is_transient
+    from anthropic import (
+        APIConnectionError,
+        APITimeoutError,
+        BadRequestError,
+        OverloadedError,
+    )
+
+    req = httpx.Request("POST", "http://x")
+
+    def status(cls, code):
+        return cls("boom", response=httpx.Response(code, request=req), body=None)
+
+    assert _is_transient(status(OverloadedError, 529))
+    assert not _is_transient(status(BadRequestError, 400))
+    assert _is_transient(APITimeoutError(request=req))
+    assert _is_transient(APIConnectionError(request=req))
 
 
 def test_is_transient_and_short_error_follow_the_cause_chain():
@@ -228,14 +256,213 @@ async def test_call_budget_nudges_fire_only_on_schedule():
 
 def test_shared_stack_present_for_any_model():
     # base_middleware carries no cache overlay -- that is the caller's job.
+    # Both Anthropic caching middlewares are always listed; they gate on
+    # mutually exclusive client types, so at most one acts on a given request.
     assert _names(base_middleware(_NON_VERTEX, "sys", [])) == [
         "_ContextBudget",
         "_DropEmptyResponses",
         "ModelRetryMiddleware",
         "_EmptyCandidateRetry",
         "AnthropicPromptCachingMiddleware",
+        "_AnthropicVertexCaching",
         "GroundingReminderMiddleware",  # inner to _ContextBudget, on by default
     ]
+
+
+# ── _AnthropicVertexCaching (Claude on Vertex) ───────────────────────────────
+#
+# The upstream middleware gates on isinstance(model, ChatAnthropic), which
+# ChatAnthropicVertex is not, so under "ignore" caching silently stops. The
+# stack assertion above passes either way; these assert the breakpoint reaches
+# the request.
+
+
+def _CacheReq(model, system_message, model_settings=None, thread_id="t1"):
+    """A real ModelRequest with a stubbed runtime, whose execution_info carries
+    the thread id the session header is keyed on."""
+    return ModelRequest(
+        model=model,
+        messages=[HumanMessage("hi")],
+        system_message=system_message,
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={},
+        runtime=SimpleNamespace(
+            execution_info=(
+                SimpleNamespace(thread_id=thread_id) if thread_id is not None else None
+            )
+        ),
+        model_settings=model_settings or {},
+    )
+
+
+async def _delivered(
+    model, system_message, model_settings=None, thread_id="t1", mw=None
+):
+    """The (system_message, model_settings) the handler saw. `mw` reuses one
+    middleware instance across calls, as base_middleware does per agent."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    seen = {}
+
+    async def handler(req):
+        seen["system"] = req.system_message
+        seen["settings"] = req.model_settings
+        return "ok"
+
+    await (mw or _AnthropicVertexCaching()).awrap_model_call(
+        _CacheReq(model, system_message, model_settings, thread_id), handler
+    )
+    return seen
+
+
+def _fake_vertex_anthropic():
+    """A real ChatAnthropicVertex without credentials; only its type matters."""
+    pytest.importorskip("langchain_google_vertexai")
+    from langchain_google_vertexai.model_garden import ChatAnthropicVertex
+
+    return ChatAnthropicVertex.model_construct()
+
+
+async def test_anthropic_vertex_caching_tags_the_system_message():
+    seen = await _delivered(_fake_vertex_anthropic(), SystemMessage("you are helpful"))
+    blocks = seen["system"].content
+    # A str system prompt is promoted to one text block carrying the breakpoint.
+    assert blocks == [
+        {
+            "type": "text",
+            "text": "you are helpful",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+        }
+    ]
+
+
+async def test_anthropic_vertex_caching_sets_no_tail_breakpoint():
+    """No cache_control in model_settings: that tags the last content block,
+    a per-turn budget nudge, so the breakpoint would move every call."""
+    seen = await _delivered(_fake_vertex_anthropic(), SystemMessage("sys"))
+    assert "cache_control" not in seen["settings"]
+    assert set(seen["settings"]) == {"extra_headers"}
+
+
+async def test_anthropic_vertex_caching_ignores_other_providers():
+    """Other providers pass through untouched: Vertex rejects an unknown
+    cache_control key, and ChatAnthropic is upstream's job."""
+    from langchain_core.language_models import GenericFakeChatModel
+
+    seen = await _delivered(
+        GenericFakeChatModel(messages=iter([])), SystemMessage("sys")
+    )
+    assert seen["system"].content == "sys"
+    assert seen["settings"] == {}
+
+
+async def test_anthropic_vertex_caching_passes_through_without_a_system_message():
+    seen = await _delivered(_fake_vertex_anthropic(), None)
+    assert seen["system"] is None
+
+
+# ── session affinity ─────────────────────────────────────────────────────────
+#
+# One conversation keeps one id, separate conversations get separate ones, and
+# a header somebody else set survives.
+
+_SESSION_HEADER = "X-Vertex-Ai-Session-Id"
+
+
+async def _session_of(system_message=None, **kw):
+    seen = await _delivered(
+        _fake_vertex_anthropic(), system_message or SystemMessage("sys"), **kw
+    )
+    return seen["settings"]["extra_headers"][_SESSION_HEADER]
+
+
+async def test_session_id_is_stable_across_turns_of_one_conversation():
+    """Turn two must carry the id turn one cached under."""
+    assert await _session_of(thread_id="thread-a") == await _session_of(
+        thread_id="thread-a"
+    )
+
+
+async def test_session_id_differs_between_conversations():
+    """One id for every conversation is the pile-up the per-conversation key
+    exists to avoid."""
+    assert await _session_of(thread_id="thread-a") != await _session_of(
+        thread_id="thread-b"
+    )
+
+
+async def test_session_id_does_not_leak_the_thread_id():
+    """A hex digest, not the internal id."""
+    sid = await _session_of(thread_id="thread-a")
+    assert "thread-a" not in sid
+    assert len(sid) == 32
+    assert all(c in "0123456789abcdef" for c in sid)
+
+
+async def test_session_header_is_sent_without_a_system_message():
+    """Affinity does not depend on this turn having anything to cache."""
+    seen = await _delivered(_fake_vertex_anthropic(), None)
+    assert seen["settings"]["extra_headers"][_SESSION_HEADER]
+
+
+async def test_session_header_preserves_headers_the_caller_already_set():
+    seen = await _delivered(
+        _fake_vertex_anthropic(),
+        SystemMessage("sys"),
+        model_settings={"extra_headers": {"X-Other": "keep"}, "temperature": 0},
+    )
+    headers = seen["settings"]["extra_headers"]
+    assert headers["X-Other"] == "keep"
+    assert headers[_SESSION_HEADER]
+    # The rest of model_settings survives the merge too.
+    assert seen["settings"]["temperature"] == 0
+
+
+async def test_session_id_falls_back_when_there_is_no_thread():
+    """A graph that configures no thread id (a direct, serial CommitReview, a
+    test) is one conversation per middleware instance, and two instances must
+    not collide."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    async def sid_from(mw):
+        seen = {}
+
+        async def handler(req):
+            seen["settings"] = req.model_settings
+            return "ok"
+
+        await mw.awrap_model_call(
+            _CacheReq(_fake_vertex_anthropic(), SystemMessage("sys"), thread_id=None),
+            handler,
+        )
+        return seen["settings"]["extra_headers"][_SESSION_HEADER]
+
+    one, other = _AnthropicVertexCaching(), _AnthropicVertexCaching()
+    assert await sid_from(one) == await sid_from(one)
+    assert await sid_from(one) != await sid_from(other)
+
+
+async def test_claude_and_gemini_can_share_one_deployment():
+    """A mixed deploy (Gemini for the room, Claude for a long flow) shares one
+    base_middleware instance; the type gate keeps them apart. Uses the real
+    google-genai class because that is what the gate must hold against."""
+    pytest.importorskip("langchain_google_genai")
+    from airc_core.agent import _AnthropicVertexCaching
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    gemini = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", api_key="x")
+    claude = _fake_vertex_anthropic()
+    # One instance for every call; a per-call one would not exercise sharing.
+    mw = _AnthropicVertexCaching()
+
+    for _ in range(2):  # interleaved, on one middleware instance
+        g = await _delivered(gemini, SystemMessage("sys"), mw=mw)
+        c = await _delivered(claude, SystemMessage("sys"), mw=mw)
+        # Gemini is untouched: Vertex rejects an unknown cache_control key.
+        assert g["settings"] == {} and g["system"].content == "sys"
+        assert _SESSION_HEADER in c["settings"]["extra_headers"]
 
 
 # ── _EmptyCandidateRetry (Gemini's zero-part candidate) ──────────────────────

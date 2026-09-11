@@ -63,11 +63,56 @@ def test_totals_by_model(tmp_path):
     t.add(0, "triage", "triage", 200, 1, 0, "vertexai:flash")
     t.add(1, "coordinator", "coordinator", 300, 2, 150, "vertexai:flash")
     t.add(1, "old", "turn", 10, 1)  # no model -> '?'
-    by_model = {m: (i, o, c) for m, i, o, c in t.totals_by_model()}
+    by_model = {m: (i, o, c) for m, i, o, c, _w in t.totals_by_model()}
     assert by_model["vertexai:flash"] == (500, 3, 150)
     assert by_model["vertexai:pro"] == (1000, 50, 400)
     assert by_model["?"] == (10, 1, 0)
     assert t.cached_input_total() == 550
+
+
+def test_cache_writes_are_tracked_separately_from_reads(tmp_path):
+    # A write is billed ABOVE base input and only pays off via a later read, so
+    # writes-without-reads must be visible rather than folded into input.
+    t = TokenLog(tmp_path / "tokens.db")
+    t.add(1, "a", "turn", 1000, 10, 0, "claude", cache_write_tokens=900)
+    t.add(1, "a", "turn", 1000, 10, 900, "claude")  # the read that pays it back
+    t.add(1, "b", "turn", 500, 5, 100, "gemini")  # implicit cache: no write
+    assert t.cache_write_total() == 900
+    assert t.cached_input_total() == 1000
+    by_model = {m: (c, w) for m, _i, _o, c, w in t.totals_by_model()}
+    assert by_model["claude"] == (900, 900)
+    assert by_model["gemini"] == (100, 0)
+
+
+def test_add_keeps_model_positional_after_the_token_counts(tmp_path):
+    # Call sites splat a 3-tuple: add(..., *usage_counts(usage), model). If
+    # cache_write_tokens were ever inserted before `model`, the model id would
+    # land in a token column and this would fail.
+    t = TokenLog(tmp_path / "tokens.db")
+    t.add(1, "a", "turn", *(100, 5, 20), "some-model")
+    assert t.totals_by_model() == [("some-model", 100, 5, 20, 0)]
+
+
+def test_cache_write_column_is_added_to_an_existing_ledger(tmp_path):
+    # The migration must be additive: a ledger written before the column
+    # existed keeps its rows and reports 0 writes for them. The legacy row is
+    # inserted with raw SQL because add() targets the post-migration shape.
+    path = tmp_path / "tokens.db"
+    old = TokenLog(path)
+    old._db.execute("ALTER TABLE token_usage DROP COLUMN cache_write_tokens")
+    old._db.execute(
+        "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
+        " output_tokens, cached_input_tokens, model)"
+        " VALUES (0, 1, 'a', 'turn', 100, 5, 20, 'm')"
+    )
+    old._db.commit()
+    old.close()
+
+    t = TokenLog(path)
+    assert t.cache_write_total() == 0
+    assert t.totals_by_model() == [("m", 100, 5, 20, 0)]
+    t.add(1, "a", "turn", 100, 5, 0, "m", cache_write_tokens=42)
+    assert t.cache_write_total() == 42
 
 
 def test_shared_ledger_across_instances(tmp_path):
@@ -101,9 +146,9 @@ def test_legacy_file_migration_adds_columns(tmp_path):
 
     t = TokenLog(path)  # runs _migrate
     assert t.totals() == (100, 5)
-    assert t.totals_by_model() == [("?", 100, 5, 0)]
+    assert t.totals_by_model() == [("?", 100, 5, 0, 0)]
     t.add(1, "perf", "turn", 50, 2, 10, "vertexai:flash")
-    by_model = {m: (i, o, c) for m, i, o, c in t.totals_by_model()}
+    by_model = {m: (i, o, c) for m, i, o, c, _w in t.totals_by_model()}
     assert by_model["vertexai:flash"] == (50, 2, 10)
 
 

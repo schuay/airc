@@ -227,6 +227,67 @@ def test_genai_proxy_env_routes_base_url_and_credentials(monkeypatch):
     assert m.credentials is not None and m.credentials.valid
 
 
+def test_anthropic_vertex_in_a_box_gets_a_placeholder_token(monkeypatch):
+    """With neither access_token nor credentials, ChatAnthropicVertex calls
+    google.auth.default(), which raises in a sandbox before the proxy is
+    reached. The token grants nothing; the proxy attaches the real bearer."""
+    pytest.importorskip("langchain_google_vertexai")
+    from airc_core.model import _PROXY_PLACEHOLDER_TOKEN, _VERTEX_PROXY_ENV
+
+    monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:1")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model("google_anthropic_vertex:claude-opus-5")
+    assert m.access_token == _PROXY_PLACEHOLDER_TOKEN
+
+
+def test_anthropic_vertex_outside_a_box_keeps_normal_adc(monkeypatch):
+    """On the host the client must do its own ADC lookup."""
+    pytest.importorskip("langchain_google_vertexai")
+    from airc_core.model import _VERTEX_PROXY_ENV
+
+    monkeypatch.delenv(_VERTEX_PROXY_ENV, raising=False)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model("google_anthropic_vertex:claude-opus-5")
+    assert not m.access_token
+
+
+def test_anthropic_vertex_gets_the_same_call_time_guards_as_gemini(monkeypatch):
+    """Each replaces a client default measured wrong on the real class:
+    max_output_tokens 4096 (silent truncation), max_retries 3 (three attempts
+    under a middleware that already retries; 1 is no SDK retry), timeout None
+    (no deadline at all), location us-central1 (no quota, and refused by the
+    sandbox allowlist)."""
+    pytest.importorskip("langchain_google_vertexai")
+    from airc_core.model import _ANTHROPIC_MAX_OUTPUT_TOKENS, _VERTEX_CALL_TIMEOUT_S
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    m = make_model("google_anthropic_vertex:claude-opus-5", access_token="x")
+    assert m.max_output_tokens == _ANTHROPIC_MAX_OUTPUT_TOKENS
+    assert m.max_retries == 1
+    assert m.location == "global"
+    # On the constructed client, which is what the deadline rides on.
+    assert m.client.timeout == _VERTEX_CALL_TIMEOUT_S
+    assert m.async_client.timeout == _VERTEX_CALL_TIMEOUT_S
+
+
+def test_an_explicit_caller_value_still_wins_over_the_anthropic_defaults(monkeypatch):
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east5")
+    m = make_model(
+        "google_anthropic_vertex:claude-opus-5",
+        access_token="x",
+        max_tokens=64,
+        timeout=5,
+    )
+    assert m.max_output_tokens == 64
+    assert m.client.timeout == 5
+    # A configured location is still the configured one.
+    assert m.location == "us-east5"
+
+
 def test_google_sdk_defaults_to_genai(monkeypatch):
     # The vertexai stack remains reachable as the revert path ([gcp] sdk /
     # AIRC_GOOGLE_SDK=vertexai) until it is deleted.

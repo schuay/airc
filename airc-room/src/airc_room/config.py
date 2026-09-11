@@ -150,7 +150,8 @@ TEMPLATE_CONFIG = """\
 # == shared (every component) ================================================
 
 [models]
-# init_chat_model ids ("provider:model"). google_vertexai needs the [gcp]
+# init_chat_model ids ("provider:model"). google_vertexai (Gemini) and
+# google_anthropic_vertex (Claude on Vertex Model Garden) need the [gcp]
 # section below (auth via Application Default Credentials); google_genai,
 # anthropic, openai, deepseek and openrouter each read their own *_API_KEY env
 # var (openrouter:<model> is served OpenAI-compatibly -- e.g. GLM).
@@ -160,7 +161,7 @@ default = "google_vertexai:gemini-2.5-flash"
 filter  = "google_vertexai:gemini-2.5-flash"   # coordinator (routing) + triage
 
 [gcp]
-# Only for google_vertexai:* models.
+# Only for google_vertexai:* and google_anthropic_vertex:* models.
 project  = "my-project"
 location = "global"        # current Gemini models are served on the global endpoint
 

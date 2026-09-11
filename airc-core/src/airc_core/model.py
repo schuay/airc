@@ -43,6 +43,11 @@ from langchain.chat_models import init_chat_model
 # no kwargs, and the endpoint must reach the ChatVertexAI constructor.
 _VERTEX_PROXY_ENV = "AISAN_VERTEX_PROXY_ENDPOINT"
 
+# The bearer a sandboxed client sends. Not a secret (S105): the proxy discards
+# it and attaches the real credential; it exists because the clients refuse to
+# run with no token at all.
+_PROXY_PLACEHOLDER_TOKEN = "sandbox-proxy-placeholder"  # noqa: S105
+
 
 def _proxy_kwargs(endpoint: str) -> dict:
     """Client settings for talking to the sandbox's Vertex proxy.
@@ -83,10 +88,25 @@ _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # logical call.
 _VERTEX_CALL_TIMEOUT_S = 600
 
+# max_tokens is required by the Messages API, and ChatAnthropicVertex falls
+# back to 4096 for any model name it has no profile for, i.e. every model newer
+# than its pin. That is a silent mid-answer truncation (stop_reason
+# "max_tokens"), and on a structured-result turn it cuts the result tool call
+# and triggers a re-ask round. 32k is beyond any turn airc produces yet still
+# deliverable within the 600s deadline; the model's own ceiling (128k, measured)
+# could not be generated in that time.
+_ANTHROPIC_MAX_OUTPUT_TOKENS = 32_000
+
 # Providers airc ships with (their langchain packages are dependencies). The
 # model name after the colon is provider-side and can't be validated offline.
 SUPPORTED_PROVIDERS = (
     "google_vertexai",
+    # Claude on Vertex Model Garden. Its own provider because the prefix picks
+    # the client: Gemini clients address publishers/google/...:generateContent,
+    # Claude lives at publishers/anthropic/...:rawPredict and needs
+    # ChatAnthropicVertex. Same ADC auth as google_vertexai, so no
+    # _PROVIDER_KEYS entry.
+    "google_anthropic_vertex",
     "google_genai",
     "anthropic",
     "openai",
@@ -244,7 +264,8 @@ def list_models(model_id: str) -> list[str] | None:
     after the colon) of generate-capable models, sorted. Returns None when the
     provider can't be enumerated here (unsupported, an external provider whose
     spec carries no listing hook, missing credentials, or the API call failed)
-    so callers can fall back gracefully.
+    so callers can fall back gracefully. google_anthropic_vertex is not
+    enumerated here, so `airc --list-models` reports it as unlistable.
     """
     provider = model_id.split(":", 1)[0]
     try:
@@ -307,7 +328,10 @@ def _google_models(vertex: bool) -> list[str]:
 
 
 def _provider_kwargs(model_id: str) -> dict:
-    if model_id.startswith("google_vertexai:"):
+    # Both Vertex clients take project/location by the same names. Without
+    # them the Anthropic client uses whatever project ADC infers, which need
+    # not be the configured [gcp] one.
+    if model_id.startswith(("google_vertexai:", "google_anthropic_vertex:")):
         kw: dict = {}
         if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
             kw["project"] = proj
@@ -323,6 +347,9 @@ def usage_counts(usage) -> tuple[int, int, int]:
     cached_input is the prompt-cache-served subset of input (cache_read), 0 when
     the provider does not report it. Mirrors the aggregation the streaming runner
     does over UsageMetadataCallbackHandler, for the direct-ainvoke call sites.
+
+    Still a 3-tuple: call sites splat it as `add(*usage_counts(u), model)`, so
+    widening it would shift later arguments. Writes are cache_write_count().
     """
     usage = usage or {}
     details = usage.get("input_token_details") or {}
@@ -331,6 +358,16 @@ def usage_counts(usage) -> tuple[int, int, int]:
         int(usage.get("output_tokens", 0)),
         int(details.get("cache_read", 0)),
     )
+
+
+def cache_write_count(usage) -> int:
+    """Tokens written to the provider prompt cache by this call.
+
+    Anthropic bills a write at 1.25x base input, so writes without later reads
+    cost more than not caching. Gemini's implicit cache reports none; 0 there.
+    """
+    details = (usage or {}).get("input_token_details") or {}
+    return int(details.get("cache_creation", 0))
 
 
 class _VertexNoiseFilter(logging.Filter):
@@ -476,9 +513,7 @@ def proxy_placeholder_credentials():
     class _PlaceholderCredentials(Credentials):
         def __init__(self):
             super().__init__()
-            # Not a secret (S105): the whole point is that this value grants
-            # nothing; the proxy discards it and attaches the real bearer.
-            self.token = "sandbox-proxy-placeholder"  # noqa: S105
+            self.token = _PROXY_PLACEHOLDER_TOKEN
 
         @property
         def expired(self):
@@ -622,6 +657,37 @@ def make_model(model_id: str, **kwargs):
                 )
             kwargs["api_key"] = key
         return init_chat_model(f"openai:{name}", **kwargs)
+    if model_id.startswith("google_anthropic_vertex:"):
+        # The call-time defaults the google_vertexai: branch sets, for the same
+        # reasons; ChatAnthropicVertex's own defaults are worse on each:
+        #
+        # * max_tokens: see _ANTHROPIC_MAX_OUTPUT_TOKENS.
+        # * max_retries: this client counts attempts (tenacity stop_after_attempt
+        #   over its own decorator, SDK retries pinned to 0), so 1 is no SDK
+        #   retry at all. Deliberate: the decorator retries every APIError, 400s
+        #   included, and its default of 3 under ModelRetryMiddleware turns one
+        #   logical call into a dozen prefills against an overloaded server. The
+        #   middleware is the retry authority; _is_transient knows this SDK's
+        #   error shapes.
+        # * timeout: its None reaches the Anthropic client explicitly, which
+        #   means no deadline at all, so a hung stream hangs forever.
+        # * location: its default us-central1 has no quota for this model
+        #   (immediate 429), and the sandbox allowlist, built from [gcp]
+        #   location, refuses it anyway.
+        kwargs.setdefault("max_tokens", _ANTHROPIC_MAX_OUTPUT_TOKENS)
+        kwargs.setdefault("max_retries", 1)
+        kwargs.setdefault("timeout", _VERTEX_CALL_TIMEOUT_S)
+        kwargs.setdefault(
+            "location", os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
+        )
+        # In the sandbox the box holds no credential, and with neither an
+        # access_token nor credentials ChatAnthropicVertex calls
+        # google.auth.default(), which raises there before anything reaches the
+        # proxy. The placeholder authenticates nothing; the proxy discards it.
+        # The endpoint needs no wiring: the anthropic SDK reads
+        # ANTHROPIC_VERTEX_BASE_URL, which the sandbox profile sets.
+        if os.environ.get(_VERTEX_PROXY_ENV) and not kwargs.get("credentials"):
+            kwargs.setdefault("access_token", _PROXY_PLACEHOLDER_TOKEN)
     if model_id.startswith("google_vertexai:"):
         if _google_sdk() == "genai":
             return _make_genai_vertex(model_id, kwargs)

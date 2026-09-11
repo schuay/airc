@@ -148,6 +148,15 @@ def _pct(part: int, whole: int) -> str:
     return f"{100 * part / whole:.0f}%" if whole else "n/a"
 
 
+def _written(tokens: int) -> str:
+    """Cache-write suffix, empty when the provider reports none (Gemini).
+
+    Writes are billed above base input, so writes that never become reads are
+    a loss the cached percentage alone cannot show.
+    """
+    return f", {_fmt_tokens(tokens)} written" if tokens else ""
+
+
 def _thread_title(store, tid: int) -> str:
     """Resolve a ledger thread_id to its title via airc's store; the token
     ledger itself is thread-agnostic. '?' for thread 0 (triage) and any id with
@@ -170,8 +179,8 @@ def _token_summary_line(store, tokens) -> str:
         for tid, i, o in tokens.top_threads(n=3)
     )
     by_model = "; ".join(
-        f"{model} {_fmt_tokens(i)} ({_pct(c, i)} cached)/{_fmt_tokens(o)}"
-        for model, i, o, c in tokens.totals_by_model(since=since)
+        f"{model} {_fmt_tokens(i)} ({_pct(c, i)} cached{_written(w)})/{_fmt_tokens(o)}"
+        for model, i, o, c, w in tokens.totals_by_model(since=since)
     )
     return (
         f"tokens: all-time {_fmt_tokens(tin)} in ({_pct(tcached, tin)} cached)"
@@ -209,9 +218,9 @@ def _print_token_report(args: argparse.Namespace) -> None:
     for kind, i, o in tokens.totals_by_kind():
         print(f"  {kind:<12} {_fmt_tokens(i):>8} in  {_fmt_tokens(o):>8} out")
     print("\nby model:")
-    for model, i, o, c in tokens.totals_by_model():
+    for model, i, o, c, w in tokens.totals_by_model():
         print(
-            f"  {model:<32} {_fmt_tokens(i):>8} in ({_pct(c, i)} cached)"
+            f"  {model:<32} {_fmt_tokens(i):>8} in ({_pct(c, i)} cached{_written(w)})"
             f"  {_fmt_tokens(o):>8} out"
         )
     print("\nby agent:")

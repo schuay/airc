@@ -394,6 +394,9 @@ class _TurnUsage:
     input_tokens = 0
     output_tokens = 0
     cached_in = 0
+    # Prompt-cache writes: billed at a premium and wasted unless a later call
+    # reads them, so kept apart from cached_in.
+    cache_written = 0
     calls = 0
     max_call_input = 0
 
@@ -849,6 +852,7 @@ class LangGraphHarness:
             self._model_id,
             model_calls=usage.calls,
             max_call_input_tokens=usage.max_call_input,
+            cache_write_tokens=usage.cache_written,
         )
         if journal is not None:
             journal.emit(
@@ -859,6 +863,7 @@ class LangGraphHarness:
                     "input_tokens": usage.input_tokens,
                     "output_tokens": usage.output_tokens,
                     "cached_in": usage.cached_in,
+                    "cache_written": usage.cache_written,
                     "model_calls": usage.calls,
                     # model + max_call_input let an out-of-process consumer (the
                     # sandboxed worker's runner) credit the ledger fully from the
@@ -916,6 +921,9 @@ class LangGraphHarness:
             u.input_tokens += meta.get("input_tokens", 0)
             u.output_tokens += meta.get("output_tokens", 0)
             u.cached_in += meta.get("input_token_details", {}).get("cache_read", 0)
+            u.cache_written += meta.get("input_token_details", {}).get(
+                "cache_creation", 0
+            )
         u.calls = trace_cb.calls
         u.max_call_input = trace_cb.max_input_tokens
         return u

@@ -277,9 +277,9 @@ def apply_gcp_env_defaults(gcp: Mapping[str, str]) -> None:
 
     Only fills unset variables so an external override wins. Vertex model
     classes read these for project/location; auth itself comes from ADC
-    (gcloud auth application-default login). A google_vertexai:* default model
-    fails with "Unable to find your project" without this or the env set some
-    other way.
+    (gcloud auth application-default login). A google_vertexai:* or
+    google_anthropic_vertex:* default model fails with "Unable to find your
+    project" without this or the env set some other way.
     """
     for key, env in (
         ("project", "GOOGLE_CLOUD_PROJECT"),

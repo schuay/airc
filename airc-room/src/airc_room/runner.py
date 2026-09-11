@@ -266,6 +266,9 @@ class _TurnUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_in: int = 0
+    # Prompt-cache writes: billed at a premium and wasted unless a later call
+    # reads them, so kept apart from cached_in.
+    cache_written: int = 0
     calls: int = 0
     max_call_input: int = 0
 
@@ -611,14 +614,16 @@ class AgentRunner:
             self._cfg.resolve_model(entry.persona.model_id),
             model_calls=usage.calls,
             max_call_input_tokens=usage.max_call_input,
+            cache_write_tokens=usage.cache_written,
         )
         log.info(
-            "agent %s thread %d: %d in (%d cached) / %d out tokens"
+            "agent %s thread %d: %d in (%d cached, %d written) / %d out tokens"
             " over %d calls (max %d in/call)",
             agent_name,
             thread_id,
             usage.input_tokens,
             usage.cached_in,
+            usage.cache_written,
             usage.output_tokens,
             usage.calls,
             usage.max_call_input,
@@ -692,6 +697,7 @@ class AgentRunner:
             self._cfg.resolve_model(entry.persona.model_id),
             model_calls=usage.calls,
             max_call_input_tokens=usage.max_call_input,
+            cache_write_tokens=usage.cache_written,
         )
         return text
 
@@ -777,6 +783,9 @@ class AgentRunner:
             output_tokens=sum(u.get("output_tokens", 0) for u in usage),
             cached_in=sum(
                 u.get("input_token_details", {}).get("cache_read", 0) for u in usage
+            ),
+            cache_written=sum(
+                u.get("input_token_details", {}).get("cache_creation", 0) for u in usage
             ),
             calls=trace_cb.calls,
             max_call_input=trace_cb.max_input_tokens,

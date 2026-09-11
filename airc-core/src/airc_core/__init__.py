@@ -28,6 +28,7 @@ from .config import (
 from .mcptools import MCPToolset
 from .model import (
     SUPPORTED_PROVIDERS,
+    cache_write_count,
     check_model_id,
     list_models,
     make_model,
@@ -59,6 +60,7 @@ __all__ = [
     "TokenLog",
     "apply_gcp_env_defaults",
     "base_middleware",
+    "cache_write_count",
     "check_model_id",
     "growing_cache_middleware",
     "list_models",
