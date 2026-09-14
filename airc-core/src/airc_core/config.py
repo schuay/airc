@@ -25,8 +25,6 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
-from .model import register_provider
-
 DATA_DIR = user_data_path("airc")
 DEFAULT_BUS_ROOT = DATA_DIR / "bus"
 DEFAULT_TOKEN_DB = DATA_DIR / "tokens.db"
@@ -204,6 +202,14 @@ def _load_model_providers(raw: Mapping, cfg: CommonConfig) -> None:
     misspelled requires_env silently means "no credential check" and reads back
     as if it were honoured.
     """
+    if not raw.get("model_providers"):
+        return
+    # Deferred, and behind the early return: this is the only thing in config
+    # that reaches the model layer, and reaching it costs a langchain import.
+    # Every component calls load_common to read the suite file; almost none
+    # declare a custom provider, and those should not pay for the ones that do.
+    from .model import register_provider
+
     for prefix, spec in raw.get("model_providers", {}).items():
         where = f"[model_providers.{prefix}]"
         if not isinstance(spec, Mapping):

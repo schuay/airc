@@ -3,42 +3,58 @@
 
 """Shared substrate for the airc daemon suite."""
 
-from .agent import (
-    CallBudgetMiddleware,
-    EmptyCandidateError,
-    GroundingReminderMiddleware,
-    RequireStructuredResultMiddleware,
-    TimeBudgetMiddleware,
-    base_middleware,
-    growing_cache_middleware,
-    retrying,
-)
-from .artifacts import ArtifactLog, slug
-from .config import (
-    DATA_DIR,
-    DEFAULT_BUS_ROOT,
-    DEFAULT_TOKEN_DB,
-    DEFAULT_TOOL_GROUPS,
-    CommonConfig,
-    HandoverFields,
-    apply_gcp_env_defaults,
-    load_common,
-    parse_handover_fields,
-)
-from .mcptools import MCPToolset
-from .model import (
-    SUPPORTED_PROVIDERS,
-    cache_write_count,
-    check_model_id,
-    list_models,
-    make_model,
-    missing_key,
-    register_provider,
-    supported_models_hint,
-    usage_counts,
-)
-from .structured import StructuredTaskError, StructuredTaskRunner
-from .tokens import TokenLog
+# Resolved per name on first access rather than eagerly, because the substrate is
+# shared by components that use very different parts of it. Naming load_common --
+# which every component does, to read the suite file -- used to import the agent
+# middleware, the MCP toolset and the structured-task runner too, roughly 700ms of
+# langchain for a config parse. A CLI listing job states pays none of it now.
+_LAZY = {
+    "ArtifactLog": ".artifacts",
+    "CallBudgetMiddleware": ".agent",
+    "CommonConfig": ".config",
+    "DATA_DIR": ".config",
+    "DEFAULT_BUS_ROOT": ".config",
+    "DEFAULT_TOKEN_DB": ".config",
+    "DEFAULT_TOOL_GROUPS": ".config",
+    "EmptyCandidateError": ".agent",
+    "GroundingReminderMiddleware": ".agent",
+    "HandoverFields": ".config",
+    "MCPToolset": ".mcptools",
+    "RequireStructuredResultMiddleware": ".agent",
+    "SUPPORTED_PROVIDERS": ".model",
+    "StructuredTaskError": ".structured",
+    "StructuredTaskRunner": ".structured",
+    "TimeBudgetMiddleware": ".agent",
+    "TokenLog": ".tokens",
+    "apply_gcp_env_defaults": ".config",
+    "base_middleware": ".agent",
+    "cache_write_count": ".model",
+    "check_model_id": ".model",
+    "growing_cache_middleware": ".agent",
+    "list_models": ".model",
+    "load_common": ".config",
+    "make_model": ".model",
+    "missing_key": ".model",
+    "parse_handover_fields": ".config",
+    "register_provider": ".model",
+    "retrying": ".agent",
+    "slug": ".artifacts",
+    "supported_models_hint": ".model",
+    "usage_counts": ".model",
+}
+
+
+def __getattr__(name: str):
+    where = _LAZY.get(name)
+    if where is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(where, __name__), name)
+    # __getattr__ runs only on a miss, so binding it here retires the lookup.
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "DATA_DIR",
