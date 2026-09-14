@@ -9,6 +9,7 @@ context cache is the caller-appended growing-prefix overlay, gated to Vertex.
 """
 
 import contextlib
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -533,32 +534,194 @@ async def test_no_history_mark_before_a_completed_step():
 
 
 async def test_history_mark_closes_the_last_completed_step():
-    """It lands on the AIMessage that opened the step, never on the trailing
+    """It lands on the tool result that ended the step, never on the trailing
     user turn -- which may be a per-turn nudge that moves every call."""
     messages = [HumanMessage("q"), *_step(1), HumanMessage("next")]
     seen = await _delivered(
         _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
     )
-    assert _marks(seen["messages"]) == [1]
-    # str content takes the additional_kwargs path (_get_cache_control).
-    assert seen["messages"][1].additional_kwargs["cache_control"] == _CC
+    assert _marks(seen["messages"]) == [2]
+    # A ToolMessage is formatted into a tool_result block that takes the mark
+    # from additional_kwargs.
+    assert seen["messages"][2].additional_kwargs["cache_control"] == _CC
     # The originals are untouched: the list is graph state.
     assert _marks(messages) == []
 
 
-async def test_history_mark_on_block_content_goes_in_the_block():
-    """List content is read from the block itself, not additional_kwargs, so
-    the placement has to follow the content type or the mark is dropped."""
+# ── the mark has to survive serialization ────────────────────────────────────
+#
+# These assert on the body langchain_google_vertexai actually builds, not on
+# request.messages. The distinction is the whole reason the first version of
+# this shipped broken: it set cache_control on the last content block, the
+# formatter discarded it, and every test passed because they all looked one
+# layer too early. A mark that does not reach the body caches nothing, silently.
+
+
+def _wire_marks(messages):
+    """Every cache_control in the serialized Anthropic body, by path."""
+    pytest.importorskip("langchain_google_vertexai")
+    from langchain_google_vertexai._anthropic_utils import _format_messages_anthropic
+
+    _system, formatted = _format_messages_anthropic(messages, None)
+
+    def walk(node, path):
+        found = []
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "cache_control":
+                    found.append((path, node.get("type", "?")))
+                else:
+                    found += walk(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                found += walk(v, f"{path}[{i}]")
+        return found
+
+    return walk(formatted, "")
+
+
+# Every assistant shape we have seen or could see. The [thinking, tool_use] one
+# is what Claude actually returns with extended thinking on -- and is exactly
+# the shape whose last block is a tool_use. The empty-content one is what
+# Gemini returns for every tool call, so it is not hypothetical either.
+_ASSISTANT_SHAPES = {
+    "str content": "calling t",
+    "empty str content": "",
+    "text and tool_use blocks": [
+        {"type": "text", "text": "calling t"},
+        {"type": "tool_use", "id": "c1", "name": "t", "input": {}},
+    ],
+    "thinking and tool_use blocks": [
+        {"type": "thinking", "thinking": "", "signature": "sig"},
+        {"type": "tool_use", "id": "c1", "name": "t", "input": {}},
+    ],
+    "tool_use block only": [{"type": "tool_use", "id": "c1", "name": "t", "input": {}}],
+    "empty content list": [],
+}
+
+
+@pytest.mark.parametrize("shape", list(_ASSISTANT_SHAPES), ids=list(_ASSISTANT_SHAPES))
+async def test_the_mark_reaches_the_body_for_every_assistant_shape(shape):
+    """Whatever the assistant message looks like, the breakpoint we believe we
+    set has to appear in the request that goes out."""
     messages = [
         HumanMessage("q"),
-        *_step(1, content=[{"type": "text", "text": "calling 1"}]),
+        AIMessage(
+            content=_ASSISTANT_SHAPES[shape],
+            tool_calls=[{"name": "t", "args": {}, "id": "c1"}],
+        ),
+        ToolMessage(content="result", tool_call_id="c1"),
         HumanMessage("next"),
     ]
     seen = await _delivered(
         _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
     )
-    assert seen["messages"][1].content[-1]["cache_control"] == _CC
-    assert "cache_control" not in (seen["messages"][1].additional_kwargs or {})
+    assert _wire_marks(seen["messages"]), f"{shape}: mark never reached the body"
+
+
+async def test_the_mark_never_lands_on_a_tool_use_block():
+    """The regression. A tool_use block whose id matches a tool_call is dropped
+    in serialization and rebuilt from the tool_call without our key, so a mark
+    placed there vanishes -- which is how this cached nothing for a day."""
+    from airc_core.agent import _mark_placement
+
+    msg = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "tool_use", "id": "c1", "name": "t", "input": {}},
+        ],
+        tool_calls=[{"name": "t", "args": {}, "id": "c1"}],
+    )
+    # The last block is the tool_use; the placement must skip it.
+    assert _mark_placement(msg) == 0
+
+
+async def test_the_boundary_holds_when_nothing_can_carry_a_mark():
+    """A tool result already in tool_result form takes a formatter branch that
+    never reads additional_kwargs. Rather than emit a mark we know will be
+    dropped, hold the boundary and try again at the next step."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    messages = [
+        HumanMessage("q"),
+        AIMessage(
+            content="calling t", tool_calls=[{"name": "t", "args": {}, "id": "c1"}]
+        ),
+        ToolMessage(
+            content=[{"type": "tool_result", "tool_use_id": "c1", "content": "r"}],
+            tool_call_id="c1",
+        ),
+        HumanMessage("next"),
+    ]
+    seen = await _delivered(
+        _fake_vertex_anthropic(), SystemMessage("sys"), mw=mw, messages=messages
+    )
+    assert mw._prefixes["t1"].boundary == 0
+    assert mw._prefixes["t1"].why == "no safe mark"
+    assert _marks(seen["messages"]) == []
+
+
+@pytest.mark.parametrize("shape", list(_ASSISTANT_SHAPES), ids=list(_ASSISTANT_SHAPES))
+async def test_either_the_mark_ships_or_the_boundary_did_not_move(shape):
+    """The invariant that makes this class of bug unshippable: the state may
+    never record a cached span the request did not actually carry."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    messages = [
+        HumanMessage("q"),
+        AIMessage(
+            content=_ASSISTANT_SHAPES[shape],
+            tool_calls=[{"name": "t", "args": {}, "id": "c1"}],
+        ),
+        ToolMessage(content="result", tool_call_id="c1"),
+        HumanMessage("next"),
+    ]
+    seen = await _delivered(
+        _fake_vertex_anthropic(), SystemMessage("sys"), mw=mw, messages=messages
+    )
+    if mw._prefixes["t1"].boundary:
+        assert _wire_marks(seen["messages"]), "claimed a span it never sent"
+    else:
+        assert not _wire_marks(seen["messages"])
+
+
+async def test_an_advance_that_does_not_grow_the_span_is_reported(caplog):
+    """The self-check. Moving the mark forward must enlarge the cached span; if
+    it does not, the mark was lost on the way out. Comparing spans rather than
+    testing create == 0 avoids crying wolf when an advance lands on a span that
+    was already cached."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    model = _fake_vertex_anthropic()
+    history = [HumanMessage("q"), *_step(1), HumanMessage("next")]
+    await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=history,
+        response=_usage(create=900),
+    )
+
+    # Force a second advance whose reported span is unchanged -- what a dropped
+    # mark looks like from here.
+    history = [
+        *history,
+        AIMessage("x" * 800_000, tool_calls=[{"name": "t", "args": {}, "id": "big"}]),
+        ToolMessage(content="r", tool_call_id="big"),
+        HumanMessage("next"),
+    ]
+    with caplog.at_level(logging.WARNING, logger="airc_core.agent"):
+        await _delivered(
+            model,
+            SystemMessage("sys"),
+            mw=mw,
+            messages=history,
+            response=_usage(read=900),
+        )
+    assert "not reaching the wire" in caplog.text
 
 
 async def test_history_mark_holds_until_the_delta_repays():
@@ -579,7 +742,7 @@ async def test_history_mark_holds_until_the_delta_repays():
         messages=history,
         response=_usage(create=50_000),
     )
-    assert _marks(seen["messages"]) == [1]
+    assert _marks(seen["messages"]) == [2]
 
     # A big measured prefix against a tiny new step: not worth moving.
     history = [*history, *_step(2), HumanMessage("next")]
@@ -590,10 +753,10 @@ async def test_history_mark_holds_until_the_delta_repays():
         messages=history,
         response=_usage(read=50_000),
     )
-    assert _marks(seen["messages"]) == [1], "moved before it could repay"
+    assert _marks(seen["messages"]) == [2], "moved before it could repay"
 
     # A step large enough to clear 2 * prefix does move it. The mark closes the
-    # step, so it lands on the AIMessage that opened it.
+    # step, so it lands on the tool result that ended it.
     big = len(history)
     history = [
         *history,
@@ -608,7 +771,7 @@ async def test_history_mark_holds_until_the_delta_repays():
         messages=history,
         response=_usage(read=50_000),
     )
-    assert _marks(seen["messages"]) == [big]
+    assert _marks(seen["messages"]) == [big + 1]
 
 
 async def test_history_mark_restarts_when_history_shrinks():
@@ -627,8 +790,9 @@ async def test_history_mark_restarts_when_history_shrinks():
         messages=long_history,
         response=_usage(create=9_000),
     )
-    # Two completed steps, so the mark closes the second: messages[:4].
-    assert mw._prefixes["t1"].boundary == 4
+    # Two completed steps, so the mark closes the second -- messages[:5], which
+    # ends on its tool result rather than between the call and the result.
+    assert mw._prefixes["t1"].boundary == 5
 
     await _delivered(
         model, SystemMessage("sys"), mw=mw, messages=[HumanMessage("compacted")]
