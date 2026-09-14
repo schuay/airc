@@ -229,11 +229,17 @@ def _is_cache_gone(e: Exception, name: str | None = None) -> bool:
     return "cache" in s and ("not found" in s or "expired" in s)
 
 
-def _response_cache_read(response) -> int:
-    """The cache_read tokens the model reported for a ModelResponse -- i.e. the
-    true size of the cached prefix it just served. 0 if unavailable. Lets the
-    serve-time window guard replace its char estimate of the cached prefix with
-    the provider's exact count after the first cached call."""
+def _response_cache_stats(response) -> tuple[int, int]:
+    """(cache_read, cache_creation) as the model reported them; (0, 0) if
+    unavailable.
+
+    Their SUM is the measured size of the cached prefix: a call that reads the
+    prefix reports it under cache_read, a call that writes it reports it under
+    cache_creation, and a call that reads a shorter prefix while extending it
+    splits the same span across both. So read+create names the span either way,
+    which is what lets the Anthropic breakpoint be placed from measurement
+    rather than from a chars-per-token estimate.
+    """
     mr = getattr(response, "model_response", response)  # unwrap ExtendedModelResponse
     msgs = getattr(mr, "result", None)
     if msgs is None:
@@ -241,8 +247,20 @@ def _response_cache_read(response) -> int:
     for m in reversed(msgs):
         usage = getattr(m, "usage_metadata", None)
         if usage:
-            return int(usage.get("input_token_details", {}).get("cache_read", 0))
-    return 0
+            details = usage.get("input_token_details", {})
+            return (
+                int(details.get("cache_read", 0)),
+                int(details.get("cache_creation", 0)),
+            )
+    return 0, 0
+
+
+def _response_cache_read(response) -> int:
+    """The cache_read tokens the model reported for a ModelResponse -- i.e. the
+    true size of the cached prefix it just served. 0 if unavailable. Lets the
+    serve-time window guard replace its char estimate of the cached prefix with
+    the provider's exact count after the first cached call."""
+    return _response_cache_stats(response)[0]
 
 
 # Bound on the cause appended after the status. Wide enough for a real Vertex
@@ -1208,11 +1226,49 @@ def _vertex_session_id(key: object) -> str:
     return hashlib.sha256(str(key).encode()).hexdigest()[:32]
 
 
+@dataclass
+class _AnthropicPrefix:
+    """Per-conversation state for the advancing history breakpoint.
+
+    Deliberately thinner than _PrefixState: an Anthropic breakpoint is a mark in
+    a request we were sending anyway, not a server-side object, so there is no
+    name to hold, no model to rebind, and nothing to delete on eviction -- an
+    abandoned entry simply ages out at the TTL.
+    """
+
+    # messages[:boundary] sits behind the history mark. 0 = no history mark yet,
+    # so only the system+tools prefix is cached.
+    boundary: int = 0
+    # The provider's own count of the cached span (cache_read + cache_creation),
+    # not an estimate. Drives the payback rule.
+    prefix_tokens: int = 0
+    # Model calls since the mark last moved -- the k in the payback rule.
+    calls_since: int = 0
+    seen_len: int = 0
+    # Last placement decision, for the log line.
+    why: str = "init"
+
+
 class _AnthropicVertexCaching(AgentMiddleware):
-    """Prompt caching for Claude on Vertex: a breakpoint on the system message
-    plus a session affinity header. Either alone is useless: a breakpoint with
-    no affinity writes an entry the next turn may not find, and affinity with
-    nothing tagged has nothing to read.
+    """Prompt caching for Claude on Vertex: two cache_control marks plus a
+    session affinity header. The header is not optional decoration -- a mark
+    with no affinity writes an entry the next turn may not find, and affinity
+    with nothing tagged has nothing to read.
+
+    The two marks are not redundant, and neither subsumes the other:
+
+    * a STATIC mark closing system+tools. Identical across every conversation
+      this agent runs, so a brand-new conversation hits it on its FIRST call.
+      Review keys one thread per claim, so this is the only mark those
+      short-lived threads can ever read from.
+    * an ADVANCING mark closing history, moved forward when it pays. Private to
+      one conversation, and the one that matters on long flows, where history
+      is ~90% of the prompt.
+
+    An advancing mark alone would cover the static span too (a cached span is
+    always a prefix of the request), but only for a conversation that already
+    has history -- which is exactly the case the static mark is not needed for.
+
 
     Separate from AnthropicPromptCachingMiddleware because that one gates on
     isinstance(model, ChatAnthropic), which ChatAnthropicVertex is not, so
@@ -1226,18 +1282,31 @@ class _AnthropicVertexCaching(AgentMiddleware):
     (measured: cache_read stays 0 across identical calls). Gemini's implicit
     cache hides the same omission.
 
-    One breakpoint, on the system message:
+    Placement:
 
-    * It covers the tools too. The wire order is tools, system, messages, and
-      caching is prefix-based. Measured with 28 tools and a ~330-token system
-      message: cache_creation 13124, then cache_read 13124.
-    * No model_settings["cache_control"]. That tags the LAST content block,
-      which after the budget middleware is a per-turn nudge, so the breakpoint
-      would move every call. Measured to change nothing.
-    * History is not cached. A second, advancing breakpoint is unmeasured: the
-      one attempt ran at 49k-127k tokens where nothing cached at all, so a
-      write and a missed read were indistinguishable. Worth revisiting, since
-      the long flows are the ones whose history dwarfs this prefix.
+    * The static mark goes on the system message, and covers the tools too. The
+      wire order is tools, system, messages, and caching is prefix-based.
+      Measured with 28 tools and a ~330-token system message: cache_creation
+      13124, then cache_read 13124.
+    * The advancing mark goes on the last message of a _last_step_boundary
+      slice, so it never lands on the final message -- which after the budget
+      and grounding middleware may be a per-turn nudge that would move the mark
+      every call and cache nothing.
+    * No model_settings["cache_control"]. That tags the LAST content block, i.e.
+      that same nudge. Measured to change nothing.
+
+    When to advance is a cost decision, not an interval -- see _recache_pays.
+    Its B is the cost of creating the cache, and for Anthropic that is the one
+    number still unmeasured: moving a mark forward may re-bill the whole prefix
+    or only the delta. We assume the whole prefix, which is both the safe error
+    (the penalty is advancing too rarely, never overspending) and a small one.
+    Working the Anthropic differential -- advancing costs 1.25*(P+D) against
+    0.1*P + D for standing still, rather than the separate prefill a Vertex
+    cachedContents create bills -- gives an optimum of sqrt(2.5*P/g) where
+    _recache_pays solves sqrt(2*P/g). That is 12% in the cadence, well inside
+    the noise of the estimate feeding it, so the existing rule is reused as-is.
+    _record logs what would settle B from production traffic.
+
 
     No token floor: Anthropic declines to cache prefixes under ~1024 tokens
     without erroring, so a floor here would duplicate a server-side rule.
@@ -1254,7 +1323,9 @@ class _AnthropicVertexCaching(AgentMiddleware):
     cache_read in the ledger.
     """
 
-    def __init__(self, ttl: str = _ANTHROPIC_CACHE_TTL):
+    def __init__(
+        self, ttl: str = _ANTHROPIC_CACHE_TTL, *, max_calls: int | None = None
+    ):
         super().__init__()
         self._cache_control = {"type": "ephemeral", "ttl": ttl}
         # For a request with no thread id at all: a graph that configures none
@@ -1262,6 +1333,14 @@ class _AnthropicVertexCaching(AgentMiddleware):
         # is one conversation. A checkpointer-less graph still reports the
         # thread_id its config named, and the review graph names one per claim.
         self._fallback_session = uuid.uuid4().hex
+        # The turn's model-call cap, for the horizon term in _recache_pays.
+        # Optional: callers that do not track one still get history caching,
+        # just without the end-of-turn brake (see _calls_left).
+        self._max_calls = max_calls
+        # Keyed by thread id, same single-writer argument as _GrowingPrefixCache:
+        # the orchestrator serializes turns per (thread, agent), and review gives
+        # each concurrent claim its own thread id.
+        self._prefixes: OrderedDict[object, _AnthropicPrefix] = OrderedDict()
 
     def _blocks(self, request):
         """The system message as content blocks, or None if there is nothing
@@ -1313,6 +1392,140 @@ class _AnthropicVertexCaching(AgentMiddleware):
             },
         }
 
+    def _state(self, request, messages) -> _AnthropicPrefix:
+        """This conversation's breakpoint state, LRU-bounded.
+
+        A shorter history than last seen means the boundary indexes messages
+        that no longer exist -- summarization compacted them, or a fresh run is
+        reusing this graph (review). Either way the old mark is meaningless, so
+        start the key over rather than tag an arbitrary point. Eviction just
+        drops the entry: there is nothing server-side to delete, unlike
+        _GrowingPrefixCache, so a lost entry costs one re-write and no leak.
+        """
+        key = _thread_key(request)
+        st = self._prefixes.get(key)
+        if st is None or len(messages) < st.seen_len:
+            st = _AnthropicPrefix()
+        self._prefixes[key] = st
+        self._prefixes.move_to_end(key)
+        while len(self._prefixes) > _GROWING_MAX_STATES:
+            self._prefixes.popitem(last=False)
+        st.seen_len = len(messages)
+        return st
+
+    def _calls_left(self, request):
+        """Model calls left in this turn, for the horizon term in _recache_pays.
+
+        math.inf when no cap was configured. The horizon check exists to refuse
+        a re-cache that cannot be read back often enough to repay; with no cap
+        there is no horizon to compare against, and returning 0 instead would
+        suppress advancement permanently rather than merely mistime it --
+        disabling history caching outright for every caller that does not pass
+        max_calls.
+        """
+        if self._max_calls is None:
+            return math.inf
+        state = getattr(request, "state", None) or {}
+        calls = state.get("model_calls")
+        if calls is None:
+            return self._max_calls
+        return max(0, self._max_calls - calls)
+
+    def _advance(self, st: _AnthropicPrefix, messages: list, request) -> None:
+        """Move the history mark forward if it pays. Mutates `st`."""
+        target = _last_step_boundary(messages)
+        if target <= st.boundary:
+            # No completed step since the mark last moved. Also the guard that
+            # keeps the mark still while a turn's tool calls are mid-flight.
+            st.why = "no new step"
+            return
+        if st.boundary == 0:
+            # Nothing cached beyond system+tools yet, so there is no prefix to
+            # re-buy: the first placement is free and unconditional.
+            st.boundary, st.calls_since, st.why = target, 0, "first"
+            return
+        # Chars, not the provider count, because the delta is the part NOT yet
+        # cached -- no usage report covers it. prefix_tokens, the number that
+        # dominates the rule, is exact.
+        delta = (
+            sum(len(str(m.content)) for m in messages[st.boundary : target])
+            // _CHARS_PER_TOKEN
+        )
+        due, st.why = _recache_pays(
+            st.prefix_tokens, delta, st.calls_since, self._calls_left(request)
+        )
+        if due:
+            st.boundary, st.calls_since = target, 0
+
+    def _tagged_history(self, messages: list, boundary: int) -> list:
+        """`messages` with a mark closing messages[:boundary].
+
+        Copied, never mutated: the list is graph state and the mark belongs to
+        this request only (request.override is per call).
+
+        Two placements, because langchain_google_vertexai reads the mark from
+        two different places -- see _anthropic_utils._format_message_anthropic,
+        which copies "cache_control" off a dict content block, and
+        _get_cache_control, which takes it from additional_kwargs for string
+        content and tool results. The branches follow the content type, so
+        exactly one mark is emitted either way; picking the wrong one would
+        drop the mark silently and cache nothing.
+        """
+        i = boundary - 1
+        msg = messages[i]
+        content = msg.content
+        if isinstance(content, list) and content:
+            blocks = list(content)
+            last = blocks[-1]
+            blocks[-1] = (
+                {**last, "cache_control": self._cache_control}
+                if isinstance(last, dict)
+                else {
+                    "type": "text",
+                    "text": str(last),
+                    "cache_control": self._cache_control,
+                }
+            )
+            marked = msg.model_copy(update={"content": blocks})
+        else:
+            marked = msg.model_copy(
+                update={
+                    "additional_kwargs": {
+                        **(msg.additional_kwargs or {}),
+                        "cache_control": self._cache_control,
+                    }
+                }
+            )
+        return [*messages[:i], marked, *messages[i + 1 :]]
+
+    def _record(self, st: _AnthropicPrefix, response) -> None:
+        """Fold the provider's own counts back into the state, and log them.
+
+        read+create is the exact cached span, replacing the char estimate for
+        the next payback decision.
+
+        The log line is also the instrument for B, the one number this design
+        assumes rather than knows. On a call that advanced (calls_since == 0),
+        create is the WHOLE span under a full re-bill and only the delta
+        otherwise -- so a handful of production advances settles it, without
+        another probe. That is worth an INFO line: advances are rare by
+        construction, and if B turns out to be the delta the payback gate here
+        should be dropped entirely. Every other call logs at debug.
+        """
+        read, create = _response_cache_stats(response)
+        if read or create:
+            st.prefix_tokens = read + create
+        log.log(
+            logging.INFO if st.calls_since == 0 else logging.DEBUG,
+            "anthropic cache: read=%d create=%d span=%d mark=%d/%d (%s)",
+            read,
+            create,
+            st.prefix_tokens,
+            st.boundary,
+            st.seen_len,
+            st.why,
+        )
+
     async def awrap_model_call(self, request, handler):
         # Lazy import: an install without langchain_google_vertexai should run
         # uncached, not fail to import the agent.
@@ -1322,13 +1535,23 @@ class _AnthropicVertexCaching(AgentMiddleware):
             return await handler(request)
         if not isinstance(request.model, ChatAnthropicVertex):
             return await handler(request)
-        # The header goes on every Claude-on-Vertex call; the breakpoint only
+        # The header goes on every Claude-on-Vertex call; the static mark only
         # when there is a system message to tag.
         overrides = {"model_settings": self._with_session_header(request)}
         blocks = self._blocks(request)
         if blocks is not None:
             overrides["system_message"] = self._tagged_system(blocks)
-        return await handler(request.override(**overrides))
+
+        messages = request.messages or []
+        st = self._state(request, messages)
+        st.calls_since += 1
+        self._advance(st, messages, request)
+        if st.boundary > 0:
+            overrides["messages"] = self._tagged_history(messages, st.boundary)
+
+        response = await handler(request.override(**overrides))
+        self._record(st, response)
+        return response
 
 
 def base_middleware(
@@ -1338,6 +1561,7 @@ def base_middleware(
     *,
     summarizer_model_id: str | None = None,
     grounding_tokens: int = _GROUNDING_REMINDER_TOKENS,
+    max_calls: int | None = None,
 ):
     """The model-call middleware every agent graph shares: ceiling summarization,
     context-window sizing, empty-response stripping, transient-error retry, and
@@ -1400,7 +1624,7 @@ def base_middleware(
         # One caching middleware per Anthropic transport: upstream's gates on
         # ChatAnthropic, ours on ChatAnthropicVertex. At most one fires.
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-        _AnthropicVertexCaching(),
+        _AnthropicVertexCaching(max_calls=max_calls),
     ]
     # After summarization in the stack, so its before_model inserts against the
     # post-compaction state (a tail append via the messages reducer -- it settles

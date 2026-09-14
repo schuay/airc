@@ -28,7 +28,12 @@ from langchain.agents.middleware import (
     SummarizationMiddleware,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 _NON_VERTEX = "google_genai:gemini-3.1-flash-lite"
 _VERTEX = "google_vertexai:gemini-2.5-flash"
@@ -277,12 +282,14 @@ def test_shared_stack_present_for_any_model():
 # the request.
 
 
-def _CacheReq(model, system_message, model_settings=None, thread_id="t1"):
+def _CacheReq(
+    model, system_message, model_settings=None, thread_id="t1", messages=None
+):
     """A real ModelRequest with a stubbed runtime, whose execution_info carries
     the thread id the session header is keyed on."""
     return ModelRequest(
         model=model,
-        messages=[HumanMessage("hi")],
+        messages=[HumanMessage("hi")] if messages is None else messages,
         system_message=system_message,
         tool_choice=None,
         tools=[],
@@ -297,11 +304,31 @@ def _CacheReq(model, system_message, model_settings=None, thread_id="t1"):
     )
 
 
+def _usage(read=0, create=0):
+    """An AIMessage reporting cache counters, as a real response does."""
+    return AIMessage(
+        content="ok",
+        usage_metadata={
+            "input_tokens": read + create,
+            "output_tokens": 1,
+            "total_tokens": read + create + 1,
+            "input_token_details": {"cache_read": read, "cache_creation": create},
+        },
+    )
+
+
 async def _delivered(
-    model, system_message, model_settings=None, thread_id="t1", mw=None
+    model,
+    system_message,
+    model_settings=None,
+    thread_id="t1",
+    mw=None,
+    messages=None,
+    response="ok",
 ):
-    """The (system_message, model_settings) the handler saw. `mw` reuses one
-    middleware instance across calls, as base_middleware does per agent."""
+    """The (system_message, model_settings, messages) the handler saw. `mw`
+    reuses one middleware instance across calls, as base_middleware does per
+    agent."""
     from airc_core.agent import _AnthropicVertexCaching
 
     seen = {}
@@ -309,10 +336,11 @@ async def _delivered(
     async def handler(req):
         seen["system"] = req.system_message
         seen["settings"] = req.model_settings
-        return "ok"
+        seen["messages"] = req.messages
+        return response
 
     await (mw or _AnthropicVertexCaching()).awrap_model_call(
-        _CacheReq(model, system_message, model_settings, thread_id), handler
+        _CacheReq(model, system_message, model_settings, thread_id, messages), handler
     )
     return seen
 
@@ -463,6 +491,177 @@ async def test_claude_and_gemini_can_share_one_deployment():
         # Gemini is untouched: Vertex rejects an unknown cache_control key.
         assert g["settings"] == {} and g["system"].content == "sys"
         assert _SESSION_HEADER in c["settings"]["extra_headers"]
+
+
+# ── the advancing history breakpoint ─────────────────────────────────────────
+#
+# The static mark covers system+tools only, ~10% of a long prompt. These pin the
+# second, advancing mark: where it lands, and that it moves on the payback rule
+# rather than on every call (moving it every call re-buys the whole prefix).
+
+_CC = {"type": "ephemeral", "ttl": "5m"}
+
+
+def _step(n, content=None):
+    """One completed tool step: the model calls a tool, the tool answers."""
+    return [
+        AIMessage(
+            content=content if content is not None else f"calling {n}",
+            tool_calls=[{"name": "t", "args": {}, "id": f"c{n}"}],
+        ),
+        ToolMessage(content=f"result {n}", tool_call_id=f"c{n}"),
+    ]
+
+
+def _marks(messages):
+    """Indices of messages carrying a cache_control mark, either placement."""
+    out = []
+    for i, m in enumerate(messages):
+        block = isinstance(m.content, list) and any(
+            isinstance(b, dict) and "cache_control" in b for b in m.content
+        )
+        if block or (m.additional_kwargs or {}).get("cache_control"):
+            out.append(i)
+    return out
+
+
+async def test_no_history_mark_before_a_completed_step():
+    """A first call has nothing behind it worth closing, so only the static
+    mark ships. Placing one anyway would cache a prefix no later call shares."""
+    seen = await _delivered(_fake_vertex_anthropic(), SystemMessage("sys"))
+    assert _marks(seen["messages"]) == []
+
+
+async def test_history_mark_closes_the_last_completed_step():
+    """It lands on the AIMessage that opened the step, never on the trailing
+    user turn -- which may be a per-turn nudge that moves every call."""
+    messages = [HumanMessage("q"), *_step(1), HumanMessage("next")]
+    seen = await _delivered(
+        _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
+    )
+    assert _marks(seen["messages"]) == [1]
+    # str content takes the additional_kwargs path (_get_cache_control).
+    assert seen["messages"][1].additional_kwargs["cache_control"] == _CC
+    # The originals are untouched: the list is graph state.
+    assert _marks(messages) == []
+
+
+async def test_history_mark_on_block_content_goes_in_the_block():
+    """List content is read from the block itself, not additional_kwargs, so
+    the placement has to follow the content type or the mark is dropped."""
+    messages = [
+        HumanMessage("q"),
+        *_step(1, content=[{"type": "text", "text": "calling 1"}]),
+        HumanMessage("next"),
+    ]
+    seen = await _delivered(
+        _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
+    )
+    assert seen["messages"][1].content[-1]["cache_control"] == _CC
+    assert "cache_control" not in (seen["messages"][1].additional_kwargs or {})
+
+
+async def test_history_mark_holds_until_the_delta_repays():
+    """Advancing re-buys the whole prefix, so a mark that chased every step
+    would cost more than caching nothing. It moves only when
+    delta * calls_since >= 2 * prefix."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    model = _fake_vertex_anthropic()
+    history = [HumanMessage("q"), *_step(1), HumanMessage("next")]
+
+    # First placement is unconditional: no prefix exists yet to re-buy.
+    seen = await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=history,
+        response=_usage(create=50_000),
+    )
+    assert _marks(seen["messages"]) == [1]
+
+    # A big measured prefix against a tiny new step: not worth moving.
+    history = [*history, *_step(2), HumanMessage("next")]
+    seen = await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=history,
+        response=_usage(read=50_000),
+    )
+    assert _marks(seen["messages"]) == [1], "moved before it could repay"
+
+    # A step large enough to clear 2 * prefix does move it. The mark closes the
+    # step, so it lands on the AIMessage that opened it.
+    big = len(history)
+    history = [
+        *history,
+        AIMessage("x" * 800_000, tool_calls=[{"name": "t", "args": {}, "id": "big"}]),
+        ToolMessage(content="r", tool_call_id="big"),
+        HumanMessage("next"),
+    ]
+    seen = await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=history,
+        response=_usage(read=50_000),
+    )
+    assert _marks(seen["messages"]) == [big]
+
+
+async def test_history_mark_restarts_when_history_shrinks():
+    """Summarization (or a fresh run reusing the graph) leaves the boundary
+    pointing at messages that no longer exist; the state must start over rather
+    than mark an arbitrary position."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    model = _fake_vertex_anthropic()
+    long_history = [HumanMessage("q"), *_step(1), *_step(2), HumanMessage("next")]
+    await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=long_history,
+        response=_usage(create=9_000),
+    )
+    # Two completed steps, so the mark closes the second: messages[:4].
+    assert mw._prefixes["t1"].boundary == 4
+
+    await _delivered(
+        model, SystemMessage("sys"), mw=mw, messages=[HumanMessage("compacted")]
+    )
+    st = mw._prefixes["t1"]
+    assert st.boundary == 0 and st.prefix_tokens == 0
+
+
+async def test_measured_span_replaces_the_estimate():
+    """read+create is the cached span whichever way the provider reports it.
+    This is also how B -- whether advancing re-bills the prefix or the delta --
+    becomes readable from production instead of needing another probe."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    model = _fake_vertex_anthropic()
+    messages = [HumanMessage("q"), *_step(1), HumanMessage("next")]
+    await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=messages,
+        response=_usage(create=13_124),
+    )
+    assert mw._prefixes["t1"].prefix_tokens == 13_124
+    await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=messages,
+        response=_usage(read=13_000, create=124),
+    )
+    assert mw._prefixes["t1"].prefix_tokens == 13_124
 
 
 # ── _EmptyCandidateRetry (Gemini's zero-part candidate) ──────────────────────
