@@ -1301,12 +1301,12 @@ class _AnthropicVertexCaching(AgentMiddleware):
       wire order is tools, system, messages, and caching is prefix-based.
       Measured with 28 tools and a ~330-token system message: cache_creation
       13124, then cache_read 13124.
-    * The advancing mark goes on the last message of a _last_step_boundary
-      slice, taken with allow_tool_result so the prefix ends AFTER a completed
-      tool step rather than between a tool call and its result. It never lands
-      on the final message -- which after the budget and grounding middleware
-      may be a per-turn nudge that would move the mark every call and cache
-      nothing.
+    * The advancing mark goes on the last message that can hold one
+      (_last_markable), which in an agent loop is the newest tool result. It may
+      be the final message: everything that appends to the conversation does so
+      through the state reducer, so the marked message is still at that index
+      next call. The one exception is the empty-candidate nudge, which lives in
+      the request only, and _advance stands down while it is in play.
     * Which part of that message carries the mark is _mark_placement's
       decision, and _advance refuses to advance onto a message it cannot place
       one on. The two must agree: the first version of this chose the placement
@@ -1456,30 +1456,33 @@ class _AnthropicVertexCaching(AgentMiddleware):
 
     def _advance(self, st: _AnthropicPrefix, messages: list, request) -> None:
         """Move the history mark forward if it pays. Mutates `st`."""
-        target = _last_step_boundary(messages, allow_tool_result=True)
-        if target <= st.boundary:
-            # No completed step since the mark last moved. Also the guard that
-            # keeps the mark still while a turn's tool calls are mid-flight.
-            st.why = "no new step"
+        if _empty_retry.get():
+            # This call carries _EMPTY_NUDGE, appended to the request and not to
+            # state, so the tail is not where the next call's history will be.
+            # A mark placed into it would cache a prefix nothing else shares.
+            # The existing mark still ships: unlike the Vertex cache there is no
+            # stored prefix to step around, only a billing annotation.
+            st.why = "empty retry"
             return
-        if _mark_placement(messages[target - 1]) is None:
-            # Nothing on that message can carry a mark that survives
-            # serialization, so advancing would record a cached span we never
-            # sent. Stay put and try again at the next step -- the condition is
-            # per-message, not per-conversation. Warn once per stretch: it
-            # should not happen for any shape we have seen, so if it starts
-            # happening we want to hear about it rather than quietly stop
-            # caching history.
+        target = _last_markable(messages)
+        if target == 0:
+            # No message in the conversation can carry a mark that survives
+            # serialization, so there is nowhere to record a span we would
+            # actually send. Warn once per stretch: every shape we have seen
+            # ends on a tool result or user text, both markable, so this means
+            # something new is in the history.
             if st.why != _NO_SAFE_MARK:
                 log.warning(
-                    "anthropic cache: no safe mark on %s at %d/%d; holding at"
-                    " %d. History caching is stalled until a markable step.",
-                    type(messages[target - 1]).__name__,
-                    target,
+                    "anthropic cache: nothing in %d messages can carry a mark;"
+                    " holding at %d. History caching is stalled.",
                     len(messages),
                     st.boundary,
                 )
             st.why = _NO_SAFE_MARK
+            return
+        if target <= st.boundary:
+            # Nothing new behind the mark since it last moved.
+            st.why = "no new step"
             return
         if st.boundary == 0:
             # Nothing cached beyond system+tools yet, so there is no prefix to
@@ -1513,7 +1516,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
         """
         i = boundary - 1
         msg = messages[i]
-        where = _mark_placement(msg)
+        where = _mark_placement(msg, messages[i - 1] if i else None)
         if where is None:
             # _advance should have prevented this. Leave the history alone
             # rather than emit a mark we know will be dropped.
@@ -1794,16 +1797,18 @@ def _block_takes_a_mark(block) -> bool:
 # indistinguishable from not having cached. A fix would carry cache_control (at
 # minimum) across from the block being replaced. Until then _mark_placement
 # routes around it by never choosing a tool_use block.
-def _mark_placement(msg):
+def _mark_placement(msg, prev=None):
     """Where to put a cache_control mark on `msg`, or None if nowhere is safe.
 
-    Returns _MARK_IN_KWARGS, or the index of the content block to tag.
+    Returns _MARK_IN_KWARGS, or the index of the content block to tag. `prev` is
+    the message before it, which decides one of the cases below.
 
     This exists because the mark is a passenger inside the request body, and
     langchain_google_vertexai rewrites that body on the way out: it drops keys
-    it does not recognize, skips empty text blocks, and -- the one that bit us
-    -- discards any tool_use block whose id matches a tool_call and rebuilds it
-    from the tool_call instead. See the TODO above.
+    it does not recognize, skips empty text blocks, merges runs of user-role
+    messages, and -- the one that bit us -- discards any tool_use block whose id
+    matches a tool_call and rebuilds it from the tool_call instead. See the TODO
+    above.
 
     Callers must consult this BEFORE recording that the boundary moved: the
     decision to advance and the ability to mark have to be taken together, or
@@ -1815,7 +1820,8 @@ def _mark_placement(msg):
         # A tool result is formatted into a tool_result block that takes the
         # mark from additional_kwargs (:480-484) -- unless the content already
         # IS tool_result blocks, which takes an earlier branch (:458-468) that
-        # never looks at additional_kwargs.
+        # never looks at additional_kwargs. The mark rides inside the block, so
+        # it survives the merge into a neighbouring user turn.
         already_formatted = (
             isinstance(content, list)
             and content
@@ -1825,6 +1831,16 @@ def _mark_placement(msg):
         )
         return None if already_formatted else _MARK_IN_KWARGS
     if isinstance(content, str):
+        if isinstance(msg, HumanMessage) and isinstance(
+            prev, (HumanMessage, ToolMessage)
+        ):
+            # _merge_messages folds a run of user-role messages into one message
+            # with LIST content, keeping this message's additional_kwargs on a
+            # message the formatter then reads as a list -- and the list branch
+            # never looks at additional_kwargs. So the mark is dropped, the same
+            # way the tool_use rebuild drops it. A tool result ahead of this one
+            # is still markable and is the bulkier prefix anyway.
+            return None
         # additional_kwargs is only read for string content (:159-168), and
         # only an actual text block can carry the mark, so empty content has
         # nowhere to put it even though the message is still sent.
@@ -1836,44 +1852,65 @@ def _mark_placement(msg):
     return None
 
 
-def _last_step_boundary(messages: list, *, allow_tool_result: bool = False) -> int:
+def _last_markable(messages: list) -> int:
+    """Largest p such that a mark closing messages[:p] reaches the wire, for
+    Anthropic. 0 when no message can carry one.
+
+    Anthropic's only placement rule is that the mark sits on a content block the
+    client will not rebuild -- _mark_placement. It does not need a conversational
+    rest point: the prefix is re-sent in full on every call and the mark only
+    says where to cut.
+
+    So this deliberately does NOT reuse _last_step_boundary. That function
+    encodes Gemini's wire restrictions, and the shape it selects for a tail of
+    [..., AI(tool_use), Tool] is the cut BETWEEN the call and its result -- the
+    one message that can never hold a mark. On a turn that makes one tool call
+    at a time, which is what a review turn does from start to finish, it
+    proposes only that cut and history caching stops for the whole turn.
+
+    p may be len(messages), marking the newest tool result. Measured on Vertex
+    against claude-opus-5 over three runs: a mark in a final ToolMessage's
+    additional_kwargs writes the prefix (create 21230, read 0) and the next call
+    reads it back whole (read 21230, create 0). A mark placed the old way, on
+    the assistant turn's tool_use block, wrote nothing at all (create 0) -- the
+    control that says these numbers measure the mark and not the weather.
+
+    Marking the final message is safe because the list is append-only from here:
+    every middleware that adds a message does it through the state reducer, so
+    the message keeps its index next call. The exception is _EMPTY_NUDGE, which
+    _EmptyCandidateRetry overrides into the request alone; _advance stands down
+    for that call rather than encoding the exception here.
+    """
+    for p in range(len(messages), 0, -1):
+        prev = messages[p - 2] if p > 1 else None
+        if _mark_placement(messages[p - 1], prev) is not None:
+            return p
+    return 0
+
+
+def _last_step_boundary(messages: list) -> int:
     """Largest slice point p where caching messages[:p] ends the prefix on a
-    wire shape the caller's provider accepts.
+    wire shape Gemini accepts (_GrowingPrefixCache).
 
-    Default (Gemini, _GrowingPrefixCache): an AIMessage holding a function call
-    (its ToolMessage then opens the tail, which the tool-first guard in model.py
-    makes sendable) or plain user text. Never on a ToolMessage: some models
-    (gemini-3.8-flash) reject a cached prefix ending on a function response,
-    reporting it as "ending with a model turn". A HumanMessage directly after
-    a ToolMessage is no rest-point either -- consecutive user-role contents
-    merge into one on the wire, so that prefix would still end on the function
-    response.
+    An AIMessage holding a function call (its ToolMessage then opens the tail,
+    which the tool-first guard in model.py makes sendable) or plain user text.
+    Never on a ToolMessage: some models (gemini-3.8-flash) reject a cached prefix
+    ending on a function response, reporting it as "ending with a model turn".
+    A HumanMessage directly after a ToolMessage is no rest-point either --
+    consecutive user-role contents merge into one on the wire, so that prefix
+    would still end on the function response.
 
-    allow_tool_result lifts both of those, and is what Claude passes. Neither
-    restriction is Anthropic's: the prefix is re-sent in full on every call and
-    the mark only says where to cut, so ending on a function response is fine,
-    and a merged user turn just puts the cut mid-message, which is legal. Both
-    were measured writing cache normally. Lifting them also ends the prefix
-    AFTER a completed tool step rather than between the call and its result,
-    which is both the larger span (tool output is the bulky part) and the only
-    one that can hold a mark at all -- see _mark_placement.
-
-    p is never len(messages), for both callers but for different reasons:
-    Gemini needs a non-empty tail to send, and Anthropic needs the trailing
-    grounding reminder to stay OUT of the cached prefix, since it varies per
-    call and would poison it.
+    p is never len(messages): Gemini needs a non-empty tail to send.
 
     0 when no point qualifies (then the prefix is just [system], i.e. the
     system+tools cache).
     """
     for p in range(len(messages) - 1, 0, -1):
         prev = messages[p - 1]
-        if allow_tool_result and isinstance(prev, ToolMessage):
-            return p
         if isinstance(prev, AIMessage) and isinstance(messages[p], ToolMessage):
             return p
         if isinstance(prev, HumanMessage) and (
-            allow_tool_result or p < 2 or not isinstance(messages[p - 2], ToolMessage)
+            p < 2 or not isinstance(messages[p - 2], ToolMessage)
         ):
             return p
     return 0

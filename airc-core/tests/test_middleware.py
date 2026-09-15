@@ -526,24 +526,47 @@ def _marks(messages):
     return out
 
 
-async def test_no_history_mark_before_a_completed_step():
-    """A first call has nothing behind it worth closing, so only the static
-    mark ships. Placing one anyway would cache a prefix no later call shares."""
+async def test_the_mark_lands_on_the_opening_message():
+    """No reason to wait for a completed step. The opening message is a prefix
+    every later call in the conversation shares, so marking it writes a cache
+    the next call reads."""
     seen = await _delivered(_fake_vertex_anthropic(), SystemMessage("sys"))
-    assert _marks(seen["messages"]) == []
+    assert _marks(seen["messages"]) == [0]
 
 
-async def test_history_mark_closes_the_last_completed_step():
-    """It lands on the tool result that ended the step, never on the trailing
-    user turn -- which may be a per-turn nudge that moves every call."""
+async def test_the_mark_closes_the_newest_tool_result():
+    """The review shape: an assistant turn with nothing but a tool call, then
+    its result, and the model is called again. The mark belongs on the result.
+
+    This is the regression. The old rule asked _last_step_boundary for the
+    largest cut, which here is the one BETWEEN the call and its result -- an
+    assistant message whose only block is a tool_use, which cannot hold a mark.
+    A turn making one tool call at a time never offered any other cut, so
+    history caching stopped for the whole turn.
+    """
+    messages = [HumanMessage("q"), *_step(1, content="")]
+    seen = await _delivered(
+        _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
+    )
+    assert _marks(seen["messages"]) == [2]
+    assert _wire_marks(seen["messages"])
+
+
+async def test_a_user_turn_merged_into_a_tool_result_is_not_marked():
+    """A HumanMessage straight after a tool result is folded into that user
+    turn by _merge_messages, which leaves the merged message with LIST content
+    -- and the formatter's list branch never reads additional_kwargs. So the
+    mark goes on the tool result instead, which is the bulkier prefix anyway.
+    """
     messages = [HumanMessage("q"), *_step(1), HumanMessage("next")]
     seen = await _delivered(
         _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
     )
     assert _marks(seen["messages"]) == [2]
     # A ToolMessage is formatted into a tool_result block that takes the mark
-    # from additional_kwargs.
+    # from additional_kwargs, and the block survives the merge.
     assert seen["messages"][2].additional_kwargs["cache_control"] == _CC
+    assert _wire_marks(seen["messages"])
     # The originals are untouched: the list is graph state.
     assert _marks(messages) == []
 
@@ -636,10 +659,69 @@ async def test_the_mark_never_lands_on_a_tool_use_block():
     assert _mark_placement(msg) == 0
 
 
-async def test_the_boundary_holds_when_nothing_can_carry_a_mark():
+def test_a_single_tool_call_per_turn_still_advances():
+    """The production stall, against the selector. A review turn is
+    AI(tool_use) -> Tool -> AI(tool_use) -> Tool with no text preamble, and the
+    boundary has to keep moving through it.
+
+    _last_step_boundary returns the largest cut and no other. On this shape that
+    cut always falls between a tool call and its result, on an assistant message
+    carrying only a tool_use block -- the one thing that cannot hold a mark. The
+    observed consequence was a mark frozen at 3/4 for an entire twelve-call
+    review while the prompt grew from 27866 to 48403 tokens.
+    """
+    from airc_core.agent import _last_markable, _last_step_boundary, _mark_placement
+
+    messages = [HumanMessage("q")]
+    seen = []
+    for n in range(1, 5):
+        messages += _step(n, content="")
+        seen.append(_last_markable(messages))
+        # Every chosen position can actually take a mark. This is the property
+        # the old rule could not offer, because it only ever proposed one.
+        assert _mark_placement(messages[seen[-1] - 1], messages[seen[-1] - 2])
+        # The old rule's single candidate, for contrast: unmarkable every time.
+        old = _last_step_boundary(messages)
+        assert _mark_placement(messages[old - 1], messages[old - 2]) is None
+
+    assert seen == [3, 5, 7, 9]
+
+
+async def test_the_mark_stands_down_during_an_empty_candidate_retry():
+    """That retry appends a nudge to the request and not to graph state, so the
+    tail it presents is not where the next call's history will be. Marking into
+    it would cache a prefix nothing else shares."""
+    from airc_core import agent
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching()
+    model = _fake_vertex_anthropic()
+    history = [HumanMessage("q"), *_step(1, content="")]
+    await _delivered(model, SystemMessage("sys"), mw=mw, messages=history)
+    assert mw._prefixes["t1"].boundary == 3
+
+    agent._empty_retry.set(1)
+    try:
+        seen = await _delivered(
+            model,
+            SystemMessage("sys"),
+            mw=mw,
+            messages=[*history, HumanMessage("regenerate now")],
+        )
+    finally:
+        agent._empty_retry.set(0)
+    st = mw._prefixes["t1"]
+    assert st.boundary == 3 and st.why == "empty retry"
+    # The mark it already owns still ships: for Anthropic the mark is a billing
+    # annotation, not a stored prefix to step around.
+    assert _marks(seen["messages"]) == [2]
+
+
+async def test_the_mark_walks_back_past_a_tail_that_cannot_carry_it():
     """A tool result already in tool_result form takes a formatter branch that
-    never reads additional_kwargs. Rather than emit a mark we know will be
-    dropped, hold the boundary and try again at the next step."""
+    never reads additional_kwargs, and the user turn after it is merged into
+    that same message. Neither can hold a mark, so the boundary settles on the
+    assistant turn before them rather than giving up on the conversation."""
     from airc_core.agent import _AnthropicVertexCaching
 
     mw = _AnthropicVertexCaching()
@@ -657,9 +739,9 @@ async def test_the_boundary_holds_when_nothing_can_carry_a_mark():
     seen = await _delivered(
         _fake_vertex_anthropic(), SystemMessage("sys"), mw=mw, messages=messages
     )
-    assert mw._prefixes["t1"].boundary == 0
-    assert mw._prefixes["t1"].why == "no safe mark"
-    assert _marks(seen["messages"]) == []
+    assert mw._prefixes["t1"].boundary == 2
+    assert _marks(seen["messages"]) == [1]
+    assert _wire_marks(seen["messages"])
 
 
 @pytest.mark.parametrize("shape", list(_ASSISTANT_SHAPES), ids=list(_ASSISTANT_SHAPES))
@@ -790,15 +872,17 @@ async def test_history_mark_restarts_when_history_shrinks():
         messages=long_history,
         response=_usage(create=9_000),
     )
-    # Two completed steps, so the mark closes the second -- messages[:5], which
-    # ends on its tool result rather than between the call and the result.
+    # Two steps and a trailing user turn merged into the second result, so the
+    # mark closes messages[:5] -- the newest markable message.
     assert mw._prefixes["t1"].boundary == 5
 
     await _delivered(
         model, SystemMessage("sys"), mw=mw, messages=[HumanMessage("compacted")]
     )
     st = mw._prefixes["t1"]
-    assert st.boundary == 0 and st.prefix_tokens == 0
+    # Started over: the measured span is gone and the mark is placed afresh on
+    # the compacted history as a first placement, not carried over from 5.
+    assert st.prefix_tokens == 0 and st.why == "first" and st.boundary == 1
 
 
 async def test_measured_span_replaces_the_estimate():
