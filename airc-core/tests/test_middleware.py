@@ -1747,3 +1747,60 @@ async def test_progress_pointer_is_suppressed_on_an_empty_candidate_retry():
         assert not any("call 7" in m for m in await _appended(mw, 7))
     finally:
         agent._empty_retry.set(0)
+
+
+# ── closing the reads on a model that ignores its re-asks ────────────────────
+
+
+class _ClosedReq:
+    """Minimal ModelRequest stand-in carrying the two counters the close
+    decision reads."""
+
+    def __init__(self, answer_calls=0, reasks=0):
+        self.state = {"answer_calls": answer_calls, "reasks": reasks}
+        self.messages = [HumanMessage("hi")]
+
+    def override(self, *, messages):
+        req = _ClosedReq(self.state["answer_calls"], self.state["reasks"])
+        req.messages = messages
+        return req
+
+
+def _fa(**kw):
+    return FinalAnswerMiddleware(100, "notice", "refused", **kw)
+
+
+def test_reasks_do_not_close_the_tools_by_default():
+    # Unset, the middleware is exactly the end-of-budget window it always was.
+    mw = _fa()
+    assert mw._closed(1, {"answer_calls": 1, "reasks": 9}) is False
+    assert mw._closed(97, {"answer_calls": 97, "reasks": 0}) is True
+
+
+def test_reads_close_once_the_reask_bound_is_reached():
+    # The failure: a re-ask lands with every read tool open and tool_choice=any
+    # over all of them, so the model answers with another read instead of the
+    # verdict -- not a plain-text terminal, so nothing re-asks again.
+    mw = _fa(close_after_reasks=2)
+    assert mw._closed(5, {"answer_calls": 5, "reasks": 1}) is False
+    assert mw._closed(5, {"answer_calls": 5, "reasks": 2}) is True
+
+
+async def test_a_reask_closed_turn_gets_the_notice_and_refusals():
+    mw = _fa(close_after_reasks=1)
+    seen = {}
+
+    async def handler(req):
+        seen["msgs"] = [str(m.content) for m in req.messages]
+        return "ok"
+
+    await mw.awrap_model_call(_ClosedReq(answer_calls=5, reasks=1), handler)
+    assert "notice" in seen["msgs"]
+    # And a read issued from that call is refused rather than run.
+    refused = mw._refuse(
+        SimpleNamespace(
+            state={"answer_calls": 6, "reasks": 1},
+            tool_call={"id": "c1", "name": "read"},
+        )
+    )
+    assert refused is not None and refused.status == "error"

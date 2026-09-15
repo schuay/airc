@@ -943,6 +943,9 @@ class FinalAnswerMiddleware(AgentMiddleware):
     model node parses itself and never routes through the tool hook, so it is
     never refused.
 
+    close_after_reasks arms the same mechanism on the other no-verdict path,
+    where the budget is not the problem: see _closed.
+
     Refusing at execution rather than withdrawing the tools from the request is
     deliberate: the tool list is the first thing in the cached prefix, and
     changing it re-bills the whole context on every call of the window. A
@@ -960,17 +963,41 @@ class FinalAnswerMiddleware(AgentMiddleware):
     state_schema = _FinalAnswerState
 
     def __init__(
-        self, max_calls: int, notice: str, refusal: str, window: int = 3
+        self,
+        max_calls: int,
+        notice: str,
+        refusal: str,
+        window: int = 3,
+        *,
+        close_after_reasks: int | None = None,
     ) -> None:
         super().__init__()
         self._max = max_calls
         self._notice = notice
         self._refusal = refusal
         self._window = window
+        self._close_after_reasks = close_after_reasks
 
-    def _closed(self, completed: int) -> bool:
-        """Whether the model call made after `completed` calls is in the window."""
-        return completed >= self._max - self._window
+    def _closed(self, completed: int, state=None) -> bool:
+        """Whether the model call made after `completed` calls has its tools shut.
+
+        Two ways in. The window at the end of the budget is the original: the
+        turn is about to be cut off, so leave nothing to do but report.
+
+        close_after_reasks is the other, and it is about a different failure.
+        RequireStructuredResultMiddleware re-asks a turn that ended in prose, but
+        a re-ask lands while every read tool is still open -- and the model is
+        bound tool_choice="any" over ALL of them, so it can satisfy the constraint
+        with another read and never produce the verdict. That is not a terminal
+        plain-text turn, so the re-ask does not fire again and the pass wanders on
+        to the cap. Once a model has ignored this many re-asks, the reads come
+        away and the result tool is the only call that does anything.
+        """
+        if completed >= self._max - self._window:
+            return True
+        if self._close_after_reasks is None or state is None:
+            return False
+        return state.get("reasks", 0) >= self._close_after_reasks
 
     def after_model(self, state, runtime) -> dict[str, Any]:
         return {"answer_calls": state.get("answer_calls", 0) + 1}
@@ -980,7 +1007,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         n = request.state.get("answer_calls", 0)
-        if not self._closed(n):
+        if not self._closed(n, request.state):
             return await handler(request)
         log.info("final answer: tools closed at call %d/%d", n + 1, self._max)
         # The empty-candidate retry re-enters this wrap with its own nudge on
@@ -995,7 +1022,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
     def _refuse(self, request):
         # The call that issued this tool call has already been counted, so the
         # count it was made after is one less.
-        if not self._closed(request.state.get("answer_calls", 0) - 1):
+        if not self._closed(request.state.get("answer_calls", 0) - 1, request.state):
             return None
         call = request.tool_call
         return ToolMessage(
