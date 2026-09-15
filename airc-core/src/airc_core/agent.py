@@ -997,7 +997,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
             return True
         if self._close_after_reasks is None or state is None:
             return False
-        return state.get("reasks", 0) >= self._close_after_reasks
+        return state.get(REASKS_KEY, 0) >= self._close_after_reasks
 
     def after_model(self, state, runtime) -> dict[str, Any]:
         return {"answer_calls": state.get("answer_calls", 0) + 1}
@@ -1046,6 +1046,13 @@ class FinalAnswerMiddleware(AgentMiddleware):
 _REQUIRE_RESULT_SRC = "require_result_reask"
 
 
+# The state key RequireStructuredResultMiddleware counts re-asks in, named once
+# because FinalAnswerMiddleware reads it too (close_after_reasks). Asserted
+# against the schema below at import: renaming the field without this constant
+# would not fail anything, it would quietly stop the reads ever closing.
+REASKS_KEY = "reasks"
+
+
 class _RequireResultState(AgentState):
     # UntrackedValue: per-turn (per graph invocation), NEVER checkpointed -- so the
     # re-ask count resets each turn instead of accumulating across a stage-loop's
@@ -1059,6 +1066,12 @@ class _RequireResultState(AgentState):
     # cached prefix with no length change to trip the shrink guard). The counter
     # never touches the messages channel, so it cannot interact with caching.
     reasks: NotRequired[Annotated[int, UntrackedValue]]
+
+
+assert REASKS_KEY in _RequireResultState.__annotations__, (
+    "REASKS_KEY must name a field of _RequireResultState: FinalAnswerMiddleware"
+    " reads it to decide when to close the read tools"
+)
 
 
 class RequireStructuredResultMiddleware(AgentMiddleware):
@@ -1119,7 +1132,7 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
             return None
         if state.get("structured_response") is not None:
             return None
-        n = state.get("reasks", 0)
+        n = state.get(REASKS_KEY, 0)
         if n >= self._max:
             # Exhausted the re-asks: let the turn end verdict-less (the caller
             # surfaces None as incomplete, never as a clean pass). Bounded so a
@@ -1139,7 +1152,7 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
         reminder = HumanMessage(
             self._reminder, additional_kwargs={"lc_source": _REQUIRE_RESULT_SRC}
         )
-        return {"jump_to": "model", "reasks": n + 1, "messages": [reminder]}
+        return {"jump_to": "model", REASKS_KEY: n + 1, "messages": [reminder]}
 
     @hook_config(can_jump_to=["model"])
     def after_model(self, state, runtime) -> dict[str, Any] | None:
