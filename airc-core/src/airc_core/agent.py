@@ -846,6 +846,72 @@ class CallBudgetMiddleware(AgentMiddleware):
         return await handler(request)
 
 
+class _FinalAnswerState(AgentState):
+    # Per turn, never checkpointed, for the same reason as model_calls above.
+    answer_calls: NotRequired[Annotated[int, UntrackedValue]]
+
+
+class FinalAnswerMiddleware(AgentMiddleware):
+    """Withdraw the tools for the last `window` calls of a capped turn, so the
+    turn ends with a result instead of at the cap.
+
+    ModelCallLimitMiddleware ends a turn at its cap by jumping to the end with
+    an artificial message. For a ToolStrategy agent that is the worst outcome
+    available: the structured result was never produced, the caller sees None,
+    and every read the turn made is thrown away -- a review pass that hits the
+    cap contributes nothing to its ensemble. The nudges before the cap ask the
+    model to stop; this makes it stop.
+
+    Mechanism: with ToolStrategy, create_agent binds the model with
+    tool_choice="any" and appends the structured-output tool to request.tools
+    on every call. Emptying request.tools leaves the result tool as the only
+    tool bound, so the forced call can only be the verdict. `notice` rides on
+    the same request, request-only like a nudge, so the model is told why its
+    reads are gone and what to do with what it has. An agent without a
+    ToolStrategy is simply called without tools, which forces a text answer --
+    the same "answer now" for a persona turn.
+
+    The window is the turn's last `window` permitted calls; the second and
+    later exist for a validation retry (handle_errors re-prompts on a bad
+    result call). Withdrawing tools changes the tools prefix, so every call in
+    the window misses the prompt cache and is billed in full -- the price of a
+    verdict against the whole turn being wasted, and the reason the window is
+    two calls rather than a longer tail.
+
+    The count is this middleware's own, per turn like CallBudgetMiddleware's,
+    so the window does not depend on which other governors are in the stack.
+    `max_calls` must equal ModelCallLimitMiddleware's run cap, or the window
+    ends somewhere other than where the cap does.
+    """
+
+    state_schema = _FinalAnswerState
+
+    def __init__(self, max_calls: int, notice: str, window: int = 2) -> None:
+        super().__init__()
+        self._max = max_calls
+        self._notice = notice
+        self._window = window
+
+    def after_model(self, state, runtime) -> dict[str, Any]:
+        return {"answer_calls": state.get("answer_calls", 0) + 1}
+
+    async def aafter_model(self, state, runtime) -> dict[str, Any]:
+        return self.after_model(state, runtime)
+
+    async def awrap_model_call(self, request, handler):
+        n = request.state.get("answer_calls", 0)
+        if n < self._max - self._window:
+            return await handler(request)
+        log.info("final answer: tools withdrawn at call %d/%d", n + 1, self._max)
+        messages = request.messages
+        # The empty-candidate retry re-enters this wrap with its own nudge on
+        # the request; the notice is already there from the first pass, so only
+        # the tools are taken again (same reasoning as CallBudgetMiddleware).
+        if not _empty_retry.get():
+            messages = [*messages, HumanMessage(self._notice)]
+        return await handler(request.override(tools=[], messages=messages))
+
+
 # Tag on the re-ask reminders this middleware injects. No longer load-bearing
 # for the bound (the re-ask count is an UntrackedValue counter, below) -- kept
 # so a reminder is identifiable in logs/checkpoints and a test can assert it was

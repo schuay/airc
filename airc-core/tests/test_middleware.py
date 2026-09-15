@@ -16,6 +16,7 @@ import pytest
 from airc_core.agent import (
     CallBudgetMiddleware,
     EmptyCandidateError,
+    FinalAnswerMiddleware,
     RequireStructuredResultMiddleware,
     _DropEmptyResponses,
     _SkipOnSummaryFailure,
@@ -1572,3 +1573,70 @@ async def test_require_result_composes_with_the_review_governors():
     state = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert state.get("structured_response") is None
     assert _reminders(state) == 3
+
+
+def _final_req(calls: int, tools=None, messages=None):
+    return ModelRequest(
+        model=SimpleNamespace(),
+        system_message=None,
+        messages=messages or [HumanMessage("q")],
+        tool_choice=None,
+        tools=[{"name": "read"}] if tools is None else tools,
+        response_format=None,
+        state={"answer_calls": calls},
+        runtime=SimpleNamespace(),
+    )
+
+
+async def _final_seen(mw, request):
+    seen = {}
+
+    async def handler(req):
+        seen["tools"] = list(req.tools)
+        seen["messages"] = list(req.messages)
+        return "ok"
+
+    await mw.awrap_model_call(request, handler)
+    return seen
+
+
+async def test_final_answer_leaves_calls_before_the_window_alone():
+    mw = FinalAnswerMiddleware(10, "answer now", window=2)
+    seen = await _final_seen(mw, _final_req(7))
+    assert seen["tools"] == [{"name": "read"}]
+    assert [m.content for m in seen["messages"]] == ["q"]
+
+
+async def test_final_answer_withdraws_tools_for_the_last_permitted_calls():
+    """answer_calls counts completed calls, so with a cap of 10 and a window of
+    2 the calls made at 8 and 9 are the ninth and tenth: the last two the cap
+    permits. Both go out with no tools and the notice, so under ToolStrategy the
+    result tool is the only call the model can make."""
+    mw = FinalAnswerMiddleware(10, "answer now", window=2)
+    for n in (8, 9):
+        seen = await _final_seen(mw, _final_req(n))
+        assert seen["tools"] == [], n
+        assert [m.content for m in seen["messages"]] == ["q", "answer now"], n
+    # The original request is graph state and is not mutated.
+    req = _final_req(9)
+    await _final_seen(mw, req)
+    assert req.tools == [{"name": "read"}] and len(req.messages) == 1
+
+
+async def test_final_answer_counts_its_own_calls():
+    mw = FinalAnswerMiddleware(10, "answer now")
+    assert mw.after_model({"answer_calls": 3}, None) == {"answer_calls": 4}
+    assert mw.after_model({}, None) == {"answer_calls": 1}
+
+
+async def test_final_answer_does_not_stack_the_notice_on_an_empty_retry():
+    from airc_core import agent
+
+    mw = FinalAnswerMiddleware(10, "answer now", window=2)
+    agent._empty_retry.set(1)
+    try:
+        seen = await _final_seen(mw, _final_req(9))
+    finally:
+        agent._empty_retry.set(0)
+    assert seen["tools"] == []
+    assert [m.content for m in seen["messages"]] == ["q"]
