@@ -1544,21 +1544,24 @@ class _AnthropicVertexCaching(AgentMiddleware):
         read+create is the exact cached span, replacing the char estimate for
         the next payback decision.
 
-        The log line is also the instrument for B, the one number this design
-        assumes rather than knows. On a call that advanced (calls_since == 0),
-        create is the WHOLE span under a full re-bill and only the delta
-        otherwise -- so a handful of production advances settles it, without
-        another probe. That is worth an INFO line: advances are rare by
-        construction, and if B turns out to be the delta the payback gate here
-        should be dropped entirely. Every other call logs at debug.
+        Debug, not info. This line was info on a call that advanced the mark,
+        as the instrument for B -- whether creation bills the whole span or
+        only the delta -- on the reasoning that advances were rare enough for
+        the noise to be worth it. Neither premise holds now. B is settled
+        against the provider's own token meter (cache_write_input came in ~47x
+        under what a full re-bill of the span would have required, so creation
+        bills the delta), and since the mark stopped stalling every call
+        advances, which made this one info line per model call.
+
+        The warning below stays: it is the detector for the mark silently not
+        reaching the wire, and that is not something to find in a debug log.
         """
         read, create = _response_cache_stats(response)
         advanced = st.calls_since == 0
         before = st.prefix_tokens
         if read or create:
             st.prefix_tokens = read + create
-        log.log(
-            logging.INFO if advanced else logging.DEBUG,
+        log.debug(
             "anthropic cache: read=%d create=%d span=%d mark=%d/%d (%s)",
             read,
             create,
