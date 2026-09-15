@@ -18,7 +18,7 @@ import signal
 import sys
 from pathlib import Path
 
-from airc_core import MCPToolset, TokenLog
+from airc_core import MCPToolset, TokenLog, quiet_noisy_loggers
 from platformdirs import user_state_path
 
 from . import __version__
@@ -54,8 +54,7 @@ def _setup_logging(verbose: bool) -> Path:
     # basicConfig leaves a handler's own formatter intact, so the per-handler
     # formats above win; it only wires the handlers + root level here.
     logging.basicConfig(level=logging.INFO, handlers=handlers)
-    for noisy in ("httpx", "httpcore", "google.auth", "google_genai"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    quiet_noisy_loggers()
     return log_file
 
 
