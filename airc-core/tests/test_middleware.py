@@ -846,9 +846,14 @@ async def test_the_mark_follows_every_step():
     assert mw._prefixes["t1"].why == "due"
 
 
-async def test_the_mark_stops_when_the_turn_has_no_calls_left():
+async def test_the_mark_stops_on_the_last_permitted_call():
     """The one case where advancing loses: the write premium is paid and no
-    later call reads it back."""
+    later call reads it back.
+
+    model_calls counts COMPLETED calls, so with a cap of 4 the call made at
+    model_calls == 3 is the fourth and last; ModelCallLimitMiddleware ends the
+    turn before a call at 4 could happen. The brake has to key on 3 -- keying
+    on 4 tested a state that never occurs and let the last call advance."""
     from airc_core.agent import _AnthropicVertexCaching
 
     mw = _AnthropicVertexCaching(max_calls=4)
@@ -862,11 +867,33 @@ async def test_the_mark_stops_when_the_turn_has_no_calls_left():
         SystemMessage("sys"),
         mw=mw,
         messages=[*history, *_step(2, content="")],
-        state={"model_calls": 4},
+        state={"model_calls": 3},
     )
     assert mw._prefixes["t1"].boundary == 3
     assert mw._prefixes["t1"].why == "turn ending"
     assert _marks(seen["messages"]) == [2]
+
+
+async def test_the_mark_advances_while_a_later_call_can_read_it():
+    """The call before the last still has one reader, which repays the write
+    several times over."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching(max_calls=4)
+    model = _fake_vertex_anthropic()
+    history = [HumanMessage("q"), *_step(1, content="")]
+    await _delivered(model, SystemMessage("sys"), mw=mw, messages=history)
+
+    seen = await _delivered(
+        model,
+        SystemMessage("sys"),
+        mw=mw,
+        messages=[*history, *_step(2, content="")],
+        state={"model_calls": 2},
+    )
+    assert mw._prefixes["t1"].boundary == 5
+    assert mw._prefixes["t1"].why == "due"
+    assert _marks(seen["messages"]) == [4]
 
 
 async def test_history_mark_restarts_when_history_shrinks():

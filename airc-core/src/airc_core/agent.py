@@ -1253,9 +1253,11 @@ class _AnthropicPrefix:
     # so only the system+tools prefix is cached.
     boundary: int = 0
     # The provider's own count of the cached span (cache_read + cache_creation),
-    # not an estimate. Drives the payback rule.
+    # not an estimate. Compared across an advance by _record's not-reaching-
+    # the-wire check.
     prefix_tokens: int = 0
-    # Model calls since the mark last moved -- the k in the payback rule.
+    # Model calls since the mark last moved: 0 on the call that moved it, which
+    # is how _record knows an advance happened.
     calls_since: int = 0
     seen_len: int = 0
     # Last placement decision, for the log line.
@@ -1312,9 +1314,8 @@ class _AnthropicVertexCaching(AgentMiddleware):
       one on. The two must agree: the first version of this chose the placement
       independently, always tagging the last content block, which on a
       tool-calling AIMessage is the tool_use -- discarded in serialization. The
-      state then recorded a cached span that was never sent, and every payback
-      decision after it was computed against that. _record's span check is the
-      backstop.
+      state then recorded a cached span that was never sent. _record's span
+      check is the backstop.
     * No model_settings["cache_control"]. That tags the LAST content block, i.e.
       that same nudge. Measured to change nothing.
 
@@ -1351,9 +1352,9 @@ class _AnthropicVertexCaching(AgentMiddleware):
         # is one conversation. A checkpointer-less graph still reports the
         # thread_id its config named, and the review graph names one per claim.
         self._fallback_session = uuid.uuid4().hex
-        # The turn's model-call cap, for the horizon term in _recache_pays.
+        # The turn's model-call cap, for the end-of-turn brake in _advance_pays.
         # Optional: callers that do not track one still get history caching,
-        # just without the end-of-turn brake (see _calls_left).
+        # just without the brake (see _calls_left).
         self._max_calls = max_calls
         # Keyed by thread id, same single-writer argument as _GrowingPrefixCache:
         # the orchestrator serializes turns per (thread, agent), and review gives
@@ -1432,14 +1433,19 @@ class _AnthropicVertexCaching(AgentMiddleware):
         return st
 
     def _calls_left(self, request):
-        """Model calls left in this turn, for the horizon term in _recache_pays.
+        """Model calls left in this turn, THIS ONE INCLUDED, for the end-of-turn
+        brake in _advance_pays.
 
-        math.inf when no cap was configured. The horizon check exists to refuse
-        a re-cache that cannot be read back often enough to repay; with no cap
-        there is no horizon to compare against, and returning 0 instead would
-        suppress advancement permanently rather than merely mistime it --
-        disabling history caching outright for every caller that does not pass
-        max_calls.
+        state.model_calls is the count of calls already completed
+        (CallBudgetMiddleware increments it in after_model), so cap minus count
+        is the calls still permitted, of which the one being wrapped is the
+        first. 1 therefore means "this is the last call".
+
+        math.inf when no cap was configured. The brake exists to refuse an
+        advance no later call can read back; with no cap there is no horizon to
+        compare against, and returning 0 instead would suppress advancement
+        permanently rather than merely mistime it -- disabling history caching
+        outright for every caller that does not pass max_calls.
         """
         if self._max_calls is None:
             return math.inf
@@ -1485,8 +1491,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
             st.boundary, st.calls_since, st.why = target, 0, "first"
             return
         # Chars, not the provider count, because the delta is the part NOT yet
-        # cached -- no usage report covers it. prefix_tokens, the number that
-        # dominates the rule, is exact.
+        # cached -- no usage report covers it.
         delta = (
             sum(len(str(m.content)) for m in messages[st.boundary : target])
             // _CHARS_PER_TOKEN
@@ -1541,8 +1546,8 @@ class _AnthropicVertexCaching(AgentMiddleware):
     def _record(self, st: _AnthropicPrefix, response) -> None:
         """Fold the provider's own counts back into the state, and log them.
 
-        read+create is the exact cached span, replacing the char estimate for
-        the next payback decision.
+        read+create is the exact cached span; the check below compares it
+        across an advance.
 
         Debug, not info. This line was info on a call that advanced the mark,
         as the instrument for B -- whether creation bills the whole span or
@@ -1772,7 +1777,16 @@ def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
     So there is no prefix to re-buy and no cadence to optimize. Advancing costs
     the write premium on the delta and saves (1 - read rate) * delta on every
     later call of the turn, which one further call repays several times over.
-    The only losing case is a turn that ends immediately after.
+    The only losing case is a turn that ends immediately after. `calls_left`
+    counts the call being made, so the brake fires when it is 1: the write
+    would be paid and nothing would read it.
+
+    The older prefix is found by Anthropic's lookback from the new mark, which
+    reaches at most 20 positions back (a run of tool_use blocks is one
+    position, a run of tool_result blocks another). Advancing every call keeps
+    the jump at a step or two, far inside that. A rule that let the mark lag
+    for many steps would fall off the lookback and re-bill the whole span --
+    the very cost this rule assumes away.
 
     This was the one number _AnthropicVertexCaching assumed rather than knew.
     Assuming the worse branch was the right call while it was unmeasured -- the
@@ -1782,7 +1796,7 @@ def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
     """
     if delta <= 0:
         return False, "no growth"
-    if calls_left * (1 - _CACHE_READ_RATIO) <= _CACHE_WRITE_PREMIUM:
+    if (calls_left - 1) * (1 - _CACHE_READ_RATIO) <= _CACHE_WRITE_PREMIUM:
         return False, "turn ending"
     return True, "due"
 
