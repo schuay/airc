@@ -1514,7 +1514,11 @@ class _AnthropicVertexCaching(AgentMiddleware):
         """
         i = boundary - 1
         msg = messages[i]
-        where = _mark_placement(msg, messages[i - 1] if i else None)
+        where = _mark_placement(
+            msg,
+            messages[i - 1] if i else None,
+            messages[i + 1] if i + 1 < len(messages) else None,
+        )
         if where is None:
             # _advance should have prevented this. Leave the history alone
             # rather than emit a mark we know will be dropped.
@@ -1843,11 +1847,12 @@ def _block_takes_a_mark(block) -> bool:
 # indistinguishable from not having cached. A fix would carry cache_control (at
 # minimum) across from the block being replaced. Until then _mark_placement
 # routes around it by never choosing a tool_use block.
-def _mark_placement(msg, prev=None):
+def _mark_placement(msg, prev=None, nxt=None):
     """Where to put a cache_control mark on `msg`, or None if nowhere is safe.
 
-    Returns _MARK_IN_KWARGS, or the index of the content block to tag. `prev` is
-    the message before it, which decides one of the cases below.
+    Returns _MARK_IN_KWARGS, or the index of the content block to tag. `prev`
+    and `nxt` are the messages either side of it; a user-role neighbour decides
+    one of the cases below.
 
     This exists because the mark is a passenger inside the request body, and
     langchain_google_vertexai rewrites that body on the way out: it drops keys
@@ -1858,8 +1863,7 @@ def _mark_placement(msg, prev=None):
 
     Callers must consult this BEFORE recording that the boundary moved: the
     decision to advance and the ability to mark have to be taken together, or
-    the state claims a cached span that was never sent and every later payback
-    decision is computed against it.
+    the state claims a cached span that was never sent.
     """
     content = msg.content
     if isinstance(msg, ToolMessage):
@@ -1877,15 +1881,19 @@ def _mark_placement(msg, prev=None):
         )
         return None if already_formatted else _MARK_IN_KWARGS
     if isinstance(content, str):
-        if isinstance(msg, HumanMessage) and isinstance(
-            prev, (HumanMessage, ToolMessage)
+        user_role = (HumanMessage, ToolMessage)
+        if isinstance(msg, HumanMessage) and (
+            isinstance(prev, user_role) or isinstance(nxt, user_role)
         ):
             # _merge_messages folds a run of user-role messages into one message
-            # with LIST content, keeping this message's additional_kwargs on a
-            # message the formatter then reads as a list -- and the list branch
-            # never looks at additional_kwargs. So the mark is dropped, the same
-            # way the tool_use rebuild drops it. A tool result ahead of this one
-            # is still markable and is the bulkier prefix anyway.
+            # with LIST content, and the formatter's list branch never looks at
+            # additional_kwargs. So a kwargs mark on ANY member of the run is
+            # dropped, the same way the tool_use rebuild drops it -- checked
+            # against the formatter for both the first and the last of two
+            # HumanMessages. Whichever side the run continues on, this message
+            # cannot carry the mark; a tool result or assistant text next to the
+            # run still can, and a mark inside a content block survives the
+            # merge, which is why the list branch below needs no such check.
             return None
         # additional_kwargs is only read for string content (:159-168), and
         # only an actual text block can carry the mark, so empty content has
@@ -1929,7 +1937,8 @@ def _last_markable(messages: list) -> int:
     """
     for p in range(len(messages), 0, -1):
         prev = messages[p - 2] if p > 1 else None
-        if _mark_placement(messages[p - 1], prev) is not None:
+        nxt = messages[p] if p < len(messages) else None
+        if _mark_placement(messages[p - 1], prev, nxt) is not None:
             return p
     return 0
 

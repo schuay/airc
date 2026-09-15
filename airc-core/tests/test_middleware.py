@@ -578,6 +578,29 @@ async def test_a_user_turn_merged_into_a_tool_result_is_not_marked():
     assert _marks(messages) == []
 
 
+async def test_a_user_turn_merged_with_the_next_one_is_not_marked():
+    """Two user messages in a row -- two people posting before the persona
+    replies -- merge the same way, and the merge drops a kwargs mark from
+    EITHER member: the first is folded into a list along with the second.
+    Checking only the previous message let the first of the run through, so
+    the boundary advanced onto a mark that never reached the wire. The
+    assistant text before the run is the newest message that can carry one."""
+    from airc_core.agent import _mark_placement
+
+    messages = [
+        HumanMessage("q"),
+        AIMessage("answer"),
+        HumanMessage("a"),
+        HumanMessage("b"),
+    ]
+    assert _mark_placement(messages[2], messages[1], messages[3]) is None
+    seen = await _delivered(
+        _fake_vertex_anthropic(), SystemMessage("sys"), messages=messages
+    )
+    assert _marks(seen["messages"]) == [1]
+    assert _wire_marks(seen["messages"])
+
+
 # ── the mark has to survive serialization ────────────────────────────────────
 #
 # These assert on the body langchain_google_vertexai actually builds, not on
