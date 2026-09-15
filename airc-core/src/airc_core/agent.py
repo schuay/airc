@@ -23,6 +23,7 @@ import os
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated, Any, NotRequired
@@ -790,6 +791,13 @@ def _finish_reason(msg: AIMessage) -> str:
     return "unknown"
 
 
+# Marks a persisted call-budget nudge in the message history, so a threshold
+# re-entered without the count advancing does not append a second copy. Mirrors
+# GroundingReminderMiddleware's lc_source tagging; the companion lc_stage carries
+# the threshold, because one nudge text fires at several counts by design.
+_CALL_BUDGET_SRC = "call-budget"
+
+
 class _CallBudgetState(AgentState):
     # UntrackedValue: per-turn (per graph invocation), NEVER checkpointed -- so on
     # a checkpointed persona graph the count resets each turn instead of
@@ -799,27 +807,54 @@ class _CallBudgetState(AgentState):
 
 class CallBudgetMiddleware(AgentMiddleware):
     """Steer a long tool-using turn toward converging, via escalating wrap-up
-    nudges at given model-call counts.
+    nudges at given model-call counts, and optionally a per-call position
+    pointer ("call 95 of 150").
 
-    Counts model calls per turn and, at each scheduled threshold, appends a
-    wrap-up instruction to that one model request -- NOT to graph state, so on a
-    checkpointed persona graph the nudge never persists into the conversation
-    (which would bake "stop using tools" into every future turn). The hard cap
-    itself is ModelCallLimitMiddleware; these nudges only get the model to wrap
-    up before it. The schedule is caller-supplied -- a persona reply uses two
-    thresholds, a commit review a longer escalation -- so both share the
-    mechanism. List the final nudge a few calls below the cap and make it
-    insistent (e.g. "produce your result now"), so the run rarely ends with
+    The hard cap itself is ModelCallLimitMiddleware; these nudges only get the
+    model to wrap up before it. The schedule is caller-supplied -- a persona
+    reply uses two thresholds, a commit review a longer escalation -- so both
+    share the mechanism. List the final nudge a few calls below the cap and make
+    it insistent (e.g. "produce your result now"), so the run rarely ends with
     nothing to show.
+
+    Where a nudge lives is the caller's choice, and it is the difference between
+    a one-call impulse and a standing instruction:
+
+    - Ephemeral (default): appended to that one model request and never to graph
+      state, so on a CHECKPOINTED persona graph it cannot bake "stop using tools"
+      into every future turn. The cost is that the model sees it on exactly one
+      call -- the next call's messages are rebuilt from state, which never held
+      it. Fine for an instruction whose whole compliance is a single call ("write
+      your reply now"); useless for one that means to govern a span ("stop
+      widening the search"), which is present for 1 of the ~45 calls it addresses.
+    - persist=True: written into state via the messages reducer as a TAIL append
+      (never a mid-history insert, which would rewrite and poison the cached
+      prefix), so it settles into the growing prefix and costs a cache read
+      thereafter. Only for a graph with NO checkpointer, where one turn is the
+      whole run and there is no later turn to poison.
+
+    `progress` is the complement to a persisted schedule: a caller-supplied
+    formatter over the completed-call count, appended ephemerally on EVERY call,
+    so the tail always carries the current position and nothing stale. Deliberately
+    not persisted -- only the latest value means anything, and persisting would
+    accumulate one wrong counter per call.
     """
 
     state_schema = _CallBudgetState
 
-    def __init__(self, stages: list[tuple[int, str]]) -> None:
+    def __init__(
+        self,
+        stages: list[tuple[int, str]],
+        *,
+        persist: bool = False,
+        progress: Callable[[int], str] | None = None,
+    ) -> None:
         super().__init__()
         # threshold -> nudge; each fires once (model_calls steps by 1 per call,
         # so an exact-equality lookup hits each threshold exactly once).
         self._stages = dict(stages)
+        self._persist = persist
+        self._progress = progress
 
     def after_model(self, state, runtime) -> dict[str, Any]:
         return {"model_calls": state.get("model_calls", 0) + 1}
@@ -827,22 +862,60 @@ class CallBudgetMiddleware(AgentMiddleware):
     async def aafter_model(self, state, runtime) -> dict[str, Any]:
         return self.after_model(state, runtime)
 
+    def before_model(self, state, runtime) -> dict[str, Any] | None:
+        # The persisting half: awrap_model_call cannot write state (it returns a
+        # ModelResponse), so a nudge that has to survive its own call is appended
+        # here instead, as GroundingReminderMiddleware does.
+        if not self._persist:
+            return None
+        n = state.get("model_calls", 0)
+        nudge = self._stages.get(n)
+        # Keyed on the THRESHOLD, not the text: a schedule fires the same prose
+        # at several counts on purpose (a re-ask 20 calls later), so deduping by
+        # content would silently drop every repeat after the first.
+        if nudge is None or any(
+            m.additional_kwargs.get("lc_stage") == n
+            for m in state["messages"]
+            if isinstance(m, HumanMessage)
+            and m.additional_kwargs.get("lc_source") == _CALL_BUDGET_SRC
+        ):
+            return None
+        log.info("call budget: wrap-up nudge at %d model calls (persisted)", n)
+        return {
+            "messages": [
+                HumanMessage(
+                    nudge,
+                    additional_kwargs={
+                        "lc_source": _CALL_BUDGET_SRC,
+                        "lc_stage": n,
+                    },
+                )
+            ]
+        }
+
+    async def abefore_model(self, state, runtime) -> dict[str, Any] | None:
+        return self.before_model(state, runtime)
+
     async def awrap_model_call(self, request, handler):
         # state.model_calls is the count of calls already completed this turn.
-        # Append the nudge to this request only (ephemeral), never to state.
         n = request.state.get("model_calls", 0)
         # after_model increments model_calls, but an EmptyCandidateError raised
         # innermore skips it -- the count freezes and this threshold re-fires on
         # every retry of the same call (observed: the 45-call nudge appended to
         # each of 7 empty-candidate retries, none of which the model answered).
-        # A retry is the same call, so skip the nudge: it was already on the
-        # request that failed, and re-appending stacks copies of it.
-        nudge = self._stages.get(n) if not _empty_retry.get() else None
-        if nudge is not None:
+        # A retry is the same call, so append nothing: _EmptyCandidateRetry
+        # re-enters this handler with the request that already carries both the
+        # nudge and the pointer, and re-appending stacks copies of them.
+        if _empty_retry.get():
+            return await handler(request)
+        extra = []
+        if not self._persist and (nudge := self._stages.get(n)) is not None:
             log.info("call budget: wrap-up nudge at %d model calls", n)
-            request = request.override(
-                messages=[*request.messages, HumanMessage(nudge)]
-            )
+            extra.append(HumanMessage(nudge))
+        if self._progress is not None:
+            extra.append(HumanMessage(self._progress(n)))
+        if extra:
+            request = request.override(messages=[*request.messages, *extra])
         return await handler(request)
 
 

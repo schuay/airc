@@ -1680,3 +1680,70 @@ async def test_final_answer_does_not_stack_the_notice_on_an_empty_retry():
     finally:
         agent._empty_retry.set(0)
     assert [m.content for m in seen["messages"]] == ["q"]
+
+
+# ── persisted nudges + the position pointer ──────────────────────────────────
+
+
+def test_persisted_nudge_goes_to_state_not_the_request():
+    mw = CallBudgetMiddleware([(2, "converge now")], persist=True)
+    out = mw.before_model({"model_calls": 2, "messages": []}, None)
+    (msg,) = out["messages"]
+    assert msg.content == "converge now"
+    # Tagged so a re-entered threshold is recognisable, and keyed on the
+    # threshold rather than the text.
+    assert msg.additional_kwargs["lc_stage"] == 2
+    # Off a threshold: nothing written.
+    assert mw.before_model({"model_calls": 3, "messages": []}, None) is None
+
+
+async def test_persisting_instance_does_not_also_append_ephemerally():
+    # Otherwise the nudge lands twice on its own call: once from state, once
+    # from the request override.
+    mw = CallBudgetMiddleware([(2, "converge now")], persist=True)
+    assert not any("converge now" in m for m in await _appended(mw, 2))
+
+
+def test_default_instance_writes_no_state():
+    # The room's persona graph is checkpointed: a persisted nudge would replay
+    # "stop using tools" into every later turn.
+    mw = CallBudgetMiddleware([(2, "converge now")])
+    assert mw.before_model({"model_calls": 2, "messages": []}, None) is None
+
+
+def test_a_threshold_already_in_history_is_not_appended_twice():
+    mw = CallBudgetMiddleware([(2, "converge now")], persist=True)
+    out = mw.before_model({"model_calls": 2, "messages": []}, None)
+    again = mw.before_model({"model_calls": 2, "messages": out["messages"]}, None)
+    assert again is None
+
+
+def test_the_same_text_at_a_later_threshold_still_fires():
+    # The schedule repeats one nudge at several counts on purpose. Deduping on
+    # content instead of on the threshold would drop every repeat after the
+    # first -- the exact bug that makes a schedule look like it fires once.
+    mw = CallBudgetMiddleware([(2, "finish now"), (5, "finish now")], persist=True)
+    first = mw.before_model({"model_calls": 2, "messages": []}, None)
+    later = mw.before_model({"model_calls": 5, "messages": first["messages"]}, None)
+    assert later is not None
+    assert later["messages"][0].additional_kwargs["lc_stage"] == 5
+
+
+async def test_progress_pointer_rides_every_call():
+    mw = CallBudgetMiddleware([], progress=lambda n: f"call {n} of 150")
+    assert "call 7 of 150" in await _appended(mw, 7)
+    assert "call 8 of 150" in await _appended(mw, 8)
+
+
+async def test_progress_pointer_is_suppressed_on_an_empty_candidate_retry():
+    # _EmptyCandidateRetry re-enters this handler with the request that already
+    # carries the pointer; appending again stacks copies of a counter that did
+    # not move.
+    from airc_core import agent
+
+    mw = CallBudgetMiddleware([], progress=lambda n: f"call {n} of 150")
+    agent._empty_retry.set(1)
+    try:
+        assert not any("call 7" in m for m in await _appended(mw, 7))
+    finally:
+        agent._empty_retry.set(0)
