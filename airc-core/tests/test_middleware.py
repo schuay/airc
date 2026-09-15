@@ -284,7 +284,12 @@ def test_shared_stack_present_for_any_model():
 
 
 def _CacheReq(
-    model, system_message, model_settings=None, thread_id="t1", messages=None
+    model,
+    system_message,
+    model_settings=None,
+    thread_id="t1",
+    messages=None,
+    state=None,
 ):
     """A real ModelRequest with a stubbed runtime, whose execution_info carries
     the thread id the session header is keyed on."""
@@ -295,7 +300,7 @@ def _CacheReq(
         tool_choice=None,
         tools=[],
         response_format=None,
-        state={},
+        state=state or {},
         runtime=SimpleNamespace(
             execution_info=(
                 SimpleNamespace(thread_id=thread_id) if thread_id is not None else None
@@ -326,6 +331,7 @@ async def _delivered(
     mw=None,
     messages=None,
     response="ok",
+    state=None,
 ):
     """The (system_message, model_settings, messages) the handler saw. `mw`
     reuses one middleware instance across calls, as base_middleware does per
@@ -341,7 +347,8 @@ async def _delivered(
         return response
 
     await (mw or _AnthropicVertexCaching()).awrap_model_call(
-        _CacheReq(model, system_message, model_settings, thread_id, messages), handler
+        _CacheReq(model, system_message, model_settings, thread_id, messages, state),
+        handler,
     )
     return seen
 
@@ -806,17 +813,15 @@ async def test_an_advance_that_does_not_grow_the_span_is_reported(caplog):
     assert "not reaching the wire" in caplog.text
 
 
-async def test_history_mark_holds_until_the_delta_repays():
-    """Advancing re-buys the whole prefix, so a mark that chased every step
-    would cost more than caching nothing. It moves only when
-    delta * calls_since >= 2 * prefix."""
+async def test_the_mark_follows_every_step():
+    """Advancing bills only the delta -- the shorter prefix stays cached and is
+    read at the read rate -- so there is no prefix to re-buy and no reason to
+    let the tail go uncached while a cadence rule waits."""
     from airc_core.agent import _AnthropicVertexCaching
 
     mw = _AnthropicVertexCaching()
     model = _fake_vertex_anthropic()
-    history = [HumanMessage("q"), *_step(1), HumanMessage("next")]
-
-    # First placement is unconditional: no prefix exists yet to re-buy.
+    history = [HumanMessage("q"), *_step(1, content="")]
     seen = await _delivered(
         model,
         SystemMessage("sys"),
@@ -826,8 +831,10 @@ async def test_history_mark_holds_until_the_delta_repays():
     )
     assert _marks(seen["messages"]) == [2]
 
-    # A big measured prefix against a tiny new step: not worth moving.
-    history = [*history, *_step(2), HumanMessage("next")]
+    # A tiny new step against a large measured prefix. The old EOQ rule held the
+    # mark here until delta * calls_since cleared 2 * prefix, which on a review
+    # took eleven calls that never came.
+    history = [*history, *_step(2, content="")]
     seen = await _delivered(
         model,
         SystemMessage("sys"),
@@ -835,25 +842,31 @@ async def test_history_mark_holds_until_the_delta_repays():
         messages=history,
         response=_usage(read=50_000),
     )
-    assert _marks(seen["messages"]) == [2], "moved before it could repay"
+    assert _marks(seen["messages"]) == [4]
+    assert mw._prefixes["t1"].why == "due"
 
-    # A step large enough to clear 2 * prefix does move it. The mark closes the
-    # step, so it lands on the tool result that ended it.
-    big = len(history)
-    history = [
-        *history,
-        AIMessage("x" * 800_000, tool_calls=[{"name": "t", "args": {}, "id": "big"}]),
-        ToolMessage(content="r", tool_call_id="big"),
-        HumanMessage("next"),
-    ]
+
+async def test_the_mark_stops_when_the_turn_has_no_calls_left():
+    """The one case where advancing loses: the write premium is paid and no
+    later call reads it back."""
+    from airc_core.agent import _AnthropicVertexCaching
+
+    mw = _AnthropicVertexCaching(max_calls=4)
+    model = _fake_vertex_anthropic()
+    history = [HumanMessage("q"), *_step(1, content="")]
+    await _delivered(model, SystemMessage("sys"), mw=mw, messages=history)
+    assert mw._prefixes["t1"].boundary == 3
+
     seen = await _delivered(
         model,
         SystemMessage("sys"),
         mw=mw,
-        messages=history,
-        response=_usage(read=50_000),
+        messages=[*history, *_step(2, content="")],
+        state={"model_calls": 4},
     )
-    assert _marks(seen["messages"]) == [big + 1]
+    assert mw._prefixes["t1"].boundary == 3
+    assert mw._prefixes["t1"].why == "turn ending"
+    assert _marks(seen["messages"]) == [2]
 
 
 async def test_history_mark_restarts_when_history_shrinks():

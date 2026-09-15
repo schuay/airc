@@ -1318,17 +1318,12 @@ class _AnthropicVertexCaching(AgentMiddleware):
     * No model_settings["cache_control"]. That tags the LAST content block, i.e.
       that same nudge. Measured to change nothing.
 
-    When to advance is a cost decision, not an interval -- see _recache_pays.
-    Its B is the cost of creating the cache, and for Anthropic that is the one
-    number still unmeasured: moving a mark forward may re-bill the whole prefix
-    or only the delta. We assume the whole prefix, which is both the safe error
-    (the penalty is advancing too rarely, never overspending) and a small one.
-    Working the Anthropic differential -- advancing costs 1.25*(P+D) against
-    0.1*P + D for standing still, rather than the separate prefill a Vertex
-    cachedContents create bills -- gives an optimum of sqrt(2.5*P/g) where
-    _recache_pays solves sqrt(2*P/g). That is 12% in the cadence, well inside
-    the noise of the estimate feeding it, so the existing rule is reused as-is.
-    _record logs what would settle B from production traffic.
+    When to advance is a cost decision, not an interval -- see _advance_pays.
+    Its input is B, the cost of creating the cache, and for Anthropic that is
+    measured: moving the mark forward bills only the delta, because the shorter
+    prefix is still cached and is read at the read rate. So there is no prefix
+    to re-buy, the EOQ cadence _recache_pays solves for does not apply, and the
+    mark advances whenever the turn has another call to read it back.
 
 
     No token floor: Anthropic declines to cache prefixes under ~1024 tokens
@@ -1496,9 +1491,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
             sum(len(str(m.content)) for m in messages[st.boundary : target])
             // _CHARS_PER_TOKEN
         )
-        due, st.why = _recache_pays(
-            st.prefix_tokens, delta, st.calls_since, self._calls_left(request)
-        )
+        due, st.why = _advance_pays(delta, self._calls_left(request))
         if due:
             st.boundary, st.calls_since = target, 0
 
@@ -1751,6 +1744,42 @@ def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: 
     if delta * calls_since < 2 * prefix_tokens:
         return False, "below payback"
     if calls_left * (1 - _CACHE_READ_RATIO) * delta <= prefix_tokens:
+        return False, "turn ending"
+    return True, "due"
+
+
+# What Anthropic adds to a token for writing it into the cache, over sending it
+# uncached: a write is 1.25x base input against 1.0x for plain input.
+_CACHE_WRITE_PREMIUM = 0.25
+
+
+def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
+    """Whether to move an Anthropic breakpoint onto `delta` new tokens.
+    Returns (due, reason) -- reason for the log.
+
+    Deliberately not _recache_pays. That rule solves for a cache whose creation
+    re-bills the whole prefix, which is what a Vertex cachedContents create
+    does. Anthropic does not: measured against claude-opus-5, moving the mark
+    one step forward reported read=21230 -- the previous span, still cached and
+    served at the read rate -- and create=10856, the new part alone. Reproduced
+    over three runs, and again with the mark jumped two steps at once (read
+    32086, create 21712), so a mark that lags the tail still finds the older
+    prefix.
+
+    So there is no prefix to re-buy and no cadence to optimize. Advancing costs
+    the write premium on the delta and saves (1 - read rate) * delta on every
+    later call of the turn, which one further call repays several times over.
+    The only losing case is a turn that ends immediately after.
+
+    This was the one number _AnthropicVertexCaching assumed rather than knew.
+    Assuming the worse branch was the right call while it was unmeasured -- the
+    error was one-sided -- but it cost most of the benefit: on the reviewed
+    commit the rule held the mark for eleven calls after the first placement
+    while a re-cache had been due since roughly the eighth.
+    """
+    if delta <= 0:
+        return False, "no growth"
+    if calls_left * (1 - _CACHE_READ_RATIO) <= _CACHE_WRITE_PREMIUM:
         return False, "turn ending"
     return True, "due"
 
