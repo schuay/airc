@@ -35,6 +35,8 @@ from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
+log = logging.getLogger(__name__)
+
 # Env var naming a loopback endpoint that fronts Vertex for a sandboxed caller.
 # The box holds NO credential at all; a host-side proxy attaches the real one.
 # Set only by the sandbox profile, so every other caller is untouched.
@@ -339,6 +341,54 @@ def _provider_kwargs(model_id: str) -> dict:
             kw["location"] = loc
         return kw
     return {}
+
+
+# Sampling parameters the Messages API no longer accepts. temperature, top_p
+# and top_k were removed in Claude Opus 4.7 (the server returns 400; the SDK,
+# whose signature is generated from the same spec, raises TypeError first), and
+# seed was never part of it.
+_ANTHROPIC_UNSUPPORTED_SAMPLING = ("temperature", "top_p", "top_k", "seed")
+
+# (model_id, dropped keys) already reported. See _drop_anthropic_sampling.
+_SAMPLING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+
+
+def _drop_anthropic_sampling(kwargs: dict, model_id: str) -> None:
+    """Remove sampling kwargs Claude no longer takes. Mutates `kwargs`.
+
+    ChatAnthropicVertex re-emits `temperature`/`top_p`/`top_k` from its own
+    fields and puts unrecognized kwargs (`seed`) in `model_kwargs`; both are
+    splatted into `messages.create(**params)`. Setting any of them therefore
+    fails every call to the provider instead of degrading. Only explicitly-set
+    values get here: the fields default to None and `_format_params` filters
+    None out.
+
+    They are dropped rather than translated. Anthropic removed sampling without
+    a replacement, and `output_config.effort` controls reasoning depth, not
+    randomness.
+
+    Warned rather than dropped silently because an ensemble that varies its
+    passes by sampling (review) gets no variance from this provider; it has to
+    come from a roster of distinct models instead. Warned once per process per
+    (model, keys) because a model is built per review pass and the condition is
+    static, so repeats carry no new information.
+    """
+    if not (
+        dropped := {
+            k: kwargs.pop(k) for k in _ANTHROPIC_UNSUPPORTED_SAMPLING if k in kwargs
+        }
+    ):
+        return
+    if (seen := (model_id, tuple(dropped))) in _SAMPLING_WARNED:
+        return
+    _SAMPLING_WARNED.add(seen)
+    log.warning(
+        "%s does not accept %s; dropping. Sampling was removed from the"
+        " Messages API with no replacement -- passes that relied on it for"
+        " variance get none from this provider.",
+        model_id,
+        ", ".join(f"{k}={v!r}" for k, v in dropped.items()),
+    )
 
 
 def usage_counts(usage) -> tuple[int, int, int]:
@@ -680,6 +730,24 @@ def make_model(model_id: str, **kwargs):
         kwargs.setdefault(
             "location", os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
         )
+        _drop_anthropic_sampling(kwargs, model_id)
+        # Do not surface the model's reasoning, for the reason given for
+        # include_thoughts=False on the Gemini branch below. Claude controls
+        # this with a display mode instead of a flag: "omitted" redacts the
+        # thinking text but still returns the signature that multi-turn tool
+        # continuity needs, so thinking stays enabled and only the channel is
+        # suppressed. "adaptive" because the SDK deprecates thinking.type
+        # "enabled" on the current models. Depth is output_config.effort's job
+        # and its default is high, which is what sending no output_config does.
+        #
+        # Set via model_kwargs because ChatAnthropicVertex has no thinking
+        # field: a top-level kwarg ends up in model_kwargs anyway, after a
+        # "thinking was transferred to model_kwargs. Please confirm that
+        # thinking is what you intended" warning on every construction.
+        kwargs["model_kwargs"] = {
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            **(kwargs.get("model_kwargs") or {}),
+        }
         # In the sandbox the box holds no credential, and with neither an
         # access_token nor credentials ChatAnthropicVertex calls
         # google.auth.default(), which raises there before anything reaches the

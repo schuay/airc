@@ -288,6 +288,90 @@ def test_an_explicit_caller_value_still_wins_over_the_anthropic_defaults(monkeyp
     assert m.location == "us-east5"
 
 
+def _anthropic_wire_body(model, **call_kwargs) -> dict:
+    """The body ChatAnthropicVertex would splat into messages.create()."""
+    from langchain_core.messages import HumanMessage
+
+    return model._format_params(messages=[HumanMessage("hi")], **call_kwargs)
+
+
+def test_anthropic_vertex_drops_the_sampling_the_messages_api_removed(monkeypatch):
+    """The Messages API has no temperature/top_p/top_k and never had seed, but
+    ChatAnthropicVertex re-emits its own temperature field and puts seed in
+    model_kwargs, and both are splatted into create(). One configured
+    temperature therefore raises TypeError on every call to the provider rather
+    than degrading. Review sets temperature and seed.
+
+    Asserted against the SDK's signature rather than a hardcoded key list, so
+    the test tracks the API if a parameter returns.
+    """
+    pytest.importorskip("langchain_google_vertexai")
+    import inspect
+
+    from anthropic.resources.messages import AsyncMessages
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model(
+        "google_anthropic_vertex:claude-opus-5",
+        access_token="x",
+        temperature=0.7,
+        seed=3,
+        top_p=0.9,
+        top_k=40,
+    )
+    body = _anthropic_wire_body(m)
+    accepted = set(inspect.signature(AsyncMessages.create).parameters)
+    assert not set(body) - accepted, "would raise TypeError in the SDK"
+    assert "temperature" not in body and "seed" not in body
+
+
+def test_anthropic_vertex_redacts_thinking_but_keeps_the_signature(monkeypatch):
+    """The Claude branch's counterpart to include_thoughts=False: we consume
+    text blocks only, and a degraded turn can emit reasoning as ordinary answer
+    text. display "omitted" drops the reasoning text and keeps the signature
+    that multi-turn tool continuity needs, so thinking itself stays on.
+    adaptive because the SDK deprecates thinking.type "enabled"; depth belongs
+    to effort, whose default (high) is what sending no output_config produces.
+    """
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model("google_anthropic_vertex:claude-opus-5", access_token="x")
+    body = _anthropic_wire_body(m)
+    assert body["thinking"] == {"type": "adaptive", "display": "omitted"}
+    # Depth is effort's job and its default is the one we want, so send nothing.
+    assert "output_config" not in body
+
+
+def test_an_explicit_thinking_choice_still_wins(monkeypatch):
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model(
+        "google_anthropic_vertex:claude-opus-5",
+        access_token="x",
+        model_kwargs={
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "xhigh"},
+        },
+    )
+    body = _anthropic_wire_body(m)
+    assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert body["output_config"] == {"effort": "xhigh"}
+
+
+def test_other_providers_keep_their_sampling(monkeypatch):
+    """The strip applies to Claude on Vertex only. Gemini accepts both, so
+    review's ensemble still varies its passes there."""
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    monkeypatch.delenv("AIRC_GOOGLE_SDK", raising=False)
+    kwargs = {"temperature": 0.7, "seed": 3}
+    m = make_model("google_vertexai:gemini-3.1-pro-preview", **kwargs)
+    assert m.temperature == 0.7
+    # The caller's dict is not modified either.
+    assert kwargs == {"temperature": 0.7, "seed": 3}
+
+
 def test_google_sdk_defaults_to_genai(monkeypatch):
     # The vertexai stack remains reachable as the revert path ([gcp] sdk /
     # AIRC_GOOGLE_SDK=vertexai) until it is deleted.
