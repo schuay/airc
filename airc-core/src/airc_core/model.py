@@ -35,6 +35,8 @@ from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
+from .providers import traits_for
+
 log = logging.getLogger(__name__)
 
 # Env var naming a loopback endpoint that fronts Vertex for a sandboxed caller.
@@ -343,51 +345,43 @@ def _provider_kwargs(model_id: str) -> dict:
     return {}
 
 
-# Sampling parameters the Messages API no longer accepts. temperature, top_p
-# and top_k were removed in Claude Opus 4.7 (the server returns 400; the SDK,
-# whose signature is generated from the same spec, raises TypeError first), and
-# seed was never part of it.
-_ANTHROPIC_UNSUPPORTED_SAMPLING = ("temperature", "top_p", "top_k", "seed")
-
-# (model_id, dropped keys) already reported. See _drop_anthropic_sampling.
-_SAMPLING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+# (model_id, dropped keys) already reported. See _drop_unsupported_kwargs.
+_UNSUPPORTED_WARNED: set[tuple[str, tuple[str, ...]]] = set()
 
 
-def _drop_anthropic_sampling(kwargs: dict, model_id: str) -> None:
-    """Remove sampling kwargs Claude no longer takes. Mutates `kwargs`.
+def _drop_unsupported_kwargs(kwargs: dict, model_id: str) -> None:
+    """Remove constructor kwargs the provider's API refuses. Mutates `kwargs`.
 
-    ChatAnthropicVertex re-emits `temperature`/`top_p`/`top_k` from its own
-    fields and puts unrecognized kwargs (`seed`) in `model_kwargs`; both are
-    splatted into `messages.create(**params)`. Setting any of them therefore
-    fails every call to the provider instead of degrading. Only explicitly-set
-    values get here: the fields default to None and `_format_params` filters
-    None out.
+    Which ones those are is ProviderTraits.unsupported_kwargs, so a provider
+    that starts refusing something is a table edit rather than another branch
+    here.
 
-    They are dropped rather than translated. Anthropic removed sampling without
-    a replacement, and `output_config.effort` controls reasoning depth, not
-    randomness.
+    The failure this prevents is not graceful. ChatAnthropicVertex re-emits
+    `temperature`/`top_p`/`top_k` from its own fields and puts unrecognized
+    kwargs (`seed`) in `model_kwargs`; both are splatted into
+    `messages.create(**params)`, so setting any of them fails every call.
 
-    Warned rather than dropped silently because an ensemble that varies its
-    passes by sampling (review) gets no variance from this provider; it has to
-    come from a roster of distinct models instead. Warned once per process per
-    (model, keys) because a model is built per review pass and the condition is
-    static, so repeats carry no new information.
+    They are dropped rather than translated: a rejected parameter has no
+    equivalent on the provider that rejected it, and inventing one would change
+    the caller's request into something it did not ask for.
+
+    Warned once per process per (model, keys) because a model is built per
+    review pass and the condition is static, so repeats carry no new
+    information.
     """
+    traits = traits_for(model_id)
     if not (
-        dropped := {
-            k: kwargs.pop(k) for k in _ANTHROPIC_UNSUPPORTED_SAMPLING if k in kwargs
-        }
+        dropped := {k: kwargs.pop(k) for k in traits.unsupported_kwargs if k in kwargs}
     ):
         return
-    if (seen := (model_id, tuple(dropped))) in _SAMPLING_WARNED:
+    if (seen := (model_id, tuple(dropped))) in _UNSUPPORTED_WARNED:
         return
-    _SAMPLING_WARNED.add(seen)
+    _UNSUPPORTED_WARNED.add(seen)
     log.warning(
-        "%s does not accept %s; dropping. Sampling was removed from the"
-        " Messages API with no replacement -- passes that relied on it for"
-        " variance get none from this provider.",
+        "%s does not accept %s; dropping.%s",
         model_id,
         ", ".join(f"{k}={v!r}" for k, v in dropped.items()),
+        f" {traits.unsupported_note}" if traits.unsupported_note else "",
     )
 
 
@@ -682,6 +676,10 @@ def make_model(model_id: str, **kwargs):
     # must work from inside the sandbox needs its own egress arrangement.
     if spec := _custom_spec(model_id):
         return _custom_factory(model_id.split(":", 1)[0], spec)(model_id, **kwargs)
+    # Every built-in provider, before any branch reads kwargs: a kwarg the API
+    # refuses is refused the same way wherever it came from. Registered external
+    # providers are excluded above -- their kwargs are the factory's contract.
+    _drop_unsupported_kwargs(kwargs, model_id)
     if model_id.startswith("openrouter:"):
         # No langchain-openrouter package: serve the model through the openai
         # provider pointed at OpenRouter's OpenAI-compatible endpoint. An explicit
@@ -730,7 +728,6 @@ def make_model(model_id: str, **kwargs):
         kwargs.setdefault(
             "location", os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
         )
-        _drop_anthropic_sampling(kwargs, model_id)
         # Do not surface the model's reasoning, for the reason given for
         # include_thoughts=False on the Gemini branch below. Claude controls
         # this with a display mode instead of a flag: "omitted" redacts the

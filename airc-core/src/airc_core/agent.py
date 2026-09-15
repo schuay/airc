@@ -51,6 +51,7 @@ from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.constants import TAG_NOSTREAM
 
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
+from .providers import STOP_REASON_KEYS
 
 log = logging.getLogger(__name__)
 
@@ -774,7 +775,19 @@ def _empty_ai_message(resp):
 
 
 def _finish_reason(msg: AIMessage) -> str:
-    return (msg.response_metadata or {}).get("finish_reason", "") or "unknown"
+    """Why the model stopped, whatever its provider named the field.
+
+    response_metadata is passed through with the provider's own key names.
+    Google writes finish_reason; the Anthropic path writes stop_reason and
+    nothing else, so reading only finish_reason made every Claude empty
+    candidate report "unknown" -- in the one situation where the reason is the
+    whole diagnostic.
+    """
+    metadata = msg.response_metadata or {}
+    for key in STOP_REASON_KEYS:
+        if value := metadata.get(key):
+            return str(value)
+    return "unknown"
 
 
 class _CallBudgetState(AgentState):
