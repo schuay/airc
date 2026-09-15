@@ -456,7 +456,7 @@ _ELIDED_TOOL_RESULT = "[tool result from an earlier turn elided to save context]
 # The eliding pruners always keep the most recent result intact, so one result
 # larger than the window overflows the request no matter how much else is shed,
 # and every retry 400s. This caps that survivor. Set above the source cap in
-# mcptools (_MAX_TOOL_RESULT_CHARS, ~200k) so a normally-capped result passes
+# mcptools (_MAX_TOOL_RESULT_CHARS, 50k) so a normally-capped result passes
 # untouched; only a result that bypassed the source cap (an unexpected content
 # shape, a tool from another server) is truncated here. ~240k chars is ~60-120k
 # tokens depending on density.

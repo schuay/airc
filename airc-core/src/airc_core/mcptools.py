@@ -47,14 +47,25 @@ log = logging.getLogger(__name__)
 # below, where the distinction is visible.
 _STRIP_KEYS = {"additionalProperties", "$schema", "title"}
 
-# Safety valve on a single tool result, not an efficiency mechanism (the
-# context-budget pruning in airc_core.agent handles steady-state size). Its only
-# job is to stop one pathological output (a full log dump, a giant diff) from
-# single-handedly blowing the context window; the truncation is explicit in the
-# returned text so the agent can re-query for the rest. Set high: ~200k chars is
-# roughly 50k tokens.
+# Ceiling on a single tool result, applied at ingest. Stops one pathological
+# output (a full log dump, a giant diff) from blowing the context window, and
+# bounds what that output costs for the rest of the run: a result is re-sent on
+# every later call in the thread, so its real price is size x turns remaining.
+# The truncation is explicit in the returned text so the agent can re-query.
+#
+# This is the only size lever that does not fight prefix caching, because it
+# acts before the result enters the cacheable prefix. compact_for_budget in
+# airc_core.agent deliberately refuses to shed until the request would overflow
+# (90% of a 1M window), since stripping a message rebuilds the cache -- so
+# nothing downstream bounds the cost of a large result once it is in.
+#
+# 50k chars is ~12k tokens. Measured over 1687 review and verify tool results:
+# p50 2.8k, p90 15k, p95 33k, p99 133k. A normal read, diff or grep passes
+# intact; clipping hits ~4% of results and removes ~20% of all re-read volume.
+# Lower starts to clip routinely, and a re-query costs a turn, which is the
+# more expensive unit.
 # TODO(jgruber): make this a configurable knob if a workload needs a tighter cap.
-_MAX_TOOL_RESULT_CHARS = 200_000
+_MAX_TOOL_RESULT_CHARS = 50_000
 
 # Per-call ceiling on one tool execution. Legit calls are seconds (a
 # repo_git_grep that takes 2 minutes is wedged, not thorough); this reaps a hung
