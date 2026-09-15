@@ -1804,3 +1804,96 @@ async def test_a_reask_closed_turn_gets_the_notice_and_refusals():
         )
     )
     assert refused is not None and refused.status == "error"
+
+
+# ── a truncated tool call is not the zero-part flake ─────────────────────────
+
+
+def _truncated(stop_reason="tool_use", invalid=True):
+    """What a provider returns when a tool call's arguments arrive cut off:
+    empty content, nothing in tool_calls (the args did not parse), and the call
+    recorded in invalid_tool_calls."""
+    return AIMessage(
+        content="",
+        tool_calls=[],
+        invalid_tool_calls=(
+            [
+                {
+                    "name": "ReviewResult",
+                    "args": '{"findings": [{"fi',
+                    "id": "t1",
+                    "error": "Unterminated string",
+                }
+            ]
+            if invalid
+            else []
+        ),
+        response_metadata={"stop_reason": stop_reason},
+    )
+
+
+def test_a_truncated_tool_call_is_not_an_empty_candidate():
+    """It looks zero-part to a check that reads only content and tool_calls, and
+    misdiagnosing it was expensive: the model was told its response had been
+    empty (it had not), the cached prefix was dropped to defeat a determinism
+    that was not the cause, and the turn ended in EmptyCandidateError -- which
+    _is_retryable rejects by type, so a recoverable truncation became a dead
+    turn."""
+    from airc_core.agent import _empty_ai_message
+
+    assert _empty_ai_message(SimpleNamespace(result=[_truncated()])) is None
+
+
+def test_either_signal_alone_is_enough():
+    # invalid_tool_calls with no useful stop reason (an adapter that records the
+    # bad call but not why), and a stop reason with the call dropped entirely.
+    from airc_core.agent import _empty_ai_message
+
+    only_invalid = _truncated(stop_reason="STOP")
+    only_reason = _truncated(stop_reason="MALFORMED_FUNCTION_CALL", invalid=False)
+    assert _empty_ai_message(SimpleNamespace(result=[only_invalid])) is None
+    assert _empty_ai_message(SimpleNamespace(result=[only_reason])) is None
+
+
+def test_the_real_zero_part_candidate_is_still_caught():
+    # The guard must not have widened into the flake it exists to catch.
+    from airc_core.agent import _empty_ai_message
+
+    zero_part = AIMessage(content="", response_metadata={"finish_reason": "STOP"})
+    assert _empty_ai_message(SimpleNamespace(result=[zero_part])) is not None
+
+
+async def test_a_truncated_call_is_retried_with_wording_that_names_it():
+    from airc_core import agent
+
+    mw = agent._EmptyCandidateRetry()
+    good = AIMessage(content="", tool_calls=[{"name": "T", "args": {}, "id": "c"}])
+    seen = []
+
+    async def handler(req):
+        seen.append([str(m.content) for m in req.messages])
+        return SimpleNamespace(result=[_truncated()] if len(seen) == 1 else [good])
+
+    out = await mw.awrap_model_call(_Req(1), handler)
+    assert out.result == [good]
+    nudge = seen[1][-1]
+    assert "could not be parsed" in nudge
+    # Not the zero-part wording, which would be false here.
+    assert "was empty" not in nudge
+    # And the flag is cleared, so a later call is not treated as a retry.
+    assert agent._empty_retry.get() == 0
+
+
+async def test_a_second_truncation_hands_the_turn_back_instead_of_raising():
+    """EmptyCandidateError names a different failure, _is_retryable rejects it by
+    type, and its one consumer logs a dead turn. A dropped tool call reads to a
+    ToolStrategy agent as a turn with no tool call, which the re-ask recovers."""
+    from airc_core import agent
+
+    mw = agent._EmptyCandidateRetry()
+
+    async def handler(req):
+        return SimpleNamespace(result=[_truncated()])
+
+    out = await mw.awrap_model_call(_Req(1), handler)
+    assert out.result[0].invalid_tool_calls  # handed back, not raised

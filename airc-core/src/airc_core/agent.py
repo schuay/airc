@@ -695,7 +695,10 @@ class _EmptyCandidateRetry(AgentMiddleware):
 
     Detection scope: empty candidate (0 parts: no text AND no tool calls) and
     STOP-with-no-content only -- the flake family. A SAFETY/RECITATION block
-    WITH content is a genuine refusal, not a flake; not retried here.
+    WITH content is a genuine refusal, not a flake; not retried here. Nor is a
+    tool call the provider truncated, which reads as zero-part to a check on
+    content and tool_calls alone: that has its own retry and its own wording
+    (see _unparsable_tool_call and _retry_unparsable).
 
     Note there is no legitimately-empty reply to churn on: an agent with nothing
     to say answers with a sentinel (the room's NOTHING_TO_ADD) or calls its
@@ -716,6 +719,8 @@ class _EmptyCandidateRetry(AgentMiddleware):
         # Attempt 1 is the turn's own call, unchanged and cached as usual: this
         # middleware costs nothing until something comes back empty.
         resp = await handler(request)
+        if not _empty_retry.get() and _first_unparsable_tool_call(resp) is not None:
+            return await self._retry_unparsable(request, handler, resp)
         empty = _empty_ai_message(resp)
         if empty is None:
             # A non-empty response ends the episode: clear the counter so a later
@@ -748,6 +753,58 @@ class _EmptyCandidateRetry(AgentMiddleware):
             f"empty candidate (finish_reason={_finish_reason(empty2)})"
         )
 
+    async def _retry_unparsable(self, request, handler, resp):
+        """One retry of a tool call whose arguments did not parse, then hand the
+        response back rather than raising.
+
+        Not EmptyCandidateError: that names a different failure, _is_retryable
+        rejects it by type, and the one consumer logs it as a dead turn. A
+        dropped tool call is not a dead turn -- for a ToolStrategy agent it
+        reads as a turn that produced no tool call, which
+        RequireStructuredResultMiddleware already re-asks, so returning the
+        response puts it back on a recovery path that works.
+
+        _empty_retry is set for the same reason the zero-part path sets it: the
+        inner middlewares re-run on this second handler call and would append
+        their nudges and pointers a second time. The growing cache steps aside
+        on the same flag, which for a truncation buys nothing -- the prefix did
+        not cause it -- and costs one uncached send. Accepted rather than split
+        into two flags: one full-price call against a lost turn.
+        """
+        bad = _first_unparsable_tool_call(resp)
+        log.warning(
+            "unparsable tool call (finish_reason=%s, names=%s); retrying once",
+            _finish_reason(bad),
+            [c.get("name") for c in bad.invalid_tool_calls] or "(none recorded)",
+        )
+        _empty_retry.set(1)
+        try:
+            resp2 = await handler(
+                request.override(
+                    messages=[*request.messages, _UNPARSABLE_TOOL_CALL_NUDGE]
+                )
+            )
+        finally:
+            _empty_retry.set(0)
+        if _first_unparsable_tool_call(resp2) is not None:
+            log.warning(
+                "unparsable tool call again; handing the turn back to its own recovery"
+            )
+        return resp2
+
+
+# The one-shot nudge appended on a truncated or malformed tool call. Names the
+# actual failure: the zero-part nudge below tells the model its response was
+# empty, which for this failure is false and unactionable -- it emitted a call,
+# the arguments just did not arrive whole. Asking for a smaller one matters
+# because the common shape is a large structured result truncated mid-string,
+# which an identical retry can reproduce for the same reason.
+_UNPARSABLE_TOOL_CALL_NUDGE = HumanMessage(
+    "Your previous tool call could not be parsed: the arguments arrived"
+    " truncated or malformed, so the call was dropped and nothing ran. Emit it"
+    " again, complete and valid. If it was long, send the same call with less in"
+    " it rather than a partial one."
+)
 
 # The one-shot nudge appended on a repeated empty candidate. Ephemeral --
 # _EmptyCandidateRetry overrides the request with it, never mutates graph state,
@@ -761,16 +818,57 @@ _EMPTY_NUDGE = HumanMessage(
 )
 
 
+# Stop reasons that say the model WAS emitting a tool call. A message carrying
+# one but no parsed call did not come back zero-part: it came back with a call
+# that could not be parsed, which is a different failure with a different cure.
+# Anthropic writes "tool_use", Gemini "MALFORMED_FUNCTION_CALL"; compared
+# case-insensitively because each provider cases its own vocabulary.
+_TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
+
+
+def _unparsable_tool_call(msg: AIMessage) -> bool:
+    """Whether msg is a tool call the provider truncated or malformed.
+
+    Two independent signals, either sufficient. invalid_tool_calls is where
+    langchain puts a call whose arguments would not parse, so a non-empty list
+    is proof there were parts. The stop reason is the provider saying the same
+    thing from its side, and covers an adapter that drops the bad call entirely
+    rather than recording it.
+    """
+    if msg.invalid_tool_calls:
+        return True
+    return _finish_reason(msg).strip().lower() in _TOOL_CALL_STOP_REASONS
+
+
 def _empty_ai_message(resp):
     """The first zero-part AIMessage in resp (no text AND no tool calls), or None.
 
     A tool-calling step with empty text carries parts (the tool_calls), so it is
     not empty by this definition. resp.result is the message list the model
-    returned; a non-AI response (e.g. a structured-output object) has none."""
+    returned; a non-AI response (e.g. a structured-output object) has none.
+
+    A truncated tool call reads as zero-part to a check that looks only at
+    content and tool_calls -- empty content, and nothing in tool_calls because
+    the arguments did not parse -- so it is excluded explicitly. Treating one as
+    the zero-part flake told the model its response had been empty (it had not),
+    dropped the cached prefix to defeat a determinism that was never the cause,
+    and ended in EmptyCandidateError, which _is_retryable rejects BY TYPE. A
+    truncation is exactly the transient an ordinary retry fixes, so that
+    misdiagnosis converted a recoverable call into a dead turn."""
     for msg in getattr(resp, "result", ()) or ():
         if not isinstance(msg, AIMessage):
             continue
+        if _unparsable_tool_call(msg):
+            continue
         if not (msg.tool_calls or []) and not str(msg.content or "").strip():
+            return msg
+    return None
+
+
+def _first_unparsable_tool_call(resp):
+    """The first AIMessage in resp whose tool call did not parse, or None."""
+    for msg in getattr(resp, "result", ()) or ():
+        if isinstance(msg, AIMessage) and _unparsable_tool_call(msg):
             return msg
     return None
 
