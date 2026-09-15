@@ -852,7 +852,7 @@ class _FinalAnswerState(AgentState):
 
 
 class FinalAnswerMiddleware(AgentMiddleware):
-    """Withdraw the tools for the last `window` calls of a capped turn, so the
+    """Close the tools for the last `window` calls of a capped turn, so the
     turn ends with a result instead of at the cap.
 
     ModelCallLimitMiddleware ends a turn at its cap by jumping to the end with
@@ -860,23 +860,23 @@ class FinalAnswerMiddleware(AgentMiddleware):
     available: the structured result was never produced, the caller sees None,
     and every read the turn made is thrown away -- a review pass that hits the
     cap contributes nothing to its ensemble. The nudges before the cap ask the
-    model to stop; this makes it stop.
+    model to stop; this leaves it nothing else to do.
 
-    Mechanism: with ToolStrategy, create_agent binds the model with
-    tool_choice="any" and appends the structured-output tool to request.tools
-    on every call. Emptying request.tools leaves the result tool as the only
-    tool bound, so the forced call can only be the verdict. `notice` rides on
-    the same request, request-only like a nudge, so the model is told why its
-    reads are gone and what to do with what it has. An agent without a
-    ToolStrategy is simply called without tools, which forces a text answer --
-    the same "answer now" for a persona turn.
+    Mechanism: inside the window every tool call is answered with `refusal`
+    instead of being executed, and `notice` rides on each model request
+    (request-only, like a nudge) saying the tools are closed and to report what
+    it has. With ToolStrategy the model is bound with tool_choice="any", so a
+    refused read leaves exactly one productive call: the result tool, which the
+    model node parses itself and never routes through the tool hook, so it is
+    never refused.
 
-    The window is the turn's last `window` permitted calls; the second and
-    later exist for a validation retry (handle_errors re-prompts on a bad
-    result call). Withdrawing tools changes the tools prefix, so every call in
-    the window misses the prompt cache and is billed in full -- the price of a
-    verdict against the whole turn being wasted, and the reason the window is
-    two calls rather than a longer tail.
+    Refusing at execution rather than withdrawing the tools from the request is
+    deliberate: the tool list is the first thing in the cached prefix, and
+    changing it re-bills the whole context on every call of the window. A
+    refusal is an ordinary tool result appended at the tail, so the window
+    costs a cached read per call, which is why it can be three calls rather
+    than one -- a model that spends its first closed call on a read it is then
+    refused still has two to hand in.
 
     The count is this middleware's own, per turn like CallBudgetMiddleware's,
     so the window does not depend on which other governors are in the stack.
@@ -886,11 +886,18 @@ class FinalAnswerMiddleware(AgentMiddleware):
 
     state_schema = _FinalAnswerState
 
-    def __init__(self, max_calls: int, notice: str, window: int = 2) -> None:
+    def __init__(
+        self, max_calls: int, notice: str, refusal: str, window: int = 3
+    ) -> None:
         super().__init__()
         self._max = max_calls
         self._notice = notice
+        self._refusal = refusal
         self._window = window
+
+    def _closed(self, completed: int) -> bool:
+        """Whether the model call made after `completed` calls is in the window."""
+        return completed >= self._max - self._window
 
     def after_model(self, state, runtime) -> dict[str, Any]:
         return {"answer_calls": state.get("answer_calls", 0) + 1}
@@ -900,16 +907,36 @@ class FinalAnswerMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         n = request.state.get("answer_calls", 0)
-        if n < self._max - self._window:
+        if not self._closed(n):
             return await handler(request)
-        log.info("final answer: tools withdrawn at call %d/%d", n + 1, self._max)
-        messages = request.messages
+        log.info("final answer: tools closed at call %d/%d", n + 1, self._max)
         # The empty-candidate retry re-enters this wrap with its own nudge on
-        # the request; the notice is already there from the first pass, so only
-        # the tools are taken again (same reasoning as CallBudgetMiddleware).
-        if not _empty_retry.get():
-            messages = [*messages, HumanMessage(self._notice)]
-        return await handler(request.override(tools=[], messages=messages))
+        # the request; the notice is already there from the first pass (same
+        # reasoning as CallBudgetMiddleware).
+        if _empty_retry.get():
+            return await handler(request)
+        return await handler(
+            request.override(messages=[*request.messages, HumanMessage(self._notice)])
+        )
+
+    def _refuse(self, request):
+        # The call that issued this tool call has already been counted, so the
+        # count it was made after is one less.
+        if not self._closed(request.state.get("answer_calls", 0) - 1):
+            return None
+        call = request.tool_call
+        return ToolMessage(
+            content=self._refusal,
+            tool_call_id=call["id"],
+            name=call.get("name"),
+            status="error",
+        )
+
+    def wrap_tool_call(self, request, handler):
+        return self._refuse(request) or handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        return self._refuse(request) or await handler(request)
 
 
 # Tag on the re-ask reminders this middleware injects. No longer load-bearing

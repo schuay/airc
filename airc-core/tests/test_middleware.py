@@ -1575,13 +1575,13 @@ async def test_require_result_composes_with_the_review_governors():
     assert _reminders(state) == 3
 
 
-def _final_req(calls: int, tools=None, messages=None):
+def _final_req(calls: int, messages=None):
     return ModelRequest(
         model=SimpleNamespace(),
         system_message=None,
         messages=messages or [HumanMessage("q")],
         tool_choice=None,
-        tools=[{"name": "read"}] if tools is None else tools,
+        tools=[{"name": "read"}],
         response_format=None,
         state={"answer_calls": calls},
         runtime=SimpleNamespace(),
@@ -1600,31 +1600,72 @@ async def _final_seen(mw, request):
     return seen
 
 
+def _tool_req(calls: int):
+    return SimpleNamespace(
+        tool_call={"name": "read", "args": {}, "id": "c1"},
+        state={"answer_calls": calls},
+    )
+
+
+async def _tool_seen(mw, request):
+    ran = []
+
+    async def handler(req):
+        ran.append(req)
+        return ToolMessage(content="real", tool_call_id="c1")
+
+    out = await mw.awrap_tool_call(request, handler)
+    return out, ran
+
+
 async def test_final_answer_leaves_calls_before_the_window_alone():
-    mw = FinalAnswerMiddleware(10, "answer now", window=2)
-    seen = await _final_seen(mw, _final_req(7))
+    mw = FinalAnswerMiddleware(10, "answer now", "closed", window=3)
+    seen = await _final_seen(mw, _final_req(6))
     assert seen["tools"] == [{"name": "read"}]
     assert [m.content for m in seen["messages"]] == ["q"]
+    # Reads issued by that call run: after_model has counted it by then.
+    out, ran = await _tool_seen(mw, _tool_req(7))
+    assert ran and out.content == "real"
 
 
-async def test_final_answer_withdraws_tools_for_the_last_permitted_calls():
+async def test_final_answer_closes_the_tools_for_the_last_permitted_calls():
     """answer_calls counts completed calls, so with a cap of 10 and a window of
-    2 the calls made at 8 and 9 are the ninth and tenth: the last two the cap
-    permits. Both go out with no tools and the notice, so under ToolStrategy the
-    result tool is the only call the model can make."""
-    mw = FinalAnswerMiddleware(10, "answer now", window=2)
-    for n in (8, 9):
+    3 the calls made at 7, 8 and 9 are the last three the cap permits. Each
+    carries the notice and keeps its tool list -- the list is the head of the
+    cached prefix -- and every read it issues is answered with the refusal
+    instead of running. Under ToolStrategy that leaves the result tool as the
+    only call that does anything."""
+    mw = FinalAnswerMiddleware(10, "answer now", "closed", window=3)
+    for n in (7, 8, 9):
         seen = await _final_seen(mw, _final_req(n))
-        assert seen["tools"] == [], n
+        assert seen["tools"] == [{"name": "read"}], n
         assert [m.content for m in seen["messages"]] == ["q", "answer now"], n
+        # The tool node runs after after_model counted the call.
+        out, ran = await _tool_seen(mw, _tool_req(n + 1))
+        assert not ran, n
+        assert out.content == "closed" and out.status == "error"
+        assert out.tool_call_id == "c1" and out.name == "read"
     # The original request is graph state and is not mutated.
     req = _final_req(9)
     await _final_seen(mw, req)
-    assert req.tools == [{"name": "read"}] and len(req.messages) == 1
+    assert len(req.messages) == 1
+
+
+def test_final_answer_refuses_synchronously_too():
+    mw = FinalAnswerMiddleware(10, "answer now", "closed", window=3)
+    ran = []
+
+    def handler(req):
+        ran.append(req)
+        return "ran"
+
+    out = mw.wrap_tool_call(_tool_req(9), handler)
+    assert not ran and out.content == "closed"
+    assert mw.wrap_tool_call(_tool_req(6), handler) == "ran" and ran
 
 
 async def test_final_answer_counts_its_own_calls():
-    mw = FinalAnswerMiddleware(10, "answer now")
+    mw = FinalAnswerMiddleware(10, "answer now", "closed")
     assert mw.after_model({"answer_calls": 3}, None) == {"answer_calls": 4}
     assert mw.after_model({}, None) == {"answer_calls": 1}
 
@@ -1632,11 +1673,10 @@ async def test_final_answer_counts_its_own_calls():
 async def test_final_answer_does_not_stack_the_notice_on_an_empty_retry():
     from airc_core import agent
 
-    mw = FinalAnswerMiddleware(10, "answer now", window=2)
+    mw = FinalAnswerMiddleware(10, "answer now", "closed", window=3)
     agent._empty_retry.set(1)
     try:
         seen = await _final_seen(mw, _final_req(9))
     finally:
         agent._empty_retry.set(0)
-    assert seen["tools"] == []
     assert [m.content for m in seen["messages"]] == ["q"]
