@@ -1923,6 +1923,116 @@ def test_a_partially_parsed_call_is_still_a_truncation():
     assert _first_unparsable_tool_call(SimpleNamespace(result=[mixed])) is not None
 
 
+def test_the_shape_says_which_branch_matched():
+    """The whole point of the diagnostic: separate a call langchain recorded as
+    bad from a stop reason with no call behind it at all."""
+    from airc_core.agent import _response_shape
+
+    thinking = AIMessage(
+        content=[{"type": "thinking", "thinking": "..."}],
+        response_metadata={"stop_reason": "tool_use", "model_name": "m"},
+    )
+    shape = _response_shape(SimpleNamespace(result=[thinking]), thinking)
+    assert "result[1]=(0*: AIMessage blocks=['thinking']" in shape
+    assert "calls=0 invalid=[] chunks=0 stop=tool_use" in shape
+    assert "meta=['stop_reason', 'model_name']" in shape
+
+    recorded_bad = _truncated()
+    assert "invalid=['" in _response_shape(
+        SimpleNamespace(result=[recorded_bad]), recorded_bad
+    )
+
+
+def test_the_shape_shows_a_call_sitting_in_a_sibling_message():
+    """The leading hypothesis for 69 hits and 0 recoveries: the match is on the
+    first message, and the call is in the next one. Invisible if the diagnostic
+    reports only the matched message."""
+    from airc_core.agent import _response_shape
+
+    thinking = AIMessage(
+        content=[{"type": "thinking", "thinking": "..."}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    carries_call = AIMessage(
+        content="", tool_calls=[{"name": "T", "args": {}, "id": "c"}]
+    )
+    shape = _response_shape(SimpleNamespace(result=[thinking, carries_call]), thinking)
+    assert "result[2]=(0*: " in shape  # matched the first
+    assert "1: AIMessage blocks=[] calls=1" in shape  # call was there all along
+
+
+def test_the_shape_survives_whatever_content_arrives():
+    """It runs on a failure path, so it may not raise -- that would turn the
+    recoverable call it describes into a dead turn."""
+    from airc_core.agent import _message_shape, _response_shape
+
+    for content in ("", "  ", "text", [], [{"no_type": 1}], ["bare"]):
+        assert "calls=0" in _message_shape(AIMessage(content=content))
+    assert "blocks=[]" in _message_shape(AIMessage(content="   "))
+    assert "blocks=['?']" in _message_shape(AIMessage(content=[{"no_type": 1}]))
+    assert "blocks=['str']" in _message_shape(AIMessage(content=["bare"]))
+    # Validation rejects a non-str/list content, so the fallback branch is only
+    # reachable on a message built without it. Still covered: nothing guarantees
+    # every message we are handed came through the validator.
+    assert "blocks=['NoneType']" in _message_shape(
+        AIMessage.model_construct(content=None)
+    )
+    # A non-AI entry, no result at all, and no matched message: all reachable if
+    # a provider or an inner middleware returns something unexpected.
+    assert _message_shape(HumanMessage("x")) == "HumanMessage"
+    assert _response_shape(SimpleNamespace(result=None), None) == "result[0]=()"
+    assert _response_shape(SimpleNamespace(), None) == "result[0]=()"
+
+
+def test_an_unaggregated_chunk_is_not_read_as_a_dropped_call():
+    """An AIMessageChunk keeps its call in tool_call_chunks and leaves
+    tool_calls empty, which looks exactly like a dropped call until both are
+    reported."""
+    from airc_core.agent import _message_shape
+    from langchain_core.messages import AIMessageChunk
+
+    chunk = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {
+                "name": "T",
+                "args": "{}",
+                "id": "c",
+                "index": 0,
+                "type": "tool_call_chunk",
+            }
+        ],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    shape = _message_shape(chunk)
+    assert "AIMessageChunk" in shape
+    assert "chunks=1" in shape
+
+
+async def test_a_bare_stop_reason_costs_no_call_and_keeps_the_response():
+    """69 hits, 0 recoveries. Retrying it spent a call and threw the original
+    response away -- which loses a call sitting in a sibling message."""
+    from airc_core import agent
+
+    mw = agent._EmptyCandidateRetry()
+    thinking = AIMessage(
+        content=[{"type": "thinking", "thinking": "..."}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    resp = SimpleNamespace(result=[thinking])
+    calls = 0
+
+    async def handler(req):
+        nonlocal calls
+        calls += 1
+        return resp
+
+    out = await mw.awrap_model_call(_Req(1), handler)
+    assert calls == 1  # no retry
+    assert out is resp  # and the original response, not a replacement
+    assert agent._empty_retry.get() == 0
+
+
 async def test_a_successful_call_costs_exactly_one_model_call():
     from airc_core import agent
 

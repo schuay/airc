@@ -757,6 +757,14 @@ class _EmptyCandidateRetry(AgentMiddleware):
         """One retry of a tool call whose arguments did not parse, then hand the
         response back rather than raising.
 
+        Only a call langchain recorded as bad is retried. The other way into
+        _unparsable_tool_call -- a stop reason saying "tool_use" with no call of
+        either kind behind it -- is reported and left alone: see the TODO on the
+        predicate for the evidence (69 hits, 0 recoveries) and for why spending
+        a call on it is worse than nothing. Leaving the response untouched also
+        stops the retry DISCARDING it, which matters if the call we could not
+        find is sitting in a sibling message.
+
         Not EmptyCandidateError: that names a different failure, _is_retryable
         rejects it by type, and the one consumer logs it as a dead turn. A
         dropped tool call is not a dead turn -- for a ToolStrategy agent it
@@ -772,10 +780,15 @@ class _EmptyCandidateRetry(AgentMiddleware):
         into two flags: one full-price call against a lost turn.
         """
         bad = _first_unparsable_tool_call(resp)
+        if not bad.invalid_tool_calls:
+            log.warning(
+                "tool-call stop reason with no call behind it; leaving the"
+                " response alone: %s",
+                _response_shape(resp, bad),
+            )
+            return resp
         log.warning(
-            "unparsable tool call (finish_reason=%s, names=%s); retrying once",
-            _finish_reason(bad),
-            [c.get("name") for c in bad.invalid_tool_calls] or "(none recorded)",
+            "unparsable tool call; retrying once: %s", _response_shape(resp, bad)
         )
         _empty_retry.set(1)
         try:
@@ -786,9 +799,13 @@ class _EmptyCandidateRetry(AgentMiddleware):
             )
         finally:
             _empty_retry.set(0)
-        if _first_unparsable_tool_call(resp2) is not None:
+        # The second shape is the informative one: a retry that comes back
+        # identical says the request, not the wire, decides this.
+        if (bad2 := _first_unparsable_tool_call(resp2)) is not None:
             log.warning(
-                "unparsable tool call again; handing the turn back to its own recovery"
+                "unparsable tool call again; handing the turn back to its own"
+                " recovery: %s",
+                _response_shape(resp2, bad2),
             )
         return resp2
 
@@ -827,6 +844,34 @@ _EMPTY_NUDGE = HumanMessage(
 _TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
 
 
+# TODO(2026-09-16): decide whether the stop-reason branch below over-matches,
+# and delete it if it does. Since it landed on 09-15 it has fired 69 times,
+# every one with invalid_tool_calls empty -- so always via the stop reason,
+# never via a call langchain recorded as bad -- and the retry it used to trigger
+# recovered 0 of the 69. That retry is now gated on recorded evidence, so the
+# branch costs nothing but a warning; what remains is to say what it is seeing.
+#
+# Leading hypothesis, and the reason _response_shape reports the WHOLE result
+# rather than the matched message: _first_unparsable_tool_call takes the first
+# matching AIMessage, so a response split into a thinking message and a
+# tool-calling message matches the thinking one while the call sits intact
+# beside it. That would reproduce on every retry, which fits 0/69, and it fits
+# the journal, where most hits are followed by ordinary tool results. If the
+# starred index is 0 and a later message shows calls>0, that is it: match on the
+# response, not on the first message that looks wrong. Two other readings the
+# shape separates -- a 'tool_use' block present in content that langchain did
+# not lift, and an unaggregated AIMessageChunk carrying chunks>0 with calls=0.
+#
+# Still open regardless of cause: a re-ask caused by a dropped call counts
+# towards close_after_reasks, which exists to catch a model dodging its verdict
+# and says nothing about this failure. It withdrew every read tool from a
+# 150-call review pass at call 4 while its sibling pass read on. Gating the
+# retry makes that rarer -- the original response, with whatever call it holds,
+# now survives -- but does not fix it.
+#
+# For whoever measures it: these warnings carry no run key while the "call ..."
+# lines do, so with concurrent passes they cannot be attributed by adjacency in
+# the journal.
 def _unparsable_tool_call(msg: AIMessage) -> bool:
     """Whether msg is a tool call the provider truncated or malformed.
 
@@ -846,6 +891,66 @@ def _unparsable_tool_call(msg: AIMessage) -> bool:
     if msg.tool_calls:
         return False
     return _finish_reason(msg).strip().lower() in _TOOL_CALL_STOP_REASONS
+
+
+def _message_shape(msg) -> str:
+    """One message's parts: class, content block types, call counts, stop reason.
+
+    Types, names and counts only, never content -- these are review transcripts
+    and this runs on every hit.
+
+    The class name matters because an unaggregated AIMessageChunk carries its
+    call in tool_call_chunks and leaves tool_calls empty, which is
+    indistinguishable from a dropped call unless both are reported.
+    """
+    if not isinstance(msg, AIMessage):
+        return type(msg).__name__
+    content = msg.content
+    if isinstance(content, str):
+        blocks = ["text"] if content.strip() else []
+    elif isinstance(content, list):
+        blocks = [
+            b.get("type", "?") if isinstance(b, dict) else type(b).__name__
+            for b in content
+        ]
+    else:
+        blocks = [type(content).__name__]
+    chunks = len(getattr(msg, "tool_call_chunks", None) or ())
+    return (
+        f"{type(msg).__name__} blocks={blocks}"
+        f" calls={len(msg.tool_calls or ())}"
+        f" invalid={[c.get('name') for c in msg.invalid_tool_calls or ()]}"
+        f" chunks={chunks}"
+        f" stop={_finish_reason(msg)}"
+    )
+
+
+def _response_shape(resp, bad) -> str:
+    """Every message the call returned, with the matched one starred.
+
+    _first_unparsable_tool_call takes the FIRST matching AIMessage, so a
+    response split into a thinking message and a tool-calling message matches on
+    the thinking one while the call sits intact beside it. That reading cannot
+    be told from a genuinely dropped call by looking at the matched message
+    alone, and it would reproduce on every retry -- see the TODO above.
+
+    Also reports the keys of additional_kwargs and response_metadata for the
+    matched message, where a provider puts what it could not model otherwise.
+
+    Every expression is total. A diagnostic that raised here would turn the
+    recoverable call it is describing into a dead turn.
+    """
+    msgs = list(getattr(resp, "result", ()) or ())
+    parts = [
+        f"{i}{'*' if m is bad else ''}: {_message_shape(m)}" for i, m in enumerate(msgs)
+    ]
+    keys = ""
+    if isinstance(bad, AIMessage):
+        keys = (
+            f" kwargs={list(bad.additional_kwargs or ())}"
+            f" meta={list(bad.response_metadata or ())}"
+        )
+    return f"result[{len(msgs)}]=({'; '.join(parts)}){keys}"
 
 
 def _empty_ai_message(resp):
