@@ -2,7 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-from airc_room.config import Config, load_config, write_template_config
+from airc_core import ModelProfile
+from airc_room.config import (
+    DEFAULT_MODEL,
+    Config,
+    load_config,
+    write_template_config,
+)
 
 
 def _write(tmp_path, body: str):
@@ -462,3 +468,54 @@ def test_scalar_entries_and_profile_tables_coexist_in_one_models_section(tmp_pat
     assert cfg.model_profiles["default"].effort is None
     assert cfg.model_profiles["review"].effort == "xhigh"
     assert cfg.model_profiles["verify"].effort == "low"
+
+
+def test_resolve_profile_carries_the_effort_of_the_role_a_persona_names(tmp_path):
+    """A persona declares a ROLE, not a depth, so the effort a deployment put on
+    the entry has to survive resolution -- otherwise the knob parses and is
+    dropped, which reads exactly like an honoured one."""
+    body = (
+        "[models]\n"
+        "[models.default]\n"
+        'id     = "google_anthropic_vertex:claude-opus-5"\n'
+        'effort = "low"\n'
+    )
+    cfg = load_config(_write(tmp_path, body))
+    # No `model` in agent.toml, and the explicit spelling of the same role.
+    assert cfg.resolve_profile(None).call_kwargs == {"effort": "low"}
+    assert cfg.resolve_profile("default").call_kwargs == {"effort": "low"}
+    # filter is unset: it rides the default ID (the loader's fallback) but not
+    # the default's depth -- two roles exist because they may differ.
+    assert cfg.resolve_profile("filter") == ModelProfile(
+        key="filter", id="google_anthropic_vertex:claude-opus-5"
+    )
+    # A literal id names no entry, so there are no knobs to take from one.
+    assert cfg.resolve_profile("openrouter:x/y") == ModelProfile(
+        key="", id="openrouter:x/y"
+    )
+    # The id-only view still answers the same as before.
+    assert cfg.resolve_model(None) == "google_anthropic_vertex:claude-opus-5"
+
+
+def test_a_filter_entry_keeps_its_own_depth(tmp_path):
+    """Each role resolves to its own entry. (Only the persona build passes the
+    knobs on today -- the coordinator still constructs its model from the id.)"""
+    body = (
+        "[models]\n"
+        "[models.default]\n"
+        'id     = "google_anthropic_vertex:claude-opus-5"\n'
+        'effort = "xhigh"\n'
+        "[models.filter]\n"
+        'id     = "google_anthropic_vertex:claude-haiku-4-5"\n'
+        'effort = "low"\n'
+    )
+    cfg = load_config(_write(tmp_path, body))
+    assert cfg.resolve_profile("filter").effort == "low"
+    assert cfg.resolve_profile("default").effort == "xhigh"
+
+
+def test_resolve_profile_without_a_models_section(tmp_path):
+    """The bare config: no entry exists, so the fallback id carries no knobs."""
+    cfg = load_config(_write(tmp_path, ""))
+    assert cfg.resolve_profile(None) == ModelProfile(key="default", id=DEFAULT_MODEL)
+    assert cfg.resolve_profile("filter").id == DEFAULT_MODEL

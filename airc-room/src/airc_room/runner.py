@@ -422,7 +422,8 @@ class AgentRunner:
         extra_system: str = "",
         voice: str = "",
     ) -> object:
-        model_id = self._cfg.resolve_model(persona.model_id)
+        profile = self._cfg.resolve_profile(persona.model_id)
+        model_id = profile.id
         # A persona's tool_groups mix MCP groups (resolved to patterns below) and
         # plugin-local groups (resolved to local tools further down). Keep the
         # local ones out of the MCP resolver so they are not logged as unknown
@@ -459,7 +460,13 @@ class AgentRunner:
             for group in persona.tool_groups:
                 local.extend(self._local_tool_groups.get(group, []))
             tools = [*tools, *local]
-        log.info("agent %s: model=%s tools=%d", persona.name, model_id, len(tools))
+        log.info(
+            "agent %s: model=%s%s tools=%d",
+            persona.name,
+            model_id,
+            f"@{profile.effort}" if profile.effort else "",
+            len(tools),
+        )
         system_prompt = build_system_prompt(
             persona,
             available,
@@ -529,7 +536,10 @@ class AgentRunner:
             ),
         ]
         return create_agent(
-            make_model(model_id),
+            # call_kwargs is where the entry's thinking effort rides; the
+            # middleware above takes the id alone, so depth reaches the API here
+            # and nowhere else.
+            make_model(model_id, **profile.call_kwargs),
             tools=tools,
             system_prompt=system_prompt,
             middleware=middleware,

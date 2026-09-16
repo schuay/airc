@@ -183,6 +183,11 @@ filter  = "google_vertexai:gemini-2.5-flash"   # coordinator (routing) + triage
 #   [models.verify]
 #   id     = "google_anthropic_vertex:claude-opus-5"
 #   effort = "low"
+#
+# The effort rides the KEY, and a persona's `model` in agent.toml names a key
+# (or a literal id, which carries no knobs), so this is also how a chat persona
+# is set to think harder or cheaper: put it on `default` for the personas that
+# declare no model of their own.
 
 [gcp]
 # Only for google_vertexai:* and google_anthropic_vertex:* models.
@@ -523,20 +528,42 @@ class Config:
     # for a grocery room). A generic default keeps a bare room sensible.
     room_topic: str = "the room's topics"
 
-    def resolve_model(self, persona_model_id: str | None) -> str:
-        """The concrete model id for a persona's declared `model`.
+    def resolve_profile(self, persona_model_id: str | None) -> ModelProfile:
+        """The [models] entry behind a persona's declared `model`.
 
         A persona may name a real id (`provider:model`, always with a colon) or a
         ROLE alias -- "default" or "filter" -- so a cheap generalist can ride the
         same fast/cheap model the coordinator uses without hardcoding its id in
         two places (change [models] filter and the persona follows). An empty
-        value (no `model` in agent.toml) is the default model. A real id passes
-        through untouched; the colon makes the alias set unambiguous."""
-        if not persona_model_id or persona_model_id == "default":
-            return self.default_model
-        if persona_model_id == "filter":
-            return self.filter_model
-        return persona_model_id
+        value (no `model` in agent.toml) is the default role. A real id passes
+        through untouched; the colon makes the alias set unambiguous.
+
+        The whole entry rather than its id, because the depth a role was given is
+        part of what it names: the same Opus at `low` and at `xhigh` differ by
+        more in cost and behaviour than two sibling checkpoints do. A literal id
+        carries no knobs -- there is no entry to take them from, which is why the
+        way to set a persona's effort is to name the role and put the effort on
+        the [models] entry."""
+        role = persona_model_id or "default"
+        if role not in ("default", "filter"):
+            return ModelProfile(key="", id=persona_model_id)
+        if profile := self.model_profiles.get(role):
+            return profile
+        # No entry to read: [models] may be absent entirely, or filter may be
+        # riding its fallback to the default id. The id field stays the one of
+        # record and the knobs stay empty -- a role does NOT inherit another
+        # role's depth, because the reason to name two roles is that they differ.
+        return ModelProfile(
+            key=role, id=self.default_model if role == "default" else self.filter_model
+        )
+
+    def resolve_model(self, persona_model_id: str | None) -> str:
+        """The concrete model id for a persona's declared `model`.
+
+        The checkpoint alone, for the call sites that report or key on it (the
+        token ledger, the provider-key check). Building a model wants
+        resolve_profile, which also carries the effort."""
+        return self.resolve_profile(persona_model_id).id
 
 
 def load_config(path: Path | None = None) -> Config:
