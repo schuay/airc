@@ -1897,3 +1897,47 @@ async def test_a_second_truncation_hands_the_turn_back_instead_of_raising():
 
     out = await mw.awrap_model_call(_Req(1), handler)
     assert out.result[0].invalid_tool_calls  # handed back, not raised
+
+
+def test_a_successful_anthropic_call_is_not_read_as_truncated():
+    """Anthropic ends every successful tool-calling turn with "tool_use", so
+    the stop reason counts only when nothing parsed. Without that guard every
+    Claude tool call was retried."""
+    from airc_core.agent import _first_unparsable_tool_call
+
+    good = AIMessage(
+        content="",
+        tool_calls=[{"name": "ReviewResult", "args": {"cleared": "x"}, "id": "t1"}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    assert _first_unparsable_tool_call(SimpleNamespace(result=[good])) is None
+
+
+def test_a_partially_parsed_call_is_still_a_truncation():
+    """invalid_tool_calls is direct evidence, and outranks a good call beside
+    it."""
+    from airc_core.agent import _first_unparsable_tool_call
+
+    mixed = _truncated()
+    mixed.tool_calls = [{"name": "T", "args": {}, "id": "ok"}]
+    assert _first_unparsable_tool_call(SimpleNamespace(result=[mixed])) is not None
+
+
+async def test_a_successful_call_costs_exactly_one_model_call():
+    from airc_core import agent
+
+    mw = agent._EmptyCandidateRetry()
+    good = AIMessage(
+        content="",
+        tool_calls=[{"name": "T", "args": {}, "id": "c"}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    seen = []
+
+    async def handler(req):
+        seen.append(req)
+        return SimpleNamespace(result=[good])
+
+    out = await mw.awrap_model_call(_Req(1), handler)
+    assert out.result == [good]
+    assert len(seen) == 1  # no retry: no second call, no false nudge

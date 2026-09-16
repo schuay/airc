@@ -819,10 +819,11 @@ _EMPTY_NUDGE = HumanMessage(
 
 
 # Stop reasons that say the model WAS emitting a tool call. A message carrying
-# one but no parsed call did not come back zero-part: it came back with a call
-# that could not be parsed, which is a different failure with a different cure.
-# Anthropic writes "tool_use", Gemini "MALFORMED_FUNCTION_CALL"; compared
-# case-insensitively because each provider cases its own vocabulary.
+# one but no call at all -- neither parsed nor recorded as invalid -- did not
+# come back zero-part: it came back with a call that could not be parsed, which
+# is a different failure with a different cure. Anthropic writes "tool_use",
+# Gemini "MALFORMED_FUNCTION_CALL"; compared case-insensitively because each
+# provider cases its own vocabulary.
 _TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
 
 
@@ -834,9 +835,16 @@ def _unparsable_tool_call(msg: AIMessage) -> bool:
     is proof there were parts. The stop reason is the provider saying the same
     thing from its side, and covers an adapter that drops the bad call entirely
     rather than recording it.
+
+    The stop reason counts only when nothing parsed. Anthropic ends every
+    successful tool-calling turn with "tool_use", so without that guard the
+    predicate matched every Claude tool call: each one spent a second model
+    call, dropped the growing cache, and was told its call had been dropped.
     """
     if msg.invalid_tool_calls:
         return True
+    if msg.tool_calls:
+        return False
     return _finish_reason(msg).strip().lower() in _TOOL_CALL_STOP_REASONS
 
 
