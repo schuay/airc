@@ -757,13 +757,14 @@ class _EmptyCandidateRetry(AgentMiddleware):
         """One retry of a tool call whose arguments did not parse, then hand the
         response back rather than raising.
 
-        Only a call langchain recorded as bad is retried. The other way into
-        _unparsable_tool_call -- a stop reason saying "tool_use" with no call of
-        either kind behind it -- is reported and left alone: see the TODO on the
-        predicate for the evidence (69 hits, 0 recoveries) and for why spending
-        a call on it is worse than nothing. Leaving the response untouched also
-        stops the retry DISCARDING it, which matters if the call we could not
-        find is sitting in a sibling message.
+        Only a call langchain recorded as bad is retried, because that is the
+        only case the nudge below describes truthfully. Any other way into
+        _unparsable_tool_call -- today just a stop reason saying "tool_use" with
+        no call of either kind behind it -- is reported and left alone: see the
+        TODO on the predicate for the evidence (69 hits, 0 recoveries) and for
+        why spending a call on it is worse than nothing. Leaving the response
+        untouched also stops the retry DISCARDING it, which would matter if the
+        call we could not find were sitting in a sibling message.
 
         Not EmptyCandidateError: that names a different failure, _is_retryable
         rejects it by type, and the one consumer logs it as a dead turn. A
@@ -851,23 +852,32 @@ _TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
 # recovered 0 of the 69. That retry is now gated on recorded evidence, so the
 # branch costs nothing but a warning; what remains is to say what it is seeing.
 #
-# Leading hypothesis, and the reason _response_shape reports the WHOLE result
-# rather than the matched message: _first_unparsable_tool_call takes the first
-# matching AIMessage, so a response split into a thinking message and a
-# tool-calling message matches the thinking one while the call sits intact
-# beside it. That would reproduce on every retry, which fits 0/69, and it fits
-# the journal, where most hits are followed by ordinary tool results. If the
-# starred index is 0 and a later message shows calls>0, that is it: match on the
-# response, not on the first message that looks wrong. Two other readings the
-# shape separates -- a 'tool_use' block present in content that langchain did
-# not lift, and an unaggregated AIMessageChunk carrying chunks>0 with calls=0.
+# Readings, ordered by what the response structure actually admits.
+# ModelResponse.result is documented as a single AIMessage, plus at most a
+# ToolMessage when the model used a tool for structured output, and
+# _first_unparsable_tool_call scans only AIMessages. So expect one message, and
+# read its blocks:
+#   blocks=['tool_use']       the call is in content and langchain did not lift
+#                             it into tool_calls -- an adapter problem, and the
+#                             predicate is right to flag it.
+#   blocks=['thinking'] or [] nothing but reasoning came back. Check first
+#                             whether we stripped it ourselves: "Strip sampling
+#                             kwargs and thoughts for Claude on Vertex".
+#   chunks>0 with calls=0     an unaggregated AIMessageChunk, call intact but
+#                             not yet merged.
+# _response_shape prints the whole result list anyway, because result IS a list
+# and a call in a SECOND AIMessage would explain 0/69 exactly -- the match would
+# land on the first message every time. Treat that as the surprise rather than
+# the expectation: it is outside the documented contract, and it was wrongly
+# written up here as the leading hypothesis before the contract was checked.
 #
-# Still open regardless of cause: a re-ask caused by a dropped call counts
-# towards close_after_reasks, which exists to catch a model dodging its verdict
-# and says nothing about this failure. It withdrew every read tool from a
-# 150-call review pass at call 4 while its sibling pass read on. Gating the
-# retry makes that rarer -- the original response, with whatever call it holds,
-# now survives -- but does not fix it.
+# Still open, and untouched by the gating: a re-ask caused by a dropped call
+# counts towards close_after_reasks, which exists to catch a model dodging its
+# verdict. It withdrew every read tool from a 150-call review pass at call 4
+# while its sibling pass read on. Note close_after_reasks is also off by one
+# against its own docstring -- RequireStructuredResultMiddleware writes
+# REASKS_KEY when it ISSUES the re-ask, so at close_after_reasks=1 the reads go
+# away on the model's first prose ending, having ignored no re-ask at all.
 #
 # For whoever measures it: these warnings carry no run key while the "call ..."
 # lines do, so with concurrent passes they cannot be attributed by adjacency in
