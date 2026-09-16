@@ -808,3 +808,74 @@ def test_custom_prefix_does_not_shadow_a_builtin_key_check(registry, monkeypatch
     registry.register_provider("openai_custom", _STUB)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert registry.missing_key("openai_custom:v1") is None
+
+
+def test_effort_on_anthropic_vertex_rides_model_kwargs_to_the_api(monkeypatch):
+    """ChatAnthropicVertex has no effort field: _default_params merges
+    model_kwargs and _format_params splats the result into messages.create(),
+    so output_config is how a level reaches the wire on this route."""
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model(
+        "google_anthropic_vertex:claude-opus-5", access_token="x", effort="low"
+    )
+    assert m.model_kwargs["output_config"] == {"effort": "low"}
+    # The thinking default the branch sets must survive alongside it -- adaptive
+    # thinking with the summary channel suppressed is what makes a level mean
+    # anything at all.
+    assert m.model_kwargs["thinking"]["type"] == "adaptive"
+    # And it has to be in the dict the client actually sends.
+    assert m._default_params["output_config"] == {"effort": "low"}
+
+
+def test_effort_on_anthropic_vertex_keeps_a_caller_output_config(monkeypatch):
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model(
+        "google_anthropic_vertex:claude-opus-5",
+        access_token="x",
+        effort="max",
+        model_kwargs={"output_config": {"format": {"type": "json_schema"}}},
+    )
+    assert m.model_kwargs["output_config"] == {
+        "format": {"type": "json_schema"},
+        "effort": "max",
+    }
+
+
+def test_effort_on_direct_anthropic_uses_the_first_class_field():
+    """The other Claude route names it differently: langchain-anthropic has an
+    `effort` field that it folds into output_config itself."""
+    pytest.importorskip("langchain_anthropic")
+
+    m = make_model("anthropic:claude-opus-5", api_key="k", effort="medium")
+    assert m.effort == "medium"
+
+
+def test_effort_on_a_non_claude_model_raises_rather_than_dropping():
+    """Every other unsupported kwarg degrades to a warning, because the request
+    still means what it meant. A dropped level does not: it leaves the model at
+    the API default of `high`, the most expensive setting in the ladder."""
+    with pytest.raises(ValueError) as e:
+        make_model("google_vertexai:gemini-3.6-flash", effort="low")
+    assert "no effort level" in str(e.value)
+
+
+def test_an_effort_outside_the_ladder_raises():
+    with pytest.raises(ValueError) as e:
+        make_model("anthropic:claude-opus-5", effort="enormous")
+    assert "unknown effort" in str(e.value)
+
+
+def test_no_effort_sends_no_output_config(monkeypatch):
+    """Omitting the level must leave the request untouched, not pin it to the
+    default: `high` is the API's own default, and sending it explicitly would
+    make every existing deployment's requests differ byte-for-byte from what
+    they send today -- a cache miss on the whole prefix."""
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model("google_anthropic_vertex:claude-opus-5", access_token="x")
+    assert "output_config" not in m.model_kwargs

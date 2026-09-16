@@ -35,6 +35,14 @@ class ProviderTraits:
     # response_metadata keys holding the model's stop reason. Providers pass
     # their own field names straight through, so the reader has to know them.
     stop_reason_keys: tuple[str, ...] = ("finish_reason",)
+    # Whether the provider takes a reasoning-depth level (EFFORT_LEVELS). False
+    # is not "this provider cannot think" -- Gemini thinks too, but it is
+    # configured by a token budget (thinking_budget), which is a different knob
+    # with a different unit. A level is refused on such a provider rather than
+    # converted into a budget, for the reason the module header gives: an
+    # invented equivalence changes the request into something nobody asked for,
+    # and this one would do it to the most expensive parameter there is.
+    supports_effort: bool = False
 
 
 # temperature, top_p and top_k were removed from the Messages API in Claude
@@ -50,6 +58,7 @@ _ANTHROPIC = ProviderTraits(
         " passes that relied on it for variance get none from this provider."
     ),
     stop_reason_keys=("stop_reason",),
+    supports_effort=True,
 )
 
 _DEFAULT = ProviderTraits(id="")
@@ -81,3 +90,15 @@ STOP_REASON_KEYS: tuple[str, ...] = tuple(
         for key in traits.stop_reason_keys
     )
 )
+
+
+# output_config.effort, in increasing depth. The Messages API's own vocabulary,
+# so it is repeated here rather than derived: the SDK exposes it as a Literal
+# that cannot be iterated, and config validation needs the set before any
+# langchain import has happened.
+#
+# A provider taking a level is not the same as every model behind it taking one
+# -- the older Claudes accept a shorter ladder or none at all, and that is a
+# per-model fact no table here tracks. Config checks the vocabulary; the
+# provider rejects a model that cannot serve the level asked for.
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")

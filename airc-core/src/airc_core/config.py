@@ -25,6 +25,8 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
+from .providers import EFFORT_LEVELS, traits_for
+
 DATA_DIR = user_data_path("airc")
 DEFAULT_BUS_ROOT = DATA_DIR / "bus"
 DEFAULT_TOKEN_DB = DATA_DIR / "tokens.db"
@@ -151,6 +153,79 @@ def parse_handover_fields(
     )
 
 
+@dataclass(frozen=True)
+class ModelProfile:
+    """One `[models]` entry: which model, and how hard it is told to think.
+
+    A profile rather than a bare id because "the verify model" is a thing a
+    deployment names, and its identity is not just the checkpoint -- the same
+    Opus 5 at `low` and at `xhigh` differ by more in cost and in behaviour than
+    two sibling checkpoints do. With ids alone the only way to say that was to
+    repeat the literal at each call site and set the depth nowhere, which is how
+    the review roster and the verify stage ended up unable to differ.
+
+    Two entries SHARING an id is therefore normal and intended, not duplication
+    to factor out.
+
+    `call_kwargs` is make_model's keyword surface, not the provider's: the
+    translation from a level to whatever the provider calls it lives there,
+    behind one name, so config never learns that one Claude route has an
+    `effort` field and the other reaches the API through model_kwargs.
+    """
+
+    key: str
+    id: str
+    effort: str | None = None
+
+    @property
+    def call_kwargs(self) -> dict:
+        return {"effort": self.effort} if self.effort else {}
+
+
+# Knobs a [models] entry may carry besides the id. One name per provider-native
+# parameter; Gemini's thinking_budget is the obvious next one and is deliberately
+# absent until something runs it, since an accepted-but-unused knob reads exactly
+# like an honoured one.
+_PROFILE_KEYS = frozenset({"id", "effort"})
+
+
+def _parse_model_profile(key: str, value: object) -> ModelProfile:
+    """One [models] entry, as either a bare id or a table.
+
+    The string form stays first-class rather than deprecated: most entries have
+    nothing to say beyond which model, and making them all grow a table would
+    add a line of noise per entry to buy nothing.
+    """
+    where = f"[models] {key}"
+    if isinstance(value, str):
+        return ModelProfile(key=key, id=value)
+    if not isinstance(value, Mapping):
+        raise SystemExit(
+            f'{where} must be a model id or a table with id = "provider:model"'
+        )
+    reject_unknown(value, _PROFILE_KEYS, f"[models.{key}]")
+    if not (model_id := value.get("id")):
+        raise SystemExit(f'[models.{key}] needs id = "provider:model"')
+    effort = value.get("effort")
+    if effort is not None:
+        effort = str(effort)
+        if effort not in EFFORT_LEVELS:
+            raise SystemExit(
+                f"[models.{key}] effort = {effort!r} is not a level:"
+                f" expected one of {', '.join(EFFORT_LEVELS)}"
+            )
+        # Checked here as well as in make_model because this is the failure the
+        # operator can act on: it names the section to edit, at startup, instead
+        # of at the first call the daemon happens to make.
+        if not traits_for(str(model_id)).supports_effort:
+            raise SystemExit(
+                f"[models.{key}] effort is a Claude parameter and {model_id}"
+                " is not a Claude model. Gemini's thinking depth is a token"
+                " budget, not a level, and the two are not interconvertible."
+            )
+    return ModelProfile(key=key, id=str(model_id), effort=effort)
+
+
 @dataclass
 class CommonConfig:
     """The sections shared across every component config.
@@ -159,9 +234,17 @@ class CommonConfig:
     legitimately want different defaults from one shared section (airc a cheap
     conversational model, the processor a capable review model), so each selects
     the key it needs (`models["default"]`, `models["filter"]`, ...).
+
+    `models` holds ids alone and `model_profiles` the full entries, the same set
+    keyed the same way. Both, because readers genuinely want different things:
+    the sandbox's egress allowlists and the Claude-needs-a-proxy check want every
+    model this deploy can reach and nothing else, while a component building a
+    graph wants the knobs too. Neither is derivable from the other cheaply enough
+    to be worth one of them being a function.
     """
 
     models: dict[str, str] = field(default_factory=dict)
+    model_profiles: dict[str, ModelProfile] = field(default_factory=dict)
     #: [model_providers] verbatim, prefix -> spec. Kept on the config as well as
     #: registered in airc_core.model, so a component can SEE what was declared
     #: (an inspector, a test) without reading module state it does not own.
@@ -242,7 +325,12 @@ def load_common(raw: Mapping) -> CommonConfig:
     # [models] is deliberately OPEN: it is a role map, and a persona's `model =`
     # may name any role in it (resolve_model). Only default/filter are read here,
     # but constraining the table would reject a role a persona legitimately uses.
-    cfg.models = {k: str(v) for k, v in raw.get("models", {}).items()}
+    # Each ENTRY is strict, for the usual reason -- a misspelled knob reads back
+    # as an honoured one.
+    cfg.model_profiles = {
+        k: _parse_model_profile(k, v) for k, v in raw.get("models", {}).items()
+    }
+    cfg.models = {k: p.id for k, p in cfg.model_profiles.items()}
     _load_model_providers(raw, cfg)
     if mcp := raw.get("mcp"):
         reject_unknown(mcp, {"servers"}, "[mcp]")

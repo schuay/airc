@@ -58,7 +58,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomllib
-from airc_core import DEFAULT_TOOL_GROUPS, load_common, parse_handover_fields
+from airc_core import (
+    DEFAULT_TOOL_GROUPS,
+    ModelProfile,
+    load_common,
+    parse_handover_fields,
+)
 from airc_core import apply_gcp_env_defaults as _apply_gcp_env
 from airc_core.config import reject_unknown, reject_unknown_fields
 from platformdirs import user_config_path, user_data_path
@@ -159,6 +164,25 @@ TEMPLATE_CONFIG = """\
 # and an app's own components read the keys they document.
 default = "google_vertexai:gemini-2.5-flash"
 filter  = "google_vertexai:gemini-2.5-flash"   # coordinator (routing) + triage
+
+# An entry may also be a table, to say how hard the model is told to think.
+# `effort` is the Messages API's reasoning depth -- low, medium, high, xhigh,
+# max -- and only Claude models take one; it is refused on anything else rather
+# than converted into that provider's thinking budget. Unset means the API
+# default (high) and sends no output_config at all.
+#
+# Thinking tokens bill as ordinary output tokens, so a level is a spend knob:
+# lower effort cuts thinking AND consolidates tool calls, which in an agent loop
+# cuts the re-sent history too. Two keys may name the SAME id at different
+# levels -- that is how a deployment says "review deeply, verify cheaply".
+#
+#   [models.review]
+#   id     = "google_anthropic_vertex:claude-opus-5"
+#   effort = "xhigh"
+#
+#   [models.verify]
+#   id     = "google_anthropic_vertex:claude-opus-5"
+#   effort = "low"
 
 [gcp]
 # Only for google_vertexai:* and google_anthropic_vertex:* models.
@@ -388,6 +412,11 @@ class Config:
     default_model: str = DEFAULT_MODEL
     # Fast/cheap model for coordinator routing and source triage filters.
     filter_model: str = DEFAULT_MODEL
+    #: Every [models] entry, keyed as written. The room reads two roles by name,
+    #: but it is the component that validates the suite file at startup, and a
+    #: malformed id under a key only the processor reads should still fail here
+    #: rather than at that daemon's first review.
+    model_profiles: dict[str, ModelProfile] = field(default_factory=dict)
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     tool_groups: dict[str, list[str]] = field(
         default_factory=lambda: dict(DEFAULT_TOOL_GROUPS)
@@ -543,6 +572,7 @@ def load_config(path: Path | None = None) -> Config:
     cfg = Config(
         default_model=default_model,
         filter_model=common.models.get("filter", default_model),
+        model_profiles=common.model_profiles,
         mcp_servers=common.mcp_servers,
         tool_groups=common.tool_groups,
         gcp=common.gcp,

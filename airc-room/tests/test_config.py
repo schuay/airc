@@ -416,3 +416,49 @@ def test_grounding_reminder_default_and_override(tmp_path):
     assert load_config(_write(tmp_path, "")).grounding_reminder_tokens == 200_000
     cfg = load_config(_write(tmp_path, "[airc]\ngrounding_reminder_tokens = 0\n"))
     assert cfg.grounding_reminder_tokens == 0
+
+
+def test_model_profiles_reach_the_room_config(tmp_path):
+    body = (
+        "[models]\n"
+        'default = "google_vertexai:gemini-3.6-flash"\n'
+        "[models.verify]\n"
+        'id = "google_anthropic_vertex:claude-opus-5"\n'
+        'effort = "low"\n'
+    )
+    cfg = load_config(_write(tmp_path, body))
+    assert cfg.default_model == "google_vertexai:gemini-3.6-flash"
+    assert cfg.model_profiles["verify"].call_kwargs == {"effort": "low"}
+
+
+def test_startup_validation_covers_a_key_the_room_never_reads(tmp_path):
+    """The suite shares one file. A malformed id under a processor-only key has
+    to fail at the startup that parses it, not at that daemon's first review."""
+    from airc_room.cli import _configured_model_ids
+
+    body = '[models]\nreview = "gemini-3.6-flash"\n'  # no provider prefix
+    cfg = load_config(_write(tmp_path, body))
+    ids = _configured_model_ids(cfg, {})
+    assert ids["models.review"] == "gemini-3.6-flash"
+
+
+def test_scalar_entries_and_profile_tables_coexist_in_one_models_section(tmp_path):
+    """The shape the scaffold documents. TOML allows scalar keys and sub-tables
+    under one header only in that order, so a config mixing the two forms is
+    the case worth pinning -- getting it wrong is a parse error in the
+    operator's file, not in ours."""
+    body = (
+        "[models]\n"
+        'default = "google_vertexai:gemini-3.6-flash"\n'
+        'filter  = "google_vertexai:gemini-3.6-flash"\n'
+        "\n[models.review]\n"
+        'id     = "google_anthropic_vertex:claude-opus-5"\n'
+        'effort = "xhigh"\n'
+        "\n[models.verify]\n"
+        'id     = "google_anthropic_vertex:claude-opus-5"\n'
+        'effort = "low"\n'
+    )
+    cfg = load_config(_write(tmp_path, body))
+    assert cfg.model_profiles["default"].effort is None
+    assert cfg.model_profiles["review"].effort == "xhigh"
+    assert cfg.model_profiles["verify"].effort == "low"

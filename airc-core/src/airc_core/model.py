@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
-from .providers import traits_for
+from .providers import EFFORT_LEVELS, traits_for
 
 log = logging.getLogger(__name__)
 
@@ -666,9 +666,54 @@ def _make_genai_vertex(model_id: str, kwargs: dict):
     return init_chat_model(f"google_genai:{name}", **kwargs)
 
 
-def make_model(model_id: str, **kwargs):
+def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
+    """Translate a reasoning-depth level into the provider's own parameter.
+
+    Refuses rather than drops. Every other unsupported kwarg here degrades to a
+    warning because the request still means what it meant without it; effort
+    does not. A dropped `low` leaves the model at the API default of `high`,
+    which is the most expensive setting in the ladder, and the only evidence is
+    a warning in a log nobody reads until the bill arrives. A raise at
+    construction is a startup failure instead -- and every config path validates
+    the same fact earlier, so this is reached by direct callers (tests, scripts)
+    rather than by a running daemon.
+
+    The two Claude routes name the parameter differently, which is why this is
+    here and not in the traits table: langchain-anthropic has a first-class
+    `effort` field, while ChatAnthropicVertex has no field for it at all and
+    reaches the API through model_kwargs, whose contents are splatted into
+    messages.create(). The caller's own output_config (a response format, say)
+    is merged rather than replaced.
+    """
+    if effort not in EFFORT_LEVELS:
+        raise ValueError(
+            f"unknown effort {effort!r}: expected one of {', '.join(EFFORT_LEVELS)}"
+        )
+    if not traits_for(model_id).supports_effort:
+        raise ValueError(
+            f"{model_id} takes no effort level: it is not a Claude model, and a"
+            " level is not converted into another provider's thinking budget"
+        )
+    if model_id.startswith("google_anthropic_vertex:"):
+        model_kwargs = dict(kwargs.get("model_kwargs") or {})
+        model_kwargs["output_config"] = {
+            **(model_kwargs.get("output_config") or {}),
+            "effort": effort,
+        }
+        kwargs["model_kwargs"] = model_kwargs
+        return
+    kwargs["effort"] = effort
+
+
+def make_model(model_id: str, *, effort: str | None = None, **kwargs):
     if problem := check_model_id(model_id):
         raise ValueError(f"{problem}; {supported_models_hint()}")
+    # Before the custom-provider branch below, which owns its kwargs entirely:
+    # a level it never asked for must not reach a third-party factory, and a
+    # level silently ignored by one is the failure this whole parameter exists
+    # to make impossible.
+    if effort is not None:
+        _apply_effort(kwargs, model_id, effort)
     # A registered external provider owns construction entirely: it gets the full
     # id (so one provider can serve several models) and the caller kwargs, and
     # returns a BaseChatModel. Nothing below is reachable for it -- including the

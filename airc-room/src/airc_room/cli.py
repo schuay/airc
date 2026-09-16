@@ -59,7 +59,13 @@ def _setup_logging(verbose: bool) -> Path:
 
 
 def _configured_model_ids(cfg, personas) -> dict[str, str]:
-    ids = {"models.default": cfg.default_model, "models.filter": cfg.filter_model}
+    # Every [models] entry, not just the two roles the room itself reads: the
+    # suite shares one file, and a typo under a key only the processor or
+    # icompleteu names should fail at the startup that parses it rather than at
+    # that daemon's first call.
+    ids = {f"models.{k}": p.id for k, p in cfg.model_profiles.items()}
+    ids.setdefault("models.default", cfg.default_model)
+    ids.setdefault("models.filter", cfg.filter_model)
     for p in personas.values():
         # Resolve the "default"/"filter" role aliases to the concrete id so the
         # format check below sees a real provider:model, not the alias word (and

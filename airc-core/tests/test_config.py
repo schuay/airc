@@ -12,6 +12,7 @@ from airc_core import (
     DEFAULT_BUS_ROOT,
     DEFAULT_TOOL_GROUPS,
     CommonConfig,
+    ModelProfile,
     apply_gcp_env_defaults,
     load_common,
     parse_handover_fields,
@@ -207,3 +208,99 @@ def test_model_providers_bad_factory_shape_fails_at_parse(registry):
     with pytest.raises(SystemExit, match="must be 'module:attr'"):
         load_common({"model_providers": {"mine": {"factory": "not_dotted"}}})
     assert "mine" not in registry._CUSTOM_PROVIDERS
+
+
+def test_a_string_entry_stays_a_bare_id():
+    # Most entries have nothing to say beyond which model; the string form is
+    # not a legacy shape being tolerated.
+    cfg = load_common({"models": {"default": "prov:m"}})
+    assert cfg.model_profiles["default"] == ModelProfile(key="default", id="prov:m")
+    assert cfg.model_profiles["default"].call_kwargs == {}
+
+
+def test_a_table_entry_carries_the_effort_level():
+    cfg = load_common(
+        {
+            "models": {
+                "review": {
+                    "id": "google_anthropic_vertex:claude-opus-5",
+                    "effort": "xhigh",
+                },
+                "verify": {
+                    "id": "google_anthropic_vertex:claude-opus-5",
+                    "effort": "low",
+                },
+            }
+        }
+    )
+    assert cfg.model_profiles["review"].effort == "xhigh"
+    assert cfg.model_profiles["verify"].call_kwargs == {"effort": "low"}
+    # Two keys on one id is the point of the type, not duplication.
+    assert cfg.model_profiles["review"].id == cfg.model_profiles["verify"].id
+
+
+def test_models_still_maps_key_to_id_for_the_egress_allowlists():
+    # The sandbox builds its Vertex/Anthropic route allowlists by splitting
+    # every value here on ":", and a profile that never reaches that set means
+    # a box with no route for it -- every call in-box fails.
+    cfg = load_common(
+        {
+            "models": {
+                "default": "google_vertexai:gemini-3.6-flash",
+                "review": {
+                    "id": "google_anthropic_vertex:claude-opus-5",
+                    "effort": "max",
+                },
+            }
+        }
+    )
+    assert cfg.models == {
+        "default": "google_vertexai:gemini-3.6-flash",
+        "review": "google_anthropic_vertex:claude-opus-5",
+    }
+
+
+def test_effort_on_a_non_claude_model_is_refused_by_name():
+    # Gemini's depth is a token budget; converting a level into one would be
+    # inventing an equivalence on the most expensive parameter there is.
+    with pytest.raises(SystemExit) as e:
+        load_common(
+            {
+                "models": {
+                    "filter": {
+                        "id": "google_vertexai:gemini-3.6-flash",
+                        "effort": "low",
+                    }
+                }
+            }
+        )
+    assert "not a Claude model" in str(e.value)
+
+
+def test_an_effort_outside_the_ladder_is_refused():
+    with pytest.raises(SystemExit) as e:
+        load_common(
+            {
+                "models": {
+                    "review": {"id": "anthropic:claude-opus-5", "effort": "extreme"}
+                }
+            }
+        )
+    assert "expected one of" in str(e.value)
+    assert "xhigh" in str(e.value)
+
+
+def test_a_misspelled_knob_is_refused_rather_than_ignored():
+    # The whole reason every section is strict: silently ignored reads back as
+    # honoured, and here that means paying for high while the file says low.
+    with pytest.raises(SystemExit) as e:
+        load_common(
+            {"models": {"review": {"id": "anthropic:claude-opus-5", "efort": "low"}}}
+        )
+    assert "efort" in str(e.value)
+
+
+def test_a_table_entry_without_an_id_is_refused():
+    with pytest.raises(SystemExit) as e:
+        load_common({"models": {"review": {"effort": "low"}}})
+    assert "needs id" in str(e.value)
