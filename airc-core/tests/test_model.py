@@ -857,7 +857,7 @@ def test_effort_on_direct_anthropic_uses_the_first_class_field():
 def test_effort_on_a_non_claude_model_raises_rather_than_dropping():
     """Every other unsupported kwarg degrades to a warning, because the request
     still means what it meant. A dropped level does not: it leaves the model at
-    the API default of `high`, the most expensive setting in the ladder."""
+    the API default of `high`, two rungs above the `low` the file asked for."""
     with pytest.raises(ValueError) as e:
         make_model("google_vertexai:gemini-3.6-flash", effort="low")
     assert "no effort level" in str(e.value)

@@ -672,8 +672,8 @@ def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
     Refuses rather than drops. Every other unsupported kwarg here degrades to a
     warning because the request still means what it meant without it; effort
     does not. A dropped `low` leaves the model at the API default of `high`,
-    which is the most expensive setting in the ladder, and the only evidence is
-    a warning in a log nobody reads until the bill arrives. A raise at
+    two rungs up the ladder from what the file asked for, and the only evidence
+    is a warning in a log nobody reads until the bill arrives. A raise at
     construction is a startup failure instead -- and every config path validates
     the same fact earlier, so this is reached by direct callers (tests, scripts)
     rather than by a running daemon.
