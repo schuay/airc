@@ -49,8 +49,15 @@ log = logging.getLogger(__name__)
 EventHook = Callable[[str, str, str], Awaitable[None]]
 
 
+# What holds for ANY room, whatever it is about and however it is rendered.
+# Deliberately NOT here: how long a post should be, how it should be laid out,
+# and which citation form to use. Those belong to the deployment, and room.md
+# -- spliced in directly after this -- can state them with a precision one room
+# can afford and this constant cannot. A vaguer second copy here is not a floor
+# under a deployment that says it better; it is a second rule to satisfy, and
+# an agent that has two will meet the looser one.
 ROOM_RULES = """\
-## Room rules
+# Room rules
 
 You are one participant in a shared chat room with humans and other agents.
 Other participants' messages are shown to you as "[sender] text". Write your
@@ -61,17 +68,14 @@ and they will join if they can add value; to require a reply, write their
 handle (as listed under "Other agents") followed by a colon, anywhere in your
 message. Do not use @.
 
-- Ground non-trivial claims in evidence: cite file:line, a commit hash, or a
-  CL link you actually looked up with tools. Distinguish clearly between what
-  you verified and what you are inferring ("this looks like" vs "this is").
+- Ground non-trivial claims in evidence you looked up with tools, and name
+  what you looked at: the commit, the CL, the function or the file. Distinguish
+  clearly between what you verified and what you are inferring ("this looks
+  like" vs "this is").
 - Before sending, spend your last thinking on verification: the humans in
   this room are experts and immediately recognize guesses and mistakes.
   Re-check every hash, number, and code claim against what you actually read
   in this conversation; label anything unverified as such, or cut it.
-- Strongly prefer conciseness: a few short sentences, plain language, no
-  headers, minimal bullets. AI overload is real -- go long only when the
-  content requires it or detail was explicitly requested, and even then,
-  tight prose beats structure.
 - If you have nothing substantive to add, reply with exactly NOTHING_TO_ADD.
 - Tools that execute code or benchmarks are expensive; use them only when a
   concrete question justifies it, never speculatively.
@@ -85,10 +89,10 @@ def _identity_section(persona: Persona, all_personas: dict[str, Persona]) -> str
         if p.name != persona.name
     )
     return (
-        f"## Identity\n"
+        f"# Identity\n"
         f'You are "{persona.display_name}" (handle {persona.name}).\n'
         f"{persona.description}\n\n"
-        f"## Other agents in this room\n{others or '(none)'}\n"
+        f"# Other agents in this room\n{others or '(none)'}\n"
     )
 
 
@@ -99,22 +103,31 @@ def build_system_prompt(
     room_prompt: str = "",
     voice: str = "",
 ) -> str:
+    """The persona's system prompt: generated sections around supplied prose.
+
+    Every section is a top-level heading, including the ones written here. The
+    parts are peers -- none is inside another -- and a room.md or a system.md
+    that opens its sections with `#` would otherwise appear to adopt the
+    generated `##` ones that follow it.
+    """
     parts = [_identity_section(persona, all_personas), ROOM_RULES]
     if room_prompt:
         parts.append(room_prompt)
     parts.append(persona.system_prompt)
     if mcp_instructions:
-        parts.append(f"## MCP server instructions\n\n{mcp_instructions}")
+        parts.append(f"# MCP server instructions\n\n{mcp_instructions}")
     # Voice goes last: it is a style overlay, and trailing position gives the tone
     # reference recency weight without displacing the role or the grounding rules.
     if voice:
         parts.append(_voice_section(voice))
-    return "\n\n".join(parts)
+    # Stripped, so a part that ends in a newline of its own does not leave a
+    # doubled blank line where the join adds two more.
+    return "\n\n".join(p.strip() for p in parts)
 
 
 def _voice_section(voice: str) -> str:
     return (
-        "## Voice\n"
+        "# Voice\n"
         "Write your messages in the voice below. It governs TONE ONLY -- never"
         " your expertise, your conclusions, or what you choose to flag, only how"
         " it sounds. Do not mention this guide or the person it is modeled on;"

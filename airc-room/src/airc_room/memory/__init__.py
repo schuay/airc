@@ -39,7 +39,7 @@ MEMORY_GROUP = "memory"
 # (search-before-write, read-before-relying) live here because without them the
 # store rots into near-duplicate one-liners or into confidently-recited hooks.
 MEMORY_RULES = """\
-## Long-term memory
+# Long-term memory
 
 You have a durable memory: a small store of notes you maintain yourself, one fact
 per note. Its index (a line per note) appears under "Memory" when it changes and

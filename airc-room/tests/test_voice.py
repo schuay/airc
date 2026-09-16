@@ -70,7 +70,8 @@ def test_voice_body_robust_without_markers():
 def test_build_system_prompt_appends_voice_section():
     p = _persona()
     out = build_system_prompt(p, {p.name: p}, "", voice="Sound terse.")
-    assert "## Voice" in out
+    # Line-anchored: a guide of its own may well contain a "## Voice tells".
+    assert "\n# Voice\n" in out
     assert "TONE ONLY" in out
     assert "Sound terse." in out
     # Voice is the trailing section so it carries recency weight.
@@ -79,4 +80,4 @@ def test_build_system_prompt_appends_voice_section():
 
 def test_build_system_prompt_no_voice_by_default():
     p = _persona()
-    assert "## Voice" not in build_system_prompt(p, {p.name: p}, "")
+    assert "\n# Voice\n" not in build_system_prompt(p, {p.name: p}, "")
