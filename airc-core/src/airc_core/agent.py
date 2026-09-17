@@ -260,6 +260,13 @@ _empty_retry: contextvars.ContextVar[int] = contextvars.ContextVar(
 _UNPARSABLE_RETRIES = 2
 _UNPARSABLE_RETRY_DELAY = 2.0
 
+# Ceiling on graph-level re-asks for an unparsable response, independent of the
+# caller's max_reasks (set in the hundreds for prose, where the model is still
+# answering and the call cap is the real bound). Each round here also spends
+# _UNPARSABLE_RETRIES in-place attempts, so 6 is already up to 18 calls against
+# a provider fault. Observed clusters have never needed more than 4.
+_MAX_UNPARSABLE_REASKS = 6
+
 
 class EmptyCandidateError(Exception):
     """A model call returned a zero-part candidate: no text and no tool calls.
@@ -631,15 +638,30 @@ class _EmptyCandidateRetry(AgentMiddleware):
         )
 
     async def _retry_unparsable(self, request, handler, resp):
-        """Retry a tool call whose arguments did not parse, in place and bounded,
+        """Re-call the model on an unparsable response, in place and bounded,
         then hand the response back rather than raising.
 
-        Covers both a call langchain recorded in invalid_tool_calls and a bare
-        tool-call stop reason with no call behind it (e.g. a stream truncated
-        at the boundary between an omitted thinking block and the tool call).
+        What the attempt sends depends on which shape came back.
+
+        _DROPPED_CALL gets the nudge. The model emitted a call, the arguments
+        did not arrive whole, and "send the same call with less in it" is both
+        true and actionable against the common cause, a large structured result
+        truncated mid-string.
+
+        _EMPTY_TOOL_STOP gets the request unchanged. Nothing arrived, so there
+        is nothing to correct, and the nudge would assert a truncation that did
+        not happen and ask a reviewer to shrink reads it never made. A bare
+        resend is not a weaker correction than a nudged one here: the Messages
+        API is stateless and the empty response never goes back on the wire, so
+        either way the next attempt is a fresh sample of the same prefix, not a
+        continuation. Nor does the mutation buy determinism-breaking the way it
+        does for an empty candidate -- Anthropic removed temperature, top_p,
+        top_k and seed, and _drop_anthropic_sampling strips them, so an
+        identical request already resamples.
+
         Not EmptyCandidateError: that names a different failure, _is_retryable
-        rejects it by type, and its consumer logs a dead turn. A dropped tool
-        call is not a dead turn -- if every attempt fails,
+        rejects it by type, and its consumer logs a dead turn. An unparsable
+        response is not a dead turn -- if every attempt fails,
         RequireStructuredResultMiddleware re-asks without charging the prose
         re-ask budget.
 
@@ -649,9 +671,11 @@ class _EmptyCandidateRetry(AgentMiddleware):
         existing cached prefix instead of paying an uncached resend.
         """
         bad = _first_unparsable_tool_call(resp)
-        # One ephemeral request, reused by every attempt: a tail append, so each
-        # retry still reads the cached prefix.
-        retry_request = request.override(
+        kind = _unparsable_kind(bad)
+        # One ephemeral nudged request, built once and reused: a tail append, so
+        # a _DROPPED_CALL attempt still reads the cached prefix. An
+        # _EMPTY_TOOL_STOP attempt sends `request` itself, an exact repeat.
+        nudged = request.override(
             messages=[*request.messages, _UNPARSABLE_TOOL_CALL_NUDGE]
         )
         _empty_retry.set(_RETRY_UNPARSABLE)
@@ -660,35 +684,56 @@ class _EmptyCandidateRetry(AgentMiddleware):
                 log.warning(
                     # Every shape is informative: a retry that comes back
                     # identical says the request, not the wire, decides this.
-                    "unparsable tool call; retrying (%d/%d): %s",
+                    "unparsable[%s] attempt %d/%d (%s): %s",
+                    kind,
                     attempt,
                     _UNPARSABLE_RETRIES,
+                    "nudged" if kind == _DROPPED_CALL else "bare re-call",
                     _response_shape(resp, bad),
                 )
                 # An immediate resend already failed, so wait out a connection
                 # hiccup before repeating it.
                 if attempt > 1:
                     await asyncio.sleep(_UNPARSABLE_RETRY_DELAY)
-                resp = await handler(retry_request)
+                resp = await handler(nudged if kind == _DROPPED_CALL else request)
                 if (bad := _first_unparsable_tool_call(resp)) is None:
+                    # Logged so the recovery rate can be counted from the log
+                    # rather than reconstructed by pairing warnings; it is the
+                    # measurement that says whether re-calling works at all.
+                    log.info(
+                        "unparsable[%s] recovered on attempt %d/%d: %s",
+                        kind,
+                        attempt,
+                        _UNPARSABLE_RETRIES,
+                        _response_shape(resp, None),
+                    )
                     return resp
+                # Recomputed: a resend can come back the other shape, and the
+                # next attempt should send what that shape calls for.
+                kind = _unparsable_kind(bad)
         finally:
             _empty_retry.set(0)
         log.warning(
-            "unparsable tool call after %d retries; handing the turn back to its"
-            " own recovery: %s",
+            "unparsable[%s] not recovered after %d attempts; handing the turn"
+            " back to its own recovery: %s",
+            kind,
             _UNPARSABLE_RETRIES,
             _response_shape(resp, bad),
         )
         return resp
 
 
-# The one-shot nudge appended on a truncated or malformed tool call. Names the
-# actual failure: the zero-part nudge below tells the model its response was
+# The one-shot nudge appended on a _DROPPED_CALL, and on that shape only. Names
+# the actual failure: the zero-part nudge below tells the model its response was
 # empty, which for this failure is false and unactionable -- it emitted a call,
 # the arguments just did not arrive whole. Asking for a smaller one matters
 # because the common shape is a large structured result truncated mid-string,
 # which an identical retry can reproduce for the same reason.
+#
+# _EMPTY_TOOL_STOP does not get it. There the premise is false the other way --
+# nothing arrived, so nothing was truncated -- and the instruction is worse than
+# useless: a reviewer told to send less reads less, which costs review depth
+# silently, with no error and no sign in the verdict.
 _UNPARSABLE_TOOL_CALL_NUDGE = HumanMessage(
     "Your previous tool call could not be parsed: the arguments arrived"
     " truncated or malformed, so the call was dropped and nothing ran. Emit it"
@@ -717,15 +762,26 @@ _EMPTY_NUDGE = HumanMessage(
 _TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
 
 
-def _unparsable_tool_call(msg: AIMessage) -> bool:
-    """Whether msg is a tool call the provider truncated or malformed.
+# The two shapes _unparsable_kind separates. They share a detection site and
+# nothing else: one is a call that arrived in pieces, the other is a response
+# that arrived with no pieces at all, and the cure differs (see
+# _EmptyCandidateRetry._retry_unparsable).
+_DROPPED_CALL = "dropped-call"
+_EMPTY_TOOL_STOP = "empty-tool-stop"
 
-    Two independent signals, either sufficient. invalid_tool_calls is where
-    langchain puts a call whose arguments would not parse, so a non-empty list
-    is proof there were parts. The stop reason is the provider saying the same
-    thing from its side, covering both an adapter that drops a malformed call
-    and a stream that aborts after omitted reasoning before the tool_use block
-    arrives (content=[], tool_calls=[], stop_reason="tool_use").
+
+def _unparsable_kind(msg: AIMessage) -> str | None:
+    """Which unparsable shape msg is, or None if it is a healthy message.
+
+    _DROPPED_CALL: langchain recorded a call in invalid_tool_calls, which is
+    where it puts one whose arguments would not parse. A non-empty list is
+    proof there were parts and that they were cut short.
+
+    _EMPTY_TOOL_STOP: the provider's stop reason says it was emitting a tool
+    call, and neither a parsed nor a recorded-invalid call is behind it. The
+    observed shape on Claude is content=[], tool_calls=[], invalid=[],
+    stop_reason="tool_use", with output tokens billed -- the provider says it
+    sent a call and sent nothing.
 
     The stop reason counts only when nothing parsed. Anthropic ends every
     successful tool-calling turn with "tool_use", so without that guard the
@@ -733,10 +789,52 @@ def _unparsable_tool_call(msg: AIMessage) -> bool:
     call, dropped the growing cache, and was told its call had been dropped.
     """
     if msg.invalid_tool_calls:
-        return True
+        return _DROPPED_CALL
     if msg.tool_calls:
-        return False
-    return _finish_reason(msg).strip().lower() in _TOOL_CALL_STOP_REASONS
+        return None
+    if _finish_reason(msg).strip().lower() in _TOOL_CALL_STOP_REASONS:
+        return _EMPTY_TOOL_STOP
+    return None
+
+
+def _unparsable_tool_call(msg: AIMessage) -> bool:
+    """Whether msg is a tool call the provider truncated, or a response that
+    claims a tool call and carries none. See _unparsable_kind for the two."""
+    return _unparsable_kind(msg) is not None
+
+
+def _usage_shape(msg) -> str:
+    """What the provider billed for this message, read the way the ledger reads
+    it.
+
+    Usage.of_call holds the per-adapter quirks -- Anthropic's two cache-write
+    keys and its missing output details, Vertex reporting thoughts apart from
+    output_tokens -- and tolerates the None values adapters leave in the detail
+    dicts. Reusing it keeps this diagnostic from becoming a second, thinner
+    parse that drifts from the one the cost ledger trusts. Its cost fields go
+    unused here; pricing is total (an unlisted model falls back to a generic
+    rate), so paying for them on a failure path costs nothing worth avoiding.
+
+    reasoning is the count this exists for. On an empty response it separates
+    tokens billed for thinking -- the reading in which the model produced only
+    reasoning and the provider sent none of it -- from tokens that were
+    something else and went missing. Note it reads 0 on an adapter that
+    attaches no output details, which is not the same as a call that did not
+    think.
+
+    The model id comes from the message because the response is all this has;
+    a bare name misses the provider traits table and takes its defaults, which
+    is the right reading for a provider that counts thinking inside output.
+    """
+    meta = getattr(msg, "response_metadata", None) or {}
+    usage = Usage.of_call(
+        getattr(msg, "usage_metadata", None),
+        str(meta.get("model_name") or meta.get("model") or ""),
+    )
+    return (
+        f"usage=(in={usage.input} cached={usage.cache_read}"
+        f" out={usage.output} reasoning={usage.reasoning})"
+    )
 
 
 def _message_shape(msg) -> str:
@@ -768,6 +866,7 @@ def _message_shape(msg) -> str:
         f" invalid={[c.get('name') for c in msg.invalid_tool_calls or ()]}"
         f" chunks={chunks}"
         f" stop={_finish_reason(msg)}"
+        f" {_usage_shape(msg)}"
     )
 
 
@@ -781,7 +880,15 @@ def _response_shape(resp, bad) -> str:
     alone, and it would reproduce on every retry -- see the TODO above.
 
     Also reports the keys of additional_kwargs and response_metadata for the
-    matched message, where a provider puts what it could not model otherwise.
+    matched message, where a provider puts what it could not model otherwise,
+    the model that produced it (the shape has only been seen on one provider,
+    and a roster runs several), and the refusal details if any.
+
+    stop_details is Anthropic's structured refusal field. It is None on
+    everything but a refusal, and its categories include reasoning_extraction
+    -- a request to reproduce internal reasoning -- which a prompt that asks a
+    model to explain itself could plausibly trip. Only type and category are
+    reported; the explanation is free text and stays out of the log.
 
     Every expression is total. A diagnostic that raised here would turn the
     recoverable call it is describing into a dead turn.
@@ -792,9 +899,15 @@ def _response_shape(resp, bad) -> str:
     ]
     keys = ""
     if isinstance(bad, AIMessage):
+        meta = bad.response_metadata or {}
+        details = meta.get("stop_details")
+        if isinstance(details, dict):
+            details = f"({details.get('type')},{details.get('category')})"
         keys = (
+            f" model={meta.get('model_name') or meta.get('model')}"
+            f" stop_details={details}"
             f" kwargs={list(bad.additional_kwargs or ())}"
-            f" meta={list(bad.response_metadata or ())}"
+            f" meta={list(meta)}"
         )
     return f"result[{len(msgs)}]=({'; '.join(parts)}){keys}"
 
@@ -1192,36 +1305,52 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
             return None
         if state.get("structured_response") is not None:
             return None
-        if _unparsable_tool_call(last):
-            # A dropped tool call that survived _EmptyCandidateRetry's single
-            # in-place retry. Jump back to the model so the turn does not exit
-            # early, but do not increment REASKS_KEY: FinalAnswerMiddleware reads
-            # that key to close read tools when a model writes a prose conclusion
-            # instead of calling the result tool, and a stream truncation is not
-            # a prose conclusion. Bounded separately by unparsable_reasks so a
-            # broken provider cannot spin.
+        if kind := _unparsable_kind(last):
+            # An unparsable response that survived _EmptyCandidateRetry's
+            # in-place attempts. Jump back to the model so the turn does not
+            # exit early, but do not increment REASKS_KEY: FinalAnswerMiddleware
+            # reads that key to close read tools when a model writes a prose
+            # conclusion instead of calling the result tool, and a provider
+            # failure is not a prose conclusion. Bounded separately by
+            # unparsable_reasks so a broken provider cannot spin.
+            #
+            # The bound is its own, and tighter than max_reasks. That budget is
+            # sized for nudging a model that is still answering (callers set it
+            # in the hundreds, against the call cap); this one rides a provider
+            # fault where each round also spends _UNPARSABLE_RETRIES in-place
+            # attempts, so the same number would be that many times the calls
+            # on a failure no amount of asking has ever fixed.
             u = state.get("unparsable_reasks", 0)
-            if u >= self._max:
+            cap = min(self._max, _MAX_UNPARSABLE_REASKS)
+            if u >= cap:
                 log.warning(
-                    "require-result: still unparsable after %d re-asks; giving up",
+                    "require-result: unparsable[%s] after %d re-asks; giving up",
+                    kind,
                     u,
                 )
                 return None
             log.info(
-                "require-result: turn ended with unparsable tool call;"
-                " re-asking (%d/%d)",
+                "require-result: turn ended unparsable[%s]; re-asking (%d/%d) %s",
+                kind,
                 u + 1,
-                self._max,
+                cap,
+                "with the nudge" if kind == _DROPPED_CALL else "bare",
             )
-            reminder = HumanMessage(
-                _UNPARSABLE_TOOL_CALL_NUDGE.content,
-                additional_kwargs={"lc_source": _REQUIRE_RESULT_SRC},
-            )
-            return {
-                "jump_to": "model",
-                "unparsable_reasks": u + 1,
-                "messages": [reminder],
-            }
+            out: dict[str, Any] = {"jump_to": "model", "unparsable_reasks": u + 1}
+            # Same split as _retry_unparsable: a call that arrived truncated can
+            # be told to send less, and a response that arrived with nothing in
+            # it has nothing to be told. _DropEmptyResponses strips the empty
+            # AIMessage from the outgoing request, so a bare jump re-sends the
+            # prefix unchanged rather than replaying the failure back at the
+            # model.
+            if kind == _DROPPED_CALL:
+                out["messages"] = [
+                    HumanMessage(
+                        _UNPARSABLE_TOOL_CALL_NUDGE.content,
+                        additional_kwargs={"lc_source": _REQUIRE_RESULT_SRC},
+                    )
+                ]
+            return out
         n = state.get(REASKS_KEY, 0)
         if n >= self._max:
             # Exhausted the re-asks: let the turn end verdict-less (the caller

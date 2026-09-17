@@ -1947,6 +1947,34 @@ def test_the_shape_says_which_branch_matched():
     )
 
 
+def test_the_shape_reports_tokens_billed_against_an_empty_response():
+    """Output against no content is the provider dropping what it generated,
+    and reasoning says how much of it was thinking -- the reading in which an
+    empty response is a redacted one. Both are invisible in the content."""
+    from airc_core.agent import _usage_shape
+
+    bare = AIMessage(
+        content=[],
+        response_metadata={"stop_reason": "tool_use", "model_name": "claude-opus-5"},
+        usage_metadata={
+            "input_tokens": 43141,
+            "output_tokens": 32,
+            "total_tokens": 43173,
+            "input_token_details": {"cache_read": 43111},
+            "output_token_details": {"reasoning": 32},
+        },
+    )
+    assert _usage_shape(bare) == "usage=(in=43141 cached=43111 out=32 reasoning=32)"
+
+
+def test_the_usage_shape_survives_a_message_with_no_usage_at_all():
+    """It runs on a failure path, where a diagnostic that raised would turn a
+    recoverable call into a dead turn."""
+    from airc_core.agent import _usage_shape
+
+    assert "in=0" in _usage_shape(AIMessage(content=[]))
+
+
 def test_the_shape_shows_a_call_sitting_in_a_sibling_message():
     """The leading hypothesis for 69 hits and 0 recoveries: the match is on the
     first message, and the call is in the next one. Invisible if the diagnostic
@@ -2013,9 +2041,10 @@ def test_an_unaggregated_chunk_is_not_read_as_a_dropped_call():
     assert "chunks=1" in shape
 
 
-async def test_a_bare_stop_reason_retries_once_with_unparsable_flag():
-    """A stream truncated after omitted reasoning arrives with stop_reason="tool_use"
-    and no blocks or calls. It retries once with _RETRY_UNPARSABLE so the cache
+async def test_a_bare_stop_reason_re_calls_unchanged_with_the_unparsable_flag():
+    """An empty response with a tool-call stop reason is re-called with the
+    request untouched: no nudge, so nothing false is asserted to the model and
+    no instruction to shrink its reads. _RETRY_UNPARSABLE so the cache
     middleware continues serving from the cached prefix."""
     from airc_core import agent
 
@@ -2030,15 +2059,71 @@ async def test_a_bare_stop_reason_retries_once_with_unparsable_flag():
         response_metadata={"stop_reason": "tool_use"},
     )
     seen_flags = []
+    seen_messages = []
+    req = _Req(1)
 
-    async def handler(req):
+    async def handler(r):
         seen_flags.append(agent._empty_retry.get())
+        seen_messages.append(r.messages)
         return SimpleNamespace(result=[bare] if len(seen_flags) == 1 else [good])
 
-    out = await mw.awrap_model_call(_Req(1), handler)
+    out = await mw.awrap_model_call(req, handler)
     assert out.result == [good]
     assert seen_flags == [0, agent._RETRY_UNPARSABLE]
     assert agent._empty_retry.get() == 0
+    # The retry sends the same messages as the original call, and the original
+    # object at that: an exact repeat, which is a perfect cache hit.
+    assert seen_messages[1] is req.messages
+
+
+async def test_a_dropped_call_still_gets_the_nudge():
+    """The other entrance keeps it: there the model did emit a call, the
+    arguments arrived cut off, and asking for a smaller one is actionable."""
+    from airc_core import agent
+
+    mw = agent._EmptyCandidateRetry()
+    good = AIMessage(
+        content="",
+        tool_calls=[{"name": "T", "args": {}, "id": "c"}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    seen_messages = []
+
+    async def handler(r):
+        first = not seen_messages
+        seen_messages.append(r.messages)
+        return SimpleNamespace(result=[_truncated()] if first else [good])
+
+    await mw.awrap_model_call(_Req(1), handler)
+    assert len(seen_messages) == 2
+    assert "could not be parsed" in seen_messages[1][-1].content
+
+
+async def test_a_shape_change_mid_retry_switches_what_the_next_attempt_sends(
+    monkeypatch,
+):
+    """An empty response can come back truncated on the resend. The attempt
+    after it must carry the nudge, which it only does if the kind is recomputed
+    rather than fixed when the loop started."""
+    from airc_core import agent
+
+    monkeypatch.setattr(agent, "_UNPARSABLE_RETRY_DELAY", 0)
+    mw = agent._EmptyCandidateRetry()
+    bare = AIMessage(content=[], response_metadata={"stop_reason": "tool_use"})
+    seen_messages = []
+
+    async def handler(r):
+        first = not seen_messages
+        seen_messages.append(r.messages)
+        # Call 1 empty, retry 1 truncated, retry 2 truncated again.
+        return SimpleNamespace(result=[bare] if first else [_truncated()])
+
+    await mw.awrap_model_call(_Req(1), handler)
+    assert len(seen_messages) == 1 + agent._UNPARSABLE_RETRIES
+    # Attempt 1 answered the empty response: bare. Attempt 2 answered the
+    # truncated call that came back: nudged.
+    assert "could not be parsed" not in str(seen_messages[1][-1].content)
+    assert "could not be parsed" in str(seen_messages[2][-1].content)
 
 
 async def test_a_second_truncation_gets_a_second_in_place_attempt(monkeypatch):
@@ -2139,10 +2224,10 @@ async def test_vertex_cache_serves_cached_on_unparsable_retry_and_uncached_on_em
     assert st.seen_len == 2
 
 
-def test_require_result_reasks_unparsable_without_charging_prose_reasks():
-    """A dropped tool call that survived the in-place retry re-asks with the
-    unparsable nudge and leaves REASKS_KEY untouched, so FinalAnswerMiddleware
-    does not close read tools."""
+def test_require_result_reasks_a_dropped_call_with_the_nudge():
+    """A truncated call that survived the in-place attempts re-asks WITH the
+    nudge -- its premise is true there -- and leaves REASKS_KEY untouched, so
+    FinalAnswerMiddleware does not close read tools."""
     from airc_core.agent import (
         REASKS_KEY,
         FinalAnswerMiddleware,
@@ -2156,9 +2241,7 @@ def test_require_result_reasks_unparsable_without_charging_prose_reasks():
         refusal="refused",
         close_after_reasks=1,
     )
-    bare = AIMessage(content=[], response_metadata={"stop_reason": "tool_use"})
-
-    state = {"messages": [HumanMessage("go"), bare]}
+    state = {"messages": [HumanMessage("go"), _truncated()]}
     out1 = mw.after_model(state, None)
     assert out1 is not None and out1["jump_to"] == "model"
     assert REASKS_KEY not in out1
@@ -2170,12 +2253,47 @@ def test_require_result_reasks_unparsable_without_charging_prose_reasks():
     assert not final._closed(completed=4, state=state)
 
     # Bounded at max_reasks so a permanently broken provider cannot spin.
-    state["messages"].append(bare)
+    state["messages"].append(_truncated())
     out2 = mw.after_model(state, None)
     assert out2 is not None and out2["unparsable_reasks"] == 2
     state.update(out2)
-    state["messages"].append(bare)
+    state["messages"].append(_truncated())
     assert mw.after_model(state, None) is None
+
+
+def test_require_result_reasks_an_empty_response_without_a_message():
+    """The regression this split exists for. An empty response carries no
+    truncated call, so it jumps back bare: telling a reviewer its arguments
+    arrived cut off and asking for a smaller call would be false, and the
+    instruction costs read depth."""
+    from airc_core.agent import REASKS_KEY, RequireStructuredResultMiddleware
+
+    mw = RequireStructuredResultMiddleware("prose reminder", max_reasks=2)
+    bare = AIMessage(content=[], response_metadata={"stop_reason": "tool_use"})
+
+    out = mw.after_model({"messages": [HumanMessage("go"), bare]}, None)
+    assert out is not None and out["jump_to"] == "model"
+    assert out["unparsable_reasks"] == 1
+    assert REASKS_KEY not in out
+    assert "messages" not in out  # nothing appended, so the prefix is unchanged
+
+
+def test_unparsable_reasks_are_capped_below_a_large_prose_budget():
+    """max_reasks is set in the hundreds for prose. An unparsable response must
+    not inherit that: each round also spends the in-place attempts."""
+    from airc_core import agent
+
+    mw = agent.RequireStructuredResultMiddleware("prose reminder", max_reasks=150)
+    bare = AIMessage(content=[], response_metadata={"stop_reason": "tool_use"})
+    state = {"messages": [HumanMessage("go"), bare]}
+
+    seen = 0
+    while (out := mw.after_model(state, None)) is not None:
+        seen += 1
+        state.update(out)
+        state["messages"].append(bare)
+        assert seen <= agent._MAX_UNPARSABLE_REASKS  # would spin at 150
+    assert seen == agent._MAX_UNPARSABLE_REASKS
 
 
 async def test_a_successful_call_costs_exactly_one_model_call():
