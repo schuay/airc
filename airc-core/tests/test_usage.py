@@ -42,9 +42,9 @@ def test_anthropic_call_reads_the_split_cache_write_keys():
         1_000,
     )
     assert u.uncached == 1_000 and u.hit_pct == 80
-    assert u.usd == pytest.approx(
-        (1000 * 5 + 8000 * 0.5 + 1000 * 6.25 + 500 * 25) / 1e6
-    )
+    assert u.usd_input == pytest.approx((1000 * 5 + 8000 * 0.5 + 1000 * 6.25) / 1e6)
+    assert u.usd_output == pytest.approx(500 * 25 / 1e6)
+    assert u.usd == pytest.approx(u.usd_input + u.usd_output)
     assert not u.estimated
 
 
@@ -129,7 +129,10 @@ def test_line_leads_with_cost_and_marks_an_estimate():
     )
     line = u.line()
     assert line.startswith("$") and " over 1 call: " in line
-    assert "412k in (93% cached, 12k written), 8k out (5k thinking)" in line
+    assert (
+        "412k in ($0.35, 93% cached, 12k written), 8k out ($0.20, 5k thinking)" in line
+    )
+    assert line == f"{u.cost()} over 1 call: {u.shape()}"
     est = Usage.of_call({"input_tokens": 10, "output_tokens": 1}, "deepseek:x")
     assert est.line().startswith("~$")
 
@@ -176,7 +179,8 @@ def test_collector_books_calls_and_routes_summarization_aside(caplog):
     assert c.aside.calls == 1 and c.aside.model == "google_vertexai:gemini-3.8-flash"
     assert c.aside.usd == pytest.approx((50_000 * 0.75 + 2_000 * 3.75) / 1e6)
     assert c._shape == {} and c._aside_model == {}
-    assert "call perf/turn #1: $" in caplog.text
+    # The per-call line carries the call's own cost and the turn's so far.
+    assert "call perf/turn #1: $0.01 (turn $0.01): 1k in ($0.01" in caplog.text
     assert "1 tool results (40 chars)" in caplog.text
 
 

@@ -42,26 +42,29 @@ def test_gemini_pro_tier_switches_on_the_calls_own_prompt():
     assert p.rate_for(200_000) is p.rate
     assert p.rate_for(200_001) is p.long_context[1]
     # 100k uncached input below the tier costs 100k * $2/M.
-    assert p.cost(prompt_tokens=100_000) == pytest.approx(0.2)
+    assert p.cost(prompt_tokens=100_000).total == pytest.approx(0.2)
     # The same tokens as part of a 300k prompt cost the higher rate.
-    assert p.cost(prompt_tokens=300_000) == pytest.approx(300_000 * 4.0 / 1e6)
+    assert p.cost(prompt_tokens=300_000).total == pytest.approx(300_000 * 4.0 / 1e6)
 
 
 def test_cost_bills_each_part_at_its_own_rate():
     p = price_for("anthropic:claude-opus-5")
     # 1000 uncached + 8000 read + 1000 written (5m) + 500 out.
-    usd = p.cost(
+    cost = p.cost(
         prompt_tokens=10_000, cache_read=8_000, cache_write_5m=1_000, output=500
     )
-    expect = (1000 * 5 + 8000 * 0.5 + 1000 * 6.25 + 500 * 25) / 1e6
-    assert usd == pytest.approx(expect)
+    assert cost.input == pytest.approx((1000 * 5 + 8000 * 0.5 + 1000 * 6.25) / 1e6)
+    assert cost.output == pytest.approx(500 * 25 / 1e6)
+    assert cost.total == pytest.approx(cost.input + cost.output)
 
 
 def test_cost_never_bills_negative_uncached_input():
     """Reads and writes are subsets of the prompt, but a provider that
     reports them inconsistently must not turn into a credit."""
     p = price_for("anthropic:claude-opus-5")
-    assert p.cost(prompt_tokens=100, cache_read=200) == pytest.approx(200 * 0.5 / 1e6)
+    assert p.cost(prompt_tokens=100, cache_read=200).total == pytest.approx(
+        200 * 0.5 / 1e6
+    )
 
 
 def test_storage_is_billed_by_token_hour():
@@ -69,6 +72,5 @@ def test_storage_is_billed_by_token_hour():
     p = price_for("google_vertexai:gemini-3.1-pro-preview")
     assert p.rate.cache_storage_hour == r.cache_storage_hour
     # 1M tokens held for half an hour at $4.50 per M-token-hour.
-    assert p.cost(prompt_tokens=0, cache_storage_token_hours=500_000) == pytest.approx(
-        2.25
-    )
+    cost = p.cost(prompt_tokens=0, cache_storage_token_hours=500_000)
+    assert (cost.input, cost.output) == (pytest.approx(2.25), 0.0)

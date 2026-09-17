@@ -43,6 +43,21 @@ class Rate(BaseModel):
     cache_storage_hour: float = 0.0
 
 
+class Cost(BaseModel):
+    """USD for one call, split by what was billed: everything on the prompt
+    side (uncached input, cache reads and writes, explicit-cache storage)
+    against the output side (output, thinking included)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input: float = 0.0
+    output: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return self.input + self.output
+
+
 class Price(BaseModel):
     """One model's listing: a rate, and optionally a second rate past a prompt
     size (Gemini Pro bills everything at a higher rate once the prompt exceeds
@@ -73,20 +88,20 @@ class Price(BaseModel):
         cache_write_1h: int = 0,
         output: int = 0,
         cache_storage_token_hours: float = 0.0,
-    ) -> float:
-        """USD for one call. `prompt_tokens` is the whole prompt as the provider
-        counts it, cache reads and writes included; the uncached remainder is
-        billed at the input rate."""
+    ) -> Cost:
+        """What one call cost. `prompt_tokens` is the whole prompt as the
+        provider counts it, cache reads and writes included; the uncached
+        remainder is billed at the input rate."""
         r = self.rate_for(prompt_tokens)
         uncached = max(0, prompt_tokens - cache_read - cache_write_5m - cache_write_1h)
-        return (
+        prompt_side = (
             uncached * r.input
             + cache_read * r.cache_read
             + cache_write_5m * r.cache_write_5m
             + cache_write_1h * r.cache_write_1h
-            + output * r.output
             + cache_storage_token_hours * r.cache_storage_hour
-        ) / _MILLION
+        )
+        return Cost(input=prompt_side / _MILLION, output=output * r.output / _MILLION)
 
 
 _READ = date(2026, 9, 17)

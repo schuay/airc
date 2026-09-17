@@ -112,14 +112,17 @@ class UsageCollector(BaseCallbackHandler):
         call = Usage.of_call(usage, self._model_id)
         self.total = self.total + call
         n_msgs, n_tool, tool_chars = self._shape.pop(run_id, (0, 0, 0))
-        # Per call, so the growth curve within a turn is visible: the prompt
-        # size, its hit rate and what that one call cost.
+        # Per call, so the growth curve within a turn is visible: what this
+        # call cost and what the turn has cost so far, then the prompt's size
+        # and hit rate.
         log.info(
-            "call %s/%s #%d: %s; %d msgs, %d tool results (%d chars)",
+            "call %s/%s #%d: %s (turn %s): %s; %d msgs, %d tool results (%d chars)",
             self._agent,
             self._kind,
             self.total.calls,
-            call.line(),
+            call.cost(),
+            self.total.cost(),
+            call.shape(),
             n_msgs,
             n_tool,
             tool_chars,

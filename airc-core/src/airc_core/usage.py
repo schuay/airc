@@ -60,6 +60,12 @@ class Usage(BaseModel):
     # Explicit-cache storage booked by the cache middleware at creation:
     # tokens held times the TTL in hours. Zero on every model call.
     cache_storage_token_hours: float = 0.0
+    # Dollars, split by side: the prompt (uncached input, cache reads and
+    # writes, explicit-cache storage) and the output (thinking included).
+    # `usd` is their sum, stored rather than derived so a row or a payload
+    # reads as one number without arithmetic.
+    usd_input: float = 0.0
+    usd_output: float = 0.0
     usd: float = 0.0
     estimated: bool = False
 
@@ -73,20 +79,32 @@ class Usage(BaseModel):
         5m write. Vertex Gemini reports thoughts apart from output_tokens
         (providers.py reasoning_in_output).
         """
+        # The detail dicts and their keys are optional per adapter, and a key
+        # that is present may hold None: Anthropic attaches no output details
+        # and drops a None cache field; Vertex Gemini attaches output details
+        # only on a call that thought; OpenAI passes reasoning_tokens through
+        # as None when the API omitted it. `_count` reads all of those as 0.
         u = usage_metadata or {}
         details = u.get("input_token_details") or {}
         out_details = u.get("output_token_details") or {}
-        prompt = int(u.get("input_tokens") or 0)
-        cache_read = int(details.get("cache_read") or 0)
-        write_5m = int(details.get("ephemeral_5m_input_tokens") or 0)
-        write_1h = int(details.get("ephemeral_1h_input_tokens") or 0)
+        prompt = _count(u, "input_tokens")
+        cache_read = _count(details, "cache_read")
+        write_5m = _count(details, "ephemeral_5m_input_tokens")
+        write_1h = _count(details, "ephemeral_1h_input_tokens")
         if not write_5m and not write_1h:
-            write_5m = int(details.get("cache_creation") or 0)
-        reasoning = int(out_details.get("reasoning") or 0)
-        output = int(u.get("output_tokens") or 0)
+            write_5m = _count(details, "cache_creation")
+        reasoning = _count(out_details, "reasoning")
+        output = _count(u, "output_tokens")
         if not traits_for(model_id).reasoning_in_output:
             output += reasoning
         price = price_for(model_id)
+        cost = price.cost(
+            prompt_tokens=prompt,
+            cache_read=cache_read,
+            cache_write_5m=write_5m,
+            cache_write_1h=write_1h,
+            output=output,
+        )
         return cls(
             model=model_id,
             calls=1,
@@ -97,13 +115,9 @@ class Usage(BaseModel):
             output=output,
             reasoning=reasoning,
             max_call_input=prompt,
-            usd=price.cost(
-                prompt_tokens=prompt,
-                cache_read=cache_read,
-                cache_write_5m=write_5m,
-                cache_write_1h=write_1h,
-                output=output,
-            ),
+            usd_input=cost.input,
+            usd_output=cost.output,
+            usd=cost.total,
             estimated=price.generic,
         )
 
@@ -114,11 +128,13 @@ class Usage(BaseModel):
         stays zero and the ledger row carries only the cost."""
         price = price_for(model_id)
         token_hours = tokens * ttl_hours
+        cost = price.cost(prompt_tokens=tokens, cache_storage_token_hours=token_hours)
         return cls(
             model=model_id,
             input=tokens,
             cache_storage_token_hours=token_hours,
-            usd=price.cost(prompt_tokens=tokens, cache_storage_token_hours=token_hours),
+            usd_input=cost.input,
+            usd=cost.total,
             estimated=price.generic,
         )
 
@@ -148,6 +164,8 @@ class Usage(BaseModel):
             max_call_input=max(self.max_call_input, other.max_call_input),
             cache_storage_token_hours=self.cache_storage_token_hours
             + other.cache_storage_token_hours,
+            usd_input=self.usd_input + other.usd_input,
+            usd_output=self.usd_output + other.usd_output,
             usd=self.usd + other.usd,
             estimated=self.estimated or other.estimated,
         )
@@ -165,21 +183,36 @@ class Usage(BaseModel):
     def hit_pct(self) -> int:
         return round(100 * self.cache_read / self.input) if self.input else 0
 
-    def line(self) -> str:
-        """One log line: the cost first, then the shape that produced it.
+    def cost(self, usd: float | None = None) -> str:
+        """Dollars to the cent, a tilde marking an estimate. `usd` renders one
+        part of this usage's cost with the same marking."""
+        return f"{'~' if self.estimated else ''}${self.usd if usd is None else usd:.2f}"
 
-        "$1.84 over 37 calls: 412k in (93% cached, 12k written), 8k out
-        (5k thinking)". A tilde marks an estimate.
+    def shape(self) -> str:
+        """The tokens and what each side cost:
+        "412k in ($0.61, 93% cached, 12k written), 8k out ($1.23, 5k thinking)".
         """
-        usd = f"{'~' if self.estimated else ''}${self.usd:.2f}"
-        parts = [f"{_k(self.input)} in ({self.hit_pct}% cached"]
+        parts = [
+            f"{_k(self.input)} in ({self.cost(self.usd_input)}, {self.hit_pct}% cached"
+        ]
         if self.cache_write:
             parts.append(f", {_k(self.cache_write)} written")
-        parts.append(f"), {_k(self.output)} out")
+        parts.append(f"), {_k(self.output)} out ({self.cost(self.usd_output)}")
         if self.reasoning:
-            parts.append(f" ({_k(self.reasoning)} thinking)")
+            parts.append(f", {_k(self.reasoning)} thinking")
+        parts.append(")")
+        return "".join(parts)
+
+    def line(self) -> str:
+        """One log line: the cost first, then the shape that produced it.
+        "$1.84 over 37 calls: 412k in ($0.61, 93% cached, 12k written), 8k out
+        ($1.23, 5k thinking)"."""
         calls = f"{self.calls} call{'s' if self.calls != 1 else ''}"
-        return f"{usd} over {calls}: {''.join(parts)}"
+        return f"{self.cost()} over {calls}: {self.shape()}"
+
+
+def _count(mapping: Mapping[str, Any], key: str) -> int:
+    return int(mapping.get(key) or 0)
 
 
 def _k(n: int) -> str:

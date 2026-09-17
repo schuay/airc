@@ -68,7 +68,11 @@ CREATE TABLE IF NOT EXISTS token_usage (
     -- What the row cost at the price in force when it was written. estimated
     -- marks a model priced at the generic fallback rate.
     usd REAL NOT NULL DEFAULT 0,
-    estimated INTEGER NOT NULL DEFAULT 0
+    estimated INTEGER NOT NULL DEFAULT 0,
+    -- The same dollars split by side: prompt (input, cache reads and writes,
+    -- storage) against output (thinking included).
+    usd_input REAL NOT NULL DEFAULT 0,
+    usd_output REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_thread ON token_usage(thread_id);
 """
@@ -86,6 +90,8 @@ _ADDED_COLUMNS = (
     ("cache_storage_token_hours", "REAL NOT NULL DEFAULT 0"),
     ("usd", "REAL NOT NULL DEFAULT 0"),
     ("estimated", "INTEGER NOT NULL DEFAULT 0"),
+    ("usd_input", "REAL NOT NULL DEFAULT 0"),
+    ("usd_output", "REAL NOT NULL DEFAULT 0"),
 )
 
 
@@ -144,8 +150,8 @@ class TokenLog:
                 "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
                 " output_tokens, cached_input_tokens, model, model_calls,"
                 " max_call_input_tokens, cache_write_tokens, reasoning_tokens,"
-                " cache_storage_token_hours, usd, estimated)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " cache_storage_token_hours, usd, estimated, usd_input, usd_output)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     thread_id,
@@ -162,6 +168,8 @@ class TokenLog:
                     usage.cache_storage_token_hours,
                     usage.usd,
                     int(usage.estimated),
+                    usage.usd_input,
+                    usage.usd_output,
                 ),
             )
             self._db.commit()
