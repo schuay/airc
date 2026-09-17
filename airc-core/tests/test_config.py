@@ -322,3 +322,20 @@ def test_unpriced_model_is_named_at_load(caplog):
         )
     assert caplog.text.count("has no price listing") == 1
     assert "filter = deepseek:deepseek-chat" in caplog.text
+
+
+def test_enabling_the_explicit_vertex_cache_is_said_at_load(caplog):
+    """The explicit Vertex cache path has been inactive since 2026-09 and its
+    cost rule still carries a hand-tuned ratio; a config that would run it is
+    named once per model at startup, and only when caching is explicit."""
+    import logging
+
+    raw = {"models": {"default": "google_vertexai:gemini-3.1-pro-preview"}}
+    with caplog.at_level(logging.WARNING, logger="airc_core.config"):
+        load_common(raw)
+    assert caplog.text.count("explicit Vertex context cache") == 1
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="airc_core.config"):
+        load_common(raw | {"caching": {"explicit": False}})
+        load_common({"models": {"default": "google_anthropic_vertex:claude-opus-5"}})
+    assert "explicit Vertex context cache" not in caplog.text

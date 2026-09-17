@@ -2196,3 +2196,13 @@ async def test_a_successful_call_costs_exactly_one_model_call():
     out = await mw.awrap_model_call(_Req(1), handler)
     assert out.result == [good]
     assert len(seen) == 1  # no retry: no second call, no false nudge
+
+
+def test_the_anthropic_mark_advances_on_every_call_but_the_last():
+    """At every listed price a 5m write is repaid by one later read, so the
+    only brake is the turn ending: calls_left counts the call being made."""
+    from airc_core.agent import _advance_pays
+
+    assert _advance_pays(0, 10) == (False, "no growth")
+    assert _advance_pays(5000, 1) == (False, "turn ending")
+    assert [_advance_pays(5000, n)[0] for n in (2, 3, 50)] == [True, True, True]

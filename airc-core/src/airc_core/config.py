@@ -387,7 +387,31 @@ def load_common(raw: Mapping) -> CommonConfig:
         reject_unknown(caching, {"explicit", "ttl_minutes"}, "[caching]")
         cfg.caching_explicit = bool(caching.get("explicit", True))
         cfg.cache_ttl_minutes = int(caching.get("ttl_minutes", 30))
+    _warn_explicit_vertex_cache(cfg)
     return cfg
+
+
+def _warn_explicit_vertex_cache(cfg: CommonConfig) -> None:
+    """Say loudly, at load, when a config would run the explicit Vertex
+    context cache: a google_vertexai model with [caching] explicit on (the
+    default). That path has been inactive since 2026-09 and its cost rule
+    still carries a read-price ratio tuned by hand rather than read from the
+    price table (agent.py _CACHE_READ_RATIO); enabling it again means
+    checking that rule first. A warning rather than a refusal because a
+    google_vertexai entry may serve a role that never builds an agent graph.
+    """
+    if not cfg.caching_explicit:
+        return
+    for key, model_id in cfg.models.items():
+        if model_id.startswith("google_vertexai:"):
+            log.warning(
+                "[models] %s = %s with [caching] explicit on would run the"
+                " explicit Vertex context cache, inactive since 2026-09; its cost"
+                " rule predates the price table and must be re-checked before"
+                " this deploy relies on it (agent.py _CACHE_READ_RATIO)",
+                key,
+                model_id,
+            )
 
 
 def apply_gcp_env_defaults(gcp: Mapping[str, str]) -> None:

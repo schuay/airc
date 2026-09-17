@@ -2013,8 +2013,15 @@ def base_middleware(
 
 # Vertex bills cache creation at the full input rate and cached reads at a
 # fraction of it, so a re-cache re-buys the ENTIRE prefix to move only the tail
-# behind the boundary. Both models we run price reads at 10% of input
-# (gemini-3.6-flash $0.15/$1.50, gemini-3.1-pro-preview $0.20/$2.00).
+# behind the boundary. The Gemini models this was tuned on priced reads at 10%
+# of input.
+#
+# TODO(jgruber): this is a price outside airc_core.pricing, and the only one.
+# The explicit Vertex cache has been inactive since 2026-09 (no google_vertexai
+# model configured), so it stays as the number it was tuned with. If the path
+# is enabled again, derive it from price_for(model_id).rate (cache_read over
+# input) at _GrowingPrefixCache construction and check the horizon rule below
+# against the listed rates; load_common warns when a config would enable it.
 _CACHE_READ_RATIO = 0.1
 # The cache serves its FULL prefix (ContextBudget cannot shed inside an immutable
 # cache), so cap the cached prefix, and serve uncached if prefix+tail would
@@ -2065,11 +2072,6 @@ def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: 
     return True, "due"
 
 
-# What Anthropic adds to a token for writing it into the cache, over sending it
-# uncached: a write is 1.25x base input against 1.0x for plain input.
-_CACHE_WRITE_PREMIUM = 0.25
-
-
 def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
     """Whether to move an Anthropic breakpoint onto `delta` new tokens.
     Returns (due, reason) -- reason for the log.
@@ -2085,10 +2087,13 @@ def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
 
     So there is no prefix to re-buy and no cadence to optimize. Advancing costs
     the write premium on the delta and saves (1 - read rate) * delta on every
-    later call of the turn, which one further call repays several times over.
-    The only losing case is a turn that ends immediately after. `calls_left`
-    counts the call being made, so the brake fires when it is 1: the write
-    would be paid and nothing would read it.
+    later call of the turn. At every listed price the premium is below what a
+    single read saves (a 5m write is 1.25x input against a read at 0.1x or
+    less), so one further call repays it and the rule needs no rate: the only
+    losing case is a turn that ends immediately after. `calls_left` counts the
+    call being made, so the brake fires when it is 1: the write would be paid
+    and nothing would read it. A 1h write (2x) would want the brake one call
+    earlier; the TTL is fixed at 5m (_ANTHROPIC_CACHE_TTL).
 
     The older prefix is found by Anthropic's lookback from the new mark, which
     reaches at most 20 positions back (a run of tool_use blocks is one
@@ -2105,7 +2110,7 @@ def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
     """
     if delta <= 0:
         return False, "no growth"
-    if (calls_left - 1) * (1 - _CACHE_READ_RATIO) <= _CACHE_WRITE_PREMIUM:
+    if calls_left <= 1:
         return False, "turn ending"
     return True, "due"
 
