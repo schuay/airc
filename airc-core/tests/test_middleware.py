@@ -222,14 +222,19 @@ def test_short_error_keeps_the_cause_of_a_permanent_400():
 
 class _Req:
     """Minimal ModelRequest stand-in for the call-budget middleware: a per-turn
-    model_calls count, messages, and override(messages=)."""
+    model_calls count, messages, model, and override(messages=, model=)."""
 
-    def __init__(self, model_calls: int, messages=None):
+    def __init__(self, model_calls: int, messages=None, model=None):
         self.state = {"model_calls": model_calls}
         self.messages = messages or [HumanMessage("hi")]
+        self.model = model
 
-    def override(self, *, messages):
-        return _Req(self.state["model_calls"], messages)
+    def override(self, *, messages=None, model=None):
+        return _Req(
+            self.state["model_calls"],
+            self.messages if messages is None else messages,
+            self.model if model is None else model,
+        )
 
 
 async def _appended(mw, n):
@@ -1231,10 +1236,13 @@ def test_keep_is_token_based_and_tuning_invariants_hold(middleware_with_summariz
 
 
 class _RaisingModel:
-    """A summarizer whose invoke always fails, with the one attribute
+    """A summarizer whose invoke always fails, with the attributes
     SummarizationMiddleware inspects at construction."""
 
     _llm_type = "chat-fake"
+
+    def with_retry(self, *a, **k):
+        return self
 
     async def ainvoke(self, *a, **k):
         raise RuntimeError("boom")
@@ -1255,12 +1263,8 @@ async def test_summary_failure_keeps_history_instead_of_replacing_it():
     ]
     state = {"messages": list(msgs)}
 
-    # Stock middleware swallows the error and returns a mutation that replaces the
-    # history with the exception text -- the failure mode we are guarding against.
-    stock = await SummarizationMiddleware(**cfg).abefore_model(state, None)
-    assert stock is not None
-
-    # Our subclass instead skips: no state mutation, history left intact.
+    # _SkipOnSummaryFailure catches any summarizer failure and returns None:
+    # no exception escapes and no state mutation replaces the history.
     safe = await _SkipOnSummaryFailure(**cfg).abefore_model(state, None)
     assert safe is None
 
@@ -2009,28 +2013,124 @@ def test_an_unaggregated_chunk_is_not_read_as_a_dropped_call():
     assert "chunks=1" in shape
 
 
-async def test_a_bare_stop_reason_costs_no_call_and_keeps_the_response():
-    """69 hits, 0 recoveries. Retrying it spent a call and threw the original
-    response away -- which loses a call sitting in a sibling message."""
+async def test_a_bare_stop_reason_retries_once_with_unparsable_flag():
+    """A stream truncated after omitted reasoning arrives with stop_reason="tool_use"
+    and no blocks or calls. It retries once with _RETRY_UNPARSABLE so the cache
+    middleware continues serving from the cached prefix."""
     from airc_core import agent
 
     mw = agent._EmptyCandidateRetry()
-    thinking = AIMessage(
-        content=[{"type": "thinking", "thinking": "..."}],
+    bare = AIMessage(
+        content=[],
         response_metadata={"stop_reason": "tool_use"},
     )
-    resp = SimpleNamespace(result=[thinking])
-    calls = 0
+    good = AIMessage(
+        content="",
+        tool_calls=[{"name": "T", "args": {}, "id": "c"}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    seen_flags = []
 
     async def handler(req):
-        nonlocal calls
-        calls += 1
-        return resp
+        seen_flags.append(agent._empty_retry.get())
+        return SimpleNamespace(result=[bare] if len(seen_flags) == 1 else [good])
 
     out = await mw.awrap_model_call(_Req(1), handler)
-    assert calls == 1  # no retry
-    assert out is resp  # and the original response, not a replacement
+    assert out.result == [good]
+    assert seen_flags == [0, agent._RETRY_UNPARSABLE]
     assert agent._empty_retry.get() == 0
+
+
+async def test_vertex_cache_serves_cached_on_unparsable_retry_and_uncached_on_empty():
+    """_RETRY_EMPTY steps aside from the cached prefix; _RETRY_UNPARSABLE keeps
+    serving from st.name while skipping seen_len and recache bookkeeping."""
+    from airc_core import agent
+
+    async def _noop_async(*a):
+        return "c1"
+
+    mw = agent._GrowingPrefixCache(
+        _noop_async,
+        _noop_async,
+        lambda n: f"M:{n}",
+        SystemMessage("sys"),
+        5000,
+        max_calls=70,
+    )
+    st = agent._PrefixState(
+        name="caches/c1",
+        model="cached-model",
+        boundary=1,
+        prefix_tokens=1000,
+        seen_len=2,
+    )
+    mw._states[None] = st
+    req = _Req(
+        1, messages=[HumanMessage("m0"), HumanMessage("m1"), HumanMessage("nudge")]
+    )
+    seen_models = []
+
+    async def handler(r):
+        seen_models.append(getattr(r, "model", None))
+        return SimpleNamespace(result=[AIMessage("ok")])
+
+    # Empty candidate retry (_RETRY_EMPTY): steps aside, serves uncached.
+    agent._empty_retry.set(agent._RETRY_EMPTY)
+    try:
+        await mw.awrap_model_call(req, handler)
+    finally:
+        agent._empty_retry.set(0)
+    assert seen_models[-1] is None
+    assert st.seen_len == 2
+
+    # Unparsable tool call retry (_RETRY_UNPARSABLE): serves from cached model
+    # without advancing seen_len to include the ephemeral nudge.
+    agent._empty_retry.set(agent._RETRY_UNPARSABLE)
+    try:
+        await mw.awrap_model_call(req, handler)
+    finally:
+        agent._empty_retry.set(0)
+    assert seen_models[-1] == "cached-model"
+    assert st.seen_len == 2
+
+
+def test_require_result_reasks_unparsable_without_charging_prose_reasks():
+    """A dropped tool call that survived the in-place retry re-asks with the
+    unparsable nudge and leaves REASKS_KEY untouched, so FinalAnswerMiddleware
+    does not close read tools."""
+    from airc_core.agent import (
+        REASKS_KEY,
+        FinalAnswerMiddleware,
+        RequireStructuredResultMiddleware,
+    )
+
+    mw = RequireStructuredResultMiddleware("prose reminder", max_reasks=2)
+    final = FinalAnswerMiddleware(
+        max_calls=150,
+        notice="closed",
+        refusal="refused",
+        close_after_reasks=1,
+    )
+    bare = AIMessage(content=[], response_metadata={"stop_reason": "tool_use"})
+
+    state = {"messages": [HumanMessage("go"), bare]}
+    out1 = mw.after_model(state, None)
+    assert out1 is not None and out1["jump_to"] == "model"
+    assert REASKS_KEY not in out1
+    assert out1["unparsable_reasks"] == 1
+    assert "could not be parsed" in out1["messages"][0].content
+
+    # Read tools remain open because REASKS_KEY is still 0.
+    state.update(out1)
+    assert not final._closed(completed=4, state=state)
+
+    # Bounded at max_reasks so a permanently broken provider cannot spin.
+    state["messages"].append(bare)
+    out2 = mw.after_model(state, None)
+    assert out2 is not None and out2["unparsable_reasks"] == 2
+    state.update(out2)
+    state["messages"].append(bare)
+    assert mw.after_model(state, None) is None
 
 
 async def test_a_successful_call_costs_exactly_one_model_call():

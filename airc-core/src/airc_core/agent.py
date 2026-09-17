@@ -374,11 +374,15 @@ _RETRY_MAX_DELAY = 60.0
 
 
 # Set by _EmptyCandidateRetry for the duration of its one mutated retry, read by
-# _GrowingPrefixCache (nested inside it) to step aside for that call, and by
-# CallBudgetMiddleware to suppress a second nudge. A contextvar rather than an
-# argument because the middlewares do not see each other: they communicate only
-# through the request, which the cache must not have to interpret. All three run
-# in one task chain per model call, so the value is visible where it is read.
+# the cache middlewares (nested inside it) and by CallBudgetMiddleware /
+# FinalAnswerMiddleware to suppress a second nudge or notice. Two non-zero values:
+# _RETRY_EMPTY (1) steps aside from the Vertex cached content resource because a
+# zero-part STOP candidate is deterministic on cached prefixes; _RETRY_UNPARSABLE (2)
+# keeps serving from the cache because a truncated tool-call stream is a transient
+# output flake, while still suppressing cache-mark advancement and duplicate
+# ephemeral notices on the mutated request.
+_RETRY_EMPTY = 1
+_RETRY_UNPARSABLE = 2
 _empty_retry: contextvars.ContextVar[int] = contextvars.ContextVar(
     "airc_empty_candidate_retries", default=0
 )
@@ -736,7 +740,7 @@ class _EmptyCandidateRetry(AgentMiddleware):
         # the poison is in the message history. Bounded: one mutated retry, then
         # surface. Raises EmptyCandidateError (not retryable) so it propagates
         # to the harness as a named dead turn.
-        _empty_retry.set(1)
+        _empty_retry.set(_RETRY_EMPTY)
         log.warning(
             "empty candidate (finish_reason=%s); retrying once uncached with a"
             " nudge to force output",
@@ -757,41 +761,25 @@ class _EmptyCandidateRetry(AgentMiddleware):
         """One retry of a tool call whose arguments did not parse, then hand the
         response back rather than raising.
 
-        Only a call langchain recorded as bad is retried, because that is the
-        only case the nudge below describes truthfully. Any other way into
-        _unparsable_tool_call -- today just a stop reason saying "tool_use" with
-        no call of either kind behind it -- is reported and left alone: see the
-        TODO on the predicate for the evidence (69 hits, 0 recoveries) and for
-        why spending a call on it is worse than nothing. Leaving the response
-        untouched also stops the retry DISCARDING it, which would matter if the
-        call we could not find were sitting in a sibling message.
-
+        Covers both a call langchain recorded in invalid_tool_calls and a bare
+        tool-call stop reason with no call behind it (e.g. a stream truncated
+        at the boundary between an omitted thinking block and the tool call).
         Not EmptyCandidateError: that names a different failure, _is_retryable
-        rejects it by type, and the one consumer logs it as a dead turn. A
-        dropped tool call is not a dead turn -- for a ToolStrategy agent it
-        reads as a turn that produced no tool call, which
-        RequireStructuredResultMiddleware already re-asks, so returning the
-        response puts it back on a recovery path that works.
+        rejects it by type, and its consumer logs a dead turn. A dropped tool
+        call is not a dead turn -- if the retry also fails,
+        RequireStructuredResultMiddleware re-asks without charging the prose
+        re-ask budget.
 
-        _empty_retry is set for the same reason the zero-part path sets it: the
-        inner middlewares re-run on this second handler call and would append
-        their nudges and pointers a second time. The growing cache steps aside
-        on the same flag, which for a truncation buys nothing -- the prefix did
-        not cause it -- and costs one uncached send. Accepted rather than split
-        into two flags: one full-price call against a lost turn.
+        _empty_retry is set to _RETRY_UNPARSABLE so inner middlewares do not
+        append their ephemeral nudges or advance cache marks into the nudge
+        tail, while VertexContextCacheMiddleware continues serving from the
+        existing cached prefix instead of paying an uncached resend.
         """
         bad = _first_unparsable_tool_call(resp)
-        if not bad.invalid_tool_calls:
-            log.warning(
-                "tool-call stop reason with no call behind it; leaving the"
-                " response alone: %s",
-                _response_shape(resp, bad),
-            )
-            return resp
         log.warning(
             "unparsable tool call; retrying once: %s", _response_shape(resp, bad)
         )
-        _empty_retry.set(1)
+        _empty_retry.set(_RETRY_UNPARSABLE)
         try:
             resp2 = await handler(
                 request.override(
@@ -845,51 +833,15 @@ _EMPTY_NUDGE = HumanMessage(
 _TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
 
 
-# TODO(2026-09-16): decide whether the stop-reason branch below over-matches,
-# and delete it if it does. Since it landed on 09-15 it has fired 69 times,
-# every one with invalid_tool_calls empty -- so always via the stop reason,
-# never via a call langchain recorded as bad -- and the retry it used to trigger
-# recovered 0 of the 69. That retry is now gated on recorded evidence, so the
-# branch costs nothing but a warning; what remains is to say what it is seeing.
-#
-# Readings, ordered by what the response structure actually admits.
-# ModelResponse.result is documented as a single AIMessage, plus at most a
-# ToolMessage when the model used a tool for structured output, and
-# _first_unparsable_tool_call scans only AIMessages. So expect one message, and
-# read its blocks:
-#   blocks=['tool_use']       the call is in content and langchain did not lift
-#                             it into tool_calls -- an adapter problem, and the
-#                             predicate is right to flag it.
-#   blocks=['thinking'] or [] nothing but reasoning came back. Check first
-#                             whether we stripped it ourselves: "Strip sampling
-#                             kwargs and thoughts for Claude on Vertex".
-#   chunks>0 with calls=0     an unaggregated AIMessageChunk, call intact but
-#                             not yet merged.
-# _response_shape prints the whole result list anyway, because result IS a list
-# and a call in a SECOND AIMessage would explain 0/69 exactly -- the match would
-# land on the first message every time. Treat that as the surprise rather than
-# the expectation: it is outside the documented contract, and it was wrongly
-# written up here as the leading hypothesis before the contract was checked.
-#
-# Still open, and untouched by the gating: a re-ask caused by a dropped call
-# counts towards close_after_reasks, which exists to catch a model dodging its
-# verdict. It withdrew every read tool from a 150-call review pass at call 4
-# while its sibling pass read on. Note close_after_reasks is also off by one
-# against its own docstring -- RequireStructuredResultMiddleware writes
-# REASKS_KEY when it ISSUES the re-ask, so at close_after_reasks=1 the reads go
-# away on the model's first prose ending, having ignored no re-ask at all.
-#
-# For whoever measures it: these warnings carry no run key while the "call ..."
-# lines do, so with concurrent passes they cannot be attributed by adjacency in
-# the journal.
 def _unparsable_tool_call(msg: AIMessage) -> bool:
     """Whether msg is a tool call the provider truncated or malformed.
 
     Two independent signals, either sufficient. invalid_tool_calls is where
     langchain puts a call whose arguments would not parse, so a non-empty list
     is proof there were parts. The stop reason is the provider saying the same
-    thing from its side, and covers an adapter that drops the bad call entirely
-    rather than recording it.
+    thing from its side, covering both an adapter that drops a malformed call
+    and a stream that aborts after omitted reasoning before the tool_use block
+    arrives (content=[], tool_calls=[], stop_reason="tool_use").
 
     The stop reason counts only when nothing parsed. Anthropic ends every
     successful tool-calling turn with "tool_use", so without that guard the
@@ -1211,8 +1163,10 @@ class FinalAnswerMiddleware(AgentMiddleware):
         bound tool_choice="any" over ALL of them, so it can satisfy the constraint
         with another read and never produce the verdict. That is not a terminal
         plain-text turn, so the re-ask does not fire again and the pass wanders on
-        to the cap. Once a model has ignored this many re-asks, the reads come
-        away and the result tool is the only call that does anything.
+        to the cap. Because REASKS_KEY increments when a re-ask is issued,
+        close_after_reasks=1 closes read tools on the re-ask following the
+        model's first prose ending, leaving the result tool as the only call
+        that does anything.
         """
         if completed >= self._max - self._window:
             return True
@@ -1287,6 +1241,7 @@ class _RequireResultState(AgentState):
     # cached prefix with no length change to trip the shrink guard). The counter
     # never touches the messages channel, so it cannot interact with caching.
     reasks: NotRequired[Annotated[int, UntrackedValue]]
+    unparsable_reasks: NotRequired[Annotated[int, UntrackedValue]]
 
 
 assert REASKS_KEY in _RequireResultState.__annotations__, (
@@ -1343,16 +1298,46 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
         if not messages:
             return None
         last = messages[-1]
-        # Only a terminal plain-text answer qualifies. An AIMessage carrying tool
-        # calls is an intermediate step (read tools, or a pending structured call)
-        # the loop handles itself; a delivered verdict sets structured_response.
-        # A failed structured call leaves a ToolMessage last (handle_errors
-        # re-prompts) -- also not ours. So: last is an AIMessage, no tool calls,
-        # and no structured_response yet.
+        # Only a terminal plain-text answer or a dropped tool call qualifies. An
+        # AIMessage carrying tool calls is an intermediate step (read tools, or a
+        # pending structured call) the loop handles itself; a delivered verdict
+        # sets structured_response. A failed structured call leaves a ToolMessage
+        # last (handle_errors re-prompts) -- also not ours. So: last is an
+        # AIMessage, no tool calls, and no structured_response yet.
         if not isinstance(last, AIMessage) or last.tool_calls:
             return None
         if state.get("structured_response") is not None:
             return None
+        if _unparsable_tool_call(last):
+            # A dropped tool call that survived _EmptyCandidateRetry's single
+            # in-place retry. Jump back to the model so the turn does not exit
+            # early, but do not increment REASKS_KEY: FinalAnswerMiddleware reads
+            # that key to close read tools when a model writes a prose conclusion
+            # instead of calling the result tool, and a stream truncation is not
+            # a prose conclusion. Bounded separately by unparsable_reasks so a
+            # broken provider cannot spin.
+            u = state.get("unparsable_reasks", 0)
+            if u >= self._max:
+                log.warning(
+                    "require-result: still unparsable after %d re-asks; giving up",
+                    u,
+                )
+                return None
+            log.info(
+                "require-result: turn ended with unparsable tool call;"
+                " re-asking (%d/%d)",
+                u + 1,
+                self._max,
+            )
+            reminder = HumanMessage(
+                _UNPARSABLE_TOOL_CALL_NUDGE.content,
+                additional_kwargs={"lc_source": _REQUIRE_RESULT_SRC},
+            )
+            return {
+                "jump_to": "model",
+                "unparsable_reasks": u + 1,
+                "messages": [reminder],
+            }
         n = state.get(REASKS_KEY, 0)
         if n >= self._max:
             # Exhausted the re-asks: let the turn end verdict-less (the caller
@@ -2776,21 +2761,20 @@ class _GrowingPrefixCache(AgentMiddleware):
         else:
             self._states.move_to_end(key)
 
-        # An empty candidate's mutated retry: serve this ONE call uncached, so
-        # the retry cannot re-read the prefix that may have produced the empty.
-        # Step aside rather than delete -- an empty candidate is usually a
-        # one-off flake, and tearing the cache down would make a single flake
-        # cost a full uncached prefix resend on every later call in the turn
-        # (on a long conversation, repurchasing the whole prefix at full input
-        # rate). Nothing is lost by keeping it: if the prefix really is
-        # poisoned, this retry is the last call of the turn anyway.
+        # An empty candidate's mutated retry (_RETRY_EMPTY): serve this ONE call
+        # uncached, so the retry cannot re-read the prefix that may have produced
+        # the empty. Step aside rather than delete -- an empty candidate is usually
+        # a one-off flake, and tearing the cache down would make a single flake
+        # cost a full uncached prefix resend on every later call in the turn.
         #
-        # Ahead of the bookkeeping below, and returning before it: the request
-        # carries an ephemeral nudge that never enters graph state, so counting
-        # it would record a seen_len one longer than the history really is --
-        # and the next real call, being shorter, would read as a shrink and
-        # delete the very cache this branch just preserved.
-        if _empty_retry.get():
+        # An unparsable tool call retry (_RETRY_UNPARSABLE) also carries an
+        # ephemeral nudge that never enters graph state, so it too skips seen_len
+        # and recache bookkeeping below (recording seen_len would read as a shrink
+        # on the next real call and delete the cache). Unlike an empty candidate,
+        # a truncated output stream is not caused by the cached prefix, so it
+        # continues serving from st.name below instead of paying an uncached send.
+        retry_kind = _empty_retry.get()
+        if retry_kind == _RETRY_EMPTY:
             if st.name is not None:
                 log.warning(
                     "growing cache: serving uncached past %s for an"
@@ -2799,36 +2783,37 @@ class _GrowingPrefixCache(AgentMiddleware):
                 )
             return await handler(request)
 
-        if len(messages) < st.seen_len:
-            # History shrank: a fresh run reusing this graph (review). Drop the
-            # prior run's cache and start this key over.
-            if st.name:
-                await self._delete_quietly(st.name)
-            st = self._states[key] = _PrefixState()
-        st.seen_len = len(messages)
+        if not retry_kind:
+            if len(messages) < st.seen_len:
+                # History shrank: a fresh run reusing this graph (review). Drop the
+                # prior run's cache and start this key over.
+                if st.name:
+                    await self._delete_quietly(st.name)
+                st = self._states[key] = _PrefixState()
+            st.seen_len = len(messages)
 
-        st.calls_since += 1
-        target = _last_step_boundary(messages)
-        if time.monotonic() >= self._cooldown_until:
-            prefix = [self._system, *messages[:target]]
-            ptok = self._prefix_size(prefix)
-            if st.name is None:
-                # No cache yet: the first one is unconditional. It costs one
-                # prefill that this call pays anyway, and every later call reads
-                # it at the discount, so it repays within a few calls at any
-                # plausible read/storage rate.
-                due, why = True, "first"
-            else:
-                # prefix_tokens is the provider's exact cache_read after the
-                # first cached call, so the delta is measured, not estimated.
-                due, why = _recache_pays(
-                    st.prefix_tokens,
-                    ptok - st.prefix_tokens,
-                    st.calls_since,
-                    self._calls_left(request),
-                )
-            if due and _CACHE_FLOOR_TOKENS <= ptok <= _GROWING_MAX_PREFIX:
-                await self._recache(st, prefix, target, ptok, why)
+            st.calls_since += 1
+            target = _last_step_boundary(messages)
+            if time.monotonic() >= self._cooldown_until:
+                prefix = [self._system, *messages[:target]]
+                ptok = self._prefix_size(prefix)
+                if st.name is None:
+                    # No cache yet: the first one is unconditional. It costs one
+                    # prefill that this call pays anyway, and every later call reads
+                    # it at the discount, so it repays within a few calls at any
+                    # plausible read/storage rate.
+                    due, why = True, "first"
+                else:
+                    # prefix_tokens is the provider's exact cache_read after the
+                    # first cached call, so the delta is measured, not estimated.
+                    due, why = _recache_pays(
+                        st.prefix_tokens,
+                        ptok - st.prefix_tokens,
+                        st.calls_since,
+                        self._calls_left(request),
+                    )
+                if due and _CACHE_FLOOR_TOKENS <= ptok <= _GROWING_MAX_PREFIX:
+                    await self._recache(st, prefix, target, ptok, why)
 
         if st.name is not None and st.boundary < len(messages):
             tail = messages[st.boundary :]
@@ -2854,7 +2839,7 @@ class _GrowingPrefixCache(AgentMiddleware):
                     if _is_cache_gone(e, st.name):
                         # Vanished/expired; uncached this call, rebuild next.
                         log.info("growing cache gone (%s); uncached this call", st.name)
-                        self._states[key] = _PrefixState(seen_len=len(messages))
+                        self._states[key] = _PrefixState(seen_len=st.seen_len)
                         return await handler(request)
                     if _is_transient(e):
                         raise
@@ -2887,7 +2872,7 @@ class _GrowingPrefixCache(AgentMiddleware):
                     )
                     self._cooldown_until = time.monotonic() + _CACHE_FAIL_COOLDOWN_S
                     rejected = st.name
-                    self._states[key] = _PrefixState(seen_len=len(messages))
+                    self._states[key] = _PrefixState(seen_len=st.seen_len)
                     await self._delete_quietly(rejected)
                     return resp
                 # Replace the prefix-size estimate with the provider's exact count
