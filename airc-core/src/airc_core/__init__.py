@@ -30,7 +30,7 @@ _LAZY = {
     "TimeBudgetMiddleware": ".agent",
     "TokenLog": ".tokens",
     "Usage": ".usage",
-    "UsageCollector": ".usage",
+    "UsageCollector": ".collector",
     "apply_gcp_env_defaults": ".config",
     "base_middleware": ".agent",
     "check_model_id": ".model",

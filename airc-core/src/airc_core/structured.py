@@ -27,10 +27,10 @@ from .agent import (
     RequireStructuredResultMiddleware,
     base_middleware,
 )
+from .collector import UsageCollector
 from .config import CommonConfig
 from .model import make_model
 from .tokens import TokenLog
-from .usage import UsageCollector
 
 log = logging.getLogger(__name__)
 

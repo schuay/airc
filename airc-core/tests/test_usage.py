@@ -9,13 +9,8 @@ import logging
 from uuid import uuid4
 
 import pytest
-from airc_core.usage import (
-    MODEL_KEY,
-    SOURCE_KEY,
-    SUMMARIZATION,
-    Usage,
-    UsageCollector,
-)
+from airc_core.collector import UsageCollector
+from airc_core.usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
@@ -157,7 +152,7 @@ def test_collector_books_calls_and_routes_summarization_aside(caplog):
     c = UsageCollector("perf", "turn", OPUS)
     r1, r2, r3 = uuid4(), uuid4(), uuid4()
     msgs = [[HumanMessage("q"), ToolMessage("x" * 40, tool_call_id="t")]]
-    with caplog.at_level(logging.INFO, logger="airc_core.usage"):
+    with caplog.at_level(logging.INFO, logger="airc_core.collector"):
         c.on_chat_model_start({}, msgs, run_id=r1)
         c.on_llm_end(_result({"input_tokens": 1_000, "output_tokens": 10}), run_id=r1)
         # The ceiling summarization runs on the filter model, tagged by the
@@ -189,7 +184,7 @@ def test_book_aside_reaches_the_active_collector_only():
     """Spend that is not a model call (an explicit cache the middleware
     creates) has no callback to land in; it is booked against whichever
     collector's invocation is running, and dropped when none is."""
-    from airc_core.usage import book_aside
+    from airc_core.collector import book_aside
 
     c = UsageCollector("perf", "turn", OPUS)
     book_aside(Usage.of_cache_creation(PRO, 1000, 0.5))  # nobody active

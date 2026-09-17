@@ -47,9 +47,10 @@ from langchain_core.messages.utils import get_buffer_string
 from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.constants import TAG_NOSTREAM
 
+from .collector import book_aside
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
 from .providers import STOP_REASON_KEYS
-from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, book_aside
+from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage
 
 log = logging.getLogger(__name__)
 
