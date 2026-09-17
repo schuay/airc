@@ -485,9 +485,10 @@ async def test_runner_hands_the_index_to_the_graph(tmp_path, monkeypatch):
     # The runner's half of the split: read the store once per turn and pass it
     # in. The key rides only for a memory-enabled persona -- a graph without the
     # middleware has no such state key to accept it.
+    from airc_core import UsageCollector
     from airc_room.config import Config
     from airc_room.personas import Persona
-    from airc_room.runner import AgentRunner, _AgentEntry, _TurnUsage
+    from airc_room.runner import AgentRunner, _AgentEntry
     from airc_room.store import Store
 
     root = tmp_path / "store"
@@ -528,9 +529,9 @@ async def test_runner_hands_the_index_to_the_graph(tmp_path, monkeypatch):
 
     payloads: list[dict] = []
 
-    async def _fake_stream(graph, agent_name, payload, config):
+    async def _fake_stream(graph, agent_name, payload, config, model_id):
         payloads.append(payload)
-        return "ok", _TurnUsage()
+        return "ok", UsageCollector("Sonic", "turn", "m")
 
     monkeypatch.setattr(runner, "_stream", _fake_stream)
     await runner.run_turn("Sonic", thread.id, addressed=True)

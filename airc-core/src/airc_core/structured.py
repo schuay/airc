@@ -25,12 +25,12 @@ from pydantic import BaseModel
 
 from .agent import (
     RequireStructuredResultMiddleware,
-    _CallTrace,
     base_middleware,
 )
 from .config import CommonConfig
 from .model import make_model
 from .tokens import TokenLog
+from .usage import UsageCollector
 
 log = logging.getLogger(__name__)
 
@@ -148,15 +148,16 @@ class StructuredTaskRunner:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         graph = self._graph_for(system_prompt, schema)
-        trace = _CallTrace(task, "structured-task")
+        usage = UsageCollector(task, "structured-task", self._model_id)
         try:
-            state = await asyncio.wait_for(
-                graph.ainvoke(
-                    {"messages": [{"role": "user", "content": input}]},
-                    config={"callbacks": [trace]},
-                ),
-                timeout=timeout_s,
-            )
+            with usage.active():
+                state = await asyncio.wait_for(
+                    graph.ainvoke(
+                        {"messages": [{"role": "user", "content": input}]},
+                        config={"callbacks": [usage]},
+                    ),
+                    timeout=timeout_s,
+                )
         except asyncio.CancelledError:
             raise
         except TimeoutError as e:
@@ -164,28 +165,20 @@ class StructuredTaskRunner:
         except Exception as e:
             raise StructuredTaskError(f"{task} failed: {e}") from e
         finally:
-            usage = trace.summary()
+            thread = zlib.crc32(run_key.encode()) if run_key else 0
             self._tokens.add(
-                zlib.crc32(run_key.encode()) if run_key else 0,
-                task,
-                "structured-task",
-                usage["input"],
-                usage["output"],
-                usage["cached"],
-                self._model_id,
-                model_calls=usage["calls"],
-                max_call_input_tokens=usage["max_call_input"],
+                usage.total, thread_id=thread, agent=task, kind="structured-task"
             )
+            if not usage.aside.empty:
+                self._tokens.add(
+                    usage.aside, thread_id=thread, agent=task, kind="overhead"
+                )
 
         result = state.get("structured_response")
         if not isinstance(result, schema):
             raise StructuredTaskError(
-                f"{task} produced no valid {schema.__name__} after {trace.calls}"
-                " model call(s)"
+                f"{task} produced no valid {schema.__name__} after"
+                f" {usage.total.calls} model call(s)"
             )
-        log.info(
-            "%s: complete in %d model call(s)",
-            task,
-            trace.calls,
-        )
+        log.info("%s: complete, %s", task, usage.total.line())
         return result

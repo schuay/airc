@@ -43,6 +43,13 @@ class ProviderTraits:
     # invented equivalence changes the request into something nobody asked for,
     # and this one would do it to the most expensive parameter there is.
     supports_effort: bool = False
+    # Whether the reported output_tokens already includes thinking. Every
+    # provider bills thinking at the output rate, but the Vertex Gemini adapter
+    # reports candidates and thoughts as two numbers and puts only the
+    # candidates in output_tokens; the google_genai adapter to the same models
+    # sums them, as Anthropic and OpenAI do. A reader that trusts output_tokens
+    # on Vertex under-counts every thinking call by the whole thought.
+    reasoning_in_output: bool = True
 
 
 # temperature, top_p and top_k were removed from the Messages API in Claude
@@ -61,11 +68,14 @@ _ANTHROPIC = ProviderTraits(
     supports_effort=True,
 )
 
+_GEMINI_VERTEX = ProviderTraits(id="google_vertexai", reasoning_in_output=False)
+
 _DEFAULT = ProviderTraits(id="")
 
 _TRAITS: dict[str, ProviderTraits] = {
     "anthropic": _ANTHROPIC,
     "google_anthropic_vertex": _ANTHROPIC,
+    "google_vertexai": _GEMINI_VERTEX,
 }
 
 

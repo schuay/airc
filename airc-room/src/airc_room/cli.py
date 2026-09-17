@@ -153,6 +153,12 @@ def _pct(part: int, whole: int) -> str:
     return f"{100 * part / whole:.0f}%" if whole else "n/a"
 
 
+def _usd(usd: float, estimated: bool = False) -> str:
+    """Dollars to the cent; a tilde marks a total that includes a model
+    priced at the generic fallback rate."""
+    return f"{'~' if estimated else ''}${usd:.2f}"
+
+
 def _written(tokens: int) -> str:
     """Cache-write suffix, empty when the provider reports none (Gemini).
 
@@ -180,17 +186,19 @@ def _token_summary_line(store, tokens) -> str:
     d_in, d_out = tokens.totals(since=since)
     d_cached = tokens.cached_input_total(since=since)
     top = ", ".join(
-        f"#{tid} {_thread_title(store, tid)[:24]!r} {_fmt_tokens(i + o)}"
-        for tid, i, o in tokens.top_threads(n=3)
+        f"#{tid} {_thread_title(store, tid)[:24]!r} {_usd(usd)}"
+        for tid, _i, _o, usd in tokens.top_threads(n=3)
     )
     by_model = "; ".join(
-        f"{model} {_fmt_tokens(i)} ({_pct(c, i)} cached{_written(w)})/{_fmt_tokens(o)}"
-        for model, i, o, c, w in tokens.totals_by_model(since=since)
+        f"{model} {_usd(usd)} {_fmt_tokens(i)} ({_pct(c, i)} cached{_written(w)})"
+        f"/{_fmt_tokens(o)}"
+        for model, i, o, c, w, usd in tokens.totals_by_model(since=since)
     )
     return (
-        f"tokens: all-time {_fmt_tokens(tin)} in ({_pct(tcached, tin)} cached)"
-        f" / {_fmt_tokens(tout)} out;"
-        f" 24h {_fmt_tokens(d_in)} ({_pct(d_cached, d_in)} cached)/{_fmt_tokens(d_out)};"
+        f"spend: all-time {_usd(*tokens.usd_total())}, {_fmt_tokens(tin)} in"
+        f" ({_pct(tcached, tin)} cached) / {_fmt_tokens(tout)} out;"
+        f" 24h {_usd(*tokens.usd_total(since=since))}, {_fmt_tokens(d_in)}"
+        f" ({_pct(d_cached, d_in)} cached)/{_fmt_tokens(d_out)};"
         f" 24h by model: {by_model or '(none)'};"
         f" top threads: {top or '(none)'}"
     )
@@ -216,32 +224,39 @@ def _print_token_report(args: argparse.Namespace) -> None:
     tin, tout = tokens.totals()
     tcached = tokens.cached_input_total()
     print(
-        f"all-time: {_fmt_tokens(tin)} in ({_pct(tcached, tin)} cached)"
-        f" / {_fmt_tokens(tout)} out"
+        f"all-time: {_usd(*tokens.usd_total())}, {_fmt_tokens(tin)} in"
+        f" ({_pct(tcached, tin)} cached) / {_fmt_tokens(tout)} out"
     )
     print("\nby kind:")
-    for kind, i, o in tokens.totals_by_kind():
-        print(f"  {kind:<12} {_fmt_tokens(i):>8} in  {_fmt_tokens(o):>8} out")
-    print("\nby model:")
-    for model, i, o, c, w in tokens.totals_by_model():
+    for kind, i, o, usd in tokens.totals_by_kind():
         print(
-            f"  {model:<32} {_fmt_tokens(i):>8} in ({_pct(c, i)} cached{_written(w)})"
+            f"  {kind:<12} {_usd(usd):>9} {_fmt_tokens(i):>8} in"
             f"  {_fmt_tokens(o):>8} out"
         )
+    print("\nby model:")
+    for model, i, o, c, w, usd in tokens.totals_by_model():
+        print(
+            f"  {model:<32} {_usd(usd):>9} {_fmt_tokens(i):>8} in"
+            f" ({_pct(c, i)} cached{_written(w)})  {_fmt_tokens(o):>8} out"
+        )
     print("\nby agent:")
-    for agent, i, o in tokens.totals_by_agent():
-        print(f"  {agent:<12} {_fmt_tokens(i):>8} in  {_fmt_tokens(o):>8} out")
+    for agent, i, o, usd in tokens.totals_by_agent():
+        print(
+            f"  {agent:<12} {_usd(usd):>9} {_fmt_tokens(i):>8} in"
+            f"  {_fmt_tokens(o):>8} out"
+        )
     print("\ntop threads:")
-    for tid, i, o in tokens.top_threads(n=10):
+    for tid, i, o, usd in tokens.top_threads(n=10):
         title = _thread_title(store, tid)
         print(
-            f"  #{tid:<5} {_fmt_tokens(i):>8} in  {_fmt_tokens(o):>8} out  {title[:48]}"
+            f"  #{tid:<5} {_usd(usd):>9} {_fmt_tokens(i):>8} in"
+            f"  {_fmt_tokens(o):>8} out  {title[:48]}"
         )
     print("\nheaviest turns (calls / max-per-call flags context accumulation):")
-    for tid, agent, kind, i, calls, mx, _o in tokens.heaviest_turns(n=10):
+    for tid, agent, kind, i, calls, mx, _o, usd in tokens.heaviest_turns(n=10):
         per = f"{calls} calls" if calls else "? calls"
         print(
-            f"  #{tid:<5} {_fmt_tokens(i):>8} in over {per:>9}"
+            f"  #{tid:<5} {_usd(usd):>9} {_fmt_tokens(i):>8} in over {per:>9}"
             f"  (max {_fmt_tokens(mx)}/call)  {agent}/{kind}"
         )
     tokens.close()

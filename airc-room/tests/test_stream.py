@@ -31,7 +31,7 @@ async def test_stream_drops_preamble_before_tool_calls():
 
     graph = SimpleNamespace(astream=astream)
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), graph, "perf", {}, {}
+        SimpleNamespace(_emit=_emit), graph, "perf", {}, {}, "m"
     )
     assert text == "The bug is an off-by-one in the loop."
     assert "Let me check" not in text
@@ -55,7 +55,12 @@ async def test_stream_skips_summarization_chunks():
         yield "messages", (_chunk(text="The real answer."), {})
 
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), SimpleNamespace(astream=astream), "perf", {}, {}
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
     )
     assert text == "The real answer."
 
@@ -69,7 +74,12 @@ async def test_stream_keeps_a_plain_answer_with_no_tools():
         yield "messages", (_chunk(text="answer."), {})
 
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), SimpleNamespace(astream=astream), "perf", {}, {}
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
     )
     assert text == "Short answer."
 
@@ -89,7 +99,12 @@ async def test_stream_drops_trailing_text_after_a_tool_call():
         yield "messages", (_chunk(text="gandalf: the real answer", id="m2"), {})
 
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), SimpleNamespace(astream=astream), "perf", {}, {}
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
     )
     assert text == "gandalf: the real answer"
 
@@ -105,7 +120,12 @@ async def test_stream_drops_partial_text_from_a_retried_call():
         yield "messages", (_chunk(text="The bug is in foo.cc.", id="m2"), {})
 
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), SimpleNamespace(astream=astream), "perf", {}, {}
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
     )
     assert text == "The bug is in foo.cc."
 
@@ -123,7 +143,12 @@ async def test_stream_turn_ending_on_a_tool_call_keeps_only_post_call_text():
         yield "messages", (_chunk(text="Checking now.", id="m1"), {})
 
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), SimpleNamespace(astream=astream), "perf", {}, {}
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
     )
     assert text == "Checking now."
 
@@ -139,6 +164,11 @@ async def test_stream_id_less_chunks_never_reset_the_buffer():
         yield "messages", (_chunk(text="answer."), {})
 
     text, _usage = await AgentRunner._stream(
-        SimpleNamespace(_emit=_emit), SimpleNamespace(astream=astream), "perf", {}, {}
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
     )
     assert text == "Short answer."

@@ -239,7 +239,9 @@ async def focus_interesting(
         log.exception("filter model failed; skipping item")
         return False
     if tokens is not None and (usage := getattr(reply, "usage_metadata", None)):
-        from airc_core import usage_counts
+        from airc_core import Usage
 
-        tokens.add(0, "triage", "triage", *usage_counts(usage), model_id)
+        tokens.add(
+            Usage.of_call(usage, model_id), thread_id=0, agent="triage", kind="triage"
+        )
     return "INTERESTING" in str(reply.text).upper()

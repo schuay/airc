@@ -476,8 +476,9 @@ async def test_run_structured_turn_serializes_per_persona(tmp_path):
     # growing prefix cache accumulates across the stream), so concurrent runs
     # would share cache state and contaminate each other's context. The runner
     # must serialize them per persona.
+    from airc_core import UsageCollector
     from airc_room.personas import Persona
-    from airc_room.runner import AgentRunner, _AgentEntry, _TurnUsage
+    from airc_room.runner import AgentRunner, _AgentEntry
 
     cfg = Config()
     cfg.token_db_path = tmp_path / "tokens.db"
@@ -497,13 +498,13 @@ async def test_run_structured_turn_serializes_per_persona(tmp_path):
     runner._structured_agents["Sonic"] = object()  # skip graph construction
     active, max_active = 0, 0
 
-    async def stream(graph, name, input, config):
+    async def stream(graph, name, input, config, model_id):
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
         await asyncio.sleep(0.02)
         active -= 1
-        return '{"tag": "SKIP", "summary": ""}', _TurnUsage()
+        return '{"tag": "SKIP", "summary": ""}', UsageCollector("Sonic", "turn", "m")
 
     runner._stream = stream
     results = await asyncio.gather(

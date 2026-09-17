@@ -304,3 +304,21 @@ def test_a_table_entry_without_an_id_is_refused():
     with pytest.raises(SystemExit) as e:
         load_common({"models": {"review": {"effort": "low"}}})
     assert "needs id" in str(e.value)
+
+
+def test_unpriced_model_is_named_at_load(caplog):
+    """A [models] entry the price table has no listing for is costed at the
+    generic rate; the operator hears about it at startup, once per entry."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="airc_core.config"):
+        load_common(
+            {
+                "models": {
+                    "default": "google_anthropic_vertex:claude-opus-5",
+                    "filter": "deepseek:deepseek-chat",
+                }
+            }
+        )
+    assert caplog.text.count("has no price listing") == 1
+    assert "filter = deepseek:deepseek-chat" in caplog.text

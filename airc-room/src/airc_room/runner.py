@@ -21,11 +21,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from airc_core import MCPToolset, TokenLog, make_model, missing_key
+from airc_core import (
+    MCPToolset,
+    TokenLog,
+    UsageCollector,
+    make_model,
+    missing_key,
+)
 from airc_core.agent import (
     CallBudgetMiddleware,
     TimeBudgetMiddleware,
-    _CallTrace,
     base_middleware,
     growing_cache_middleware,
 )
@@ -265,25 +270,6 @@ def build_turn_content(
 class _AgentEntry:
     persona: Persona
     graph: object
-
-
-@dataclass
-class _TurnUsage:
-    """Token usage aggregated over a turn's model calls, plus the per-call shape.
-
-    input/output/cached are summed across the turn (and across providers);
-    calls and max_call_input come from the per-call tracer and separate a long
-    accumulating loop from one large prompt.
-    """
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_in: int = 0
-    # Prompt-cache writes: billed at a premium and wasted unless a later call
-    # reads them, so kept apart from cached_in.
-    cache_written: int = 0
-    calls: int = 0
-    max_call_input: int = 0
 
 
 # Per-turn model-call budget for persona turns: nudge toward wrapping up, then a
@@ -626,31 +612,15 @@ class AgentRunner:
             payload["memory_index"] = await memory_index(self._cfg.memory.path)
 
         config = {"configurable": turn_config(thread_id, skey, gen, trigger_id)}
-        text, usage = await self._stream(entry.graph, agent_name, payload, config)
-        self._tokens.add(
-            thread_id,
+        text, usage = await self._stream(
+            entry.graph,
             agent_name,
-            "turn",
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cached_in,
+            payload,
+            config,
             self._cfg.resolve_model(entry.persona.model_id),
-            model_calls=usage.calls,
-            max_call_input_tokens=usage.max_call_input,
-            cache_write_tokens=usage.cache_written,
         )
-        log.info(
-            "agent %s thread %d: %d in (%d cached, %d written) / %d out tokens"
-            " over %d calls (max %d in/call)",
-            agent_name,
-            thread_id,
-            usage.input_tokens,
-            usage.cached_in,
-            usage.cache_written,
-            usage.output_tokens,
-            usage.calls,
-            usage.max_call_input,
-        )
+        self._book(usage, thread_id, agent_name, "turn")
+        log.info("agent %s thread %d: %s", agent_name, thread_id, usage.total.line())
         if unseen:
             self._store.set_agent_seen(thread_id, skey, unseen[-1].id)
         text = strip_self_attribution(text, agent_name)
@@ -709,20 +679,20 @@ class AgentRunner:
                 agent_name,
                 {"messages": [{"role": "user", "content": content}]},
                 config,
+                self._cfg.resolve_model(entry.persona.model_id),
             )
-        self._tokens.add(
-            0,
-            agent_name,
-            label,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cached_in,
-            self._cfg.resolve_model(entry.persona.model_id),
-            model_calls=usage.calls,
-            max_call_input_tokens=usage.max_call_input,
-            cache_write_tokens=usage.cache_written,
-        )
+        self._book(usage, 0, agent_name, label)
         return text
+
+    def _book(self, usage: UsageCollector, thread_id: int, agent: str, kind: str):
+        """The turn's own calls under `kind`, and whatever the invocation spent
+        besides them (ceiling summarization, an explicit cache) as overhead,
+        so the ledger's per-kind split stays honest without dropping the rest."""
+        self._tokens.add(usage.total, thread_id=thread_id, agent=agent, kind=kind)
+        if not usage.aside.empty:
+            self._tokens.add(
+                usage.aside, thread_id=thread_id, agent=agent, kind="overhead"
+            )
 
     async def _emit(self, agent: str, event: str, detail: str) -> None:
         if self._on_event:
@@ -732,84 +702,67 @@ class AgentRunner:
                 log.exception("event hook failed")
 
     async def _stream(
-        self, graph, agent_name: str, input: dict, config: dict
-    ) -> tuple[str, _TurnUsage]:
+        self, graph, agent_name: str, input: dict, config: dict, model_id: str
+    ) -> tuple[str, UsageCollector]:
         """Drive astream to completion, emitting tool events.
 
-        Returns (text, usage). The usage callback aggregates input/output/cached
-        across the turn's model calls and providers; the per-call tracer supplies
-        the call count and the largest single-call input. cached_in is the
-        prompt-cache-served subset of input_tokens (provider implicit/explicit
-        caching), 0 when unsupported.
+        Returns (text, usage): the collector that booked every model call of
+        the turn, priced for `model_id`, the graph's configured model.
         """
-        from airc_core.agent import TurnUsageHandler
-
-        usage_cb = TurnUsageHandler()  # skips ceiling-summarization calls
-        trace_cb = _CallTrace(agent_name, "turn")
-        config = {**config, "callbacks": [usage_cb, trace_cb]}
+        usage = UsageCollector(agent_name, "turn", model_id)
+        config = {**config, "callbacks": [usage]}
         parts: list[str] = []
         seen_tool_ids: set[str] = set()
         cur_msg_id: str | None = None
-        async for _mode, data in graph.astream(
-            input, config=config, stream_mode=["messages"]
-        ):
-            chunk, meta = data
-            if not isinstance(chunk, AIMessageChunk):
-                continue
-            # A ceiling-summarization call nested in the turn streams through
-            # messages mode too; its output restates the conversation, so
-            # collected as reply text it posts as an echoed prompt. The call is
-            # tagged nostream at the source; this backstop mirrors the lc_source
-            # skip in the usage/trace handlers in case a chunk arrives anyway.
-            if (meta or {}).get("lc_source") == "summarization":
-                continue
-            # Only the final model response's text is the answer (the agent loop
-            # ends on a response without tool calls), and chunks of one response
-            # share an id while a new model call gets a fresh one -- so a new id
-            # resets the buffer. Without this, two leaks concatenate an earlier
-            # response's text before the real answer: Gemini orders parts
-            # model-side and can emit a self-note AFTER its tool call (past the
-            # clear below), and a call retried mid-stream leaves the failed
-            # attempt's partial text behind. Id-less chunks never reset --
-            # continuation chunks may omit the id -- degrading to the old
-            # text-after-last-tool-call semantics, never worse.
-            if chunk.id is not None:
-                if cur_msg_id is not None and chunk.id != cur_msg_id:
-                    parts.clear()
-                cur_msg_id = chunk.id
-            for tc in chunk.tool_call_chunks or []:
-                if tc.get("name"):
-                    # Text preceding a tool call within a response is preamble
-                    # ("Let me check foo.cc..."), not answer material; drop it.
-                    # With the id reset above this scopes within one response,
-                    # which still matters when the turn ends ON a tool-calling
-                    # response (call cap) and as the id-less fallback.
-                    parts.clear()
-                    if tc.get("id") not in seen_tool_ids:
-                        seen_tool_ids.add(tc.get("id"))
-                        await self._emit(agent_name, "tool", tc["name"])
-            blocks = (
-                chunk.content
-                if isinstance(chunk.content, list)
-                else [{"type": "text", "text": chunk.content}]
-            )
-            for block in blocks:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and (text := block.get("text", ""))
-                ):
-                    parts.append(text)
-        usage = usage_cb.usage_metadata.values()
-        return "".join(parts), _TurnUsage(
-            input_tokens=sum(u.get("input_tokens", 0) for u in usage),
-            output_tokens=sum(u.get("output_tokens", 0) for u in usage),
-            cached_in=sum(
-                u.get("input_token_details", {}).get("cache_read", 0) for u in usage
-            ),
-            cache_written=sum(
-                u.get("input_token_details", {}).get("cache_creation", 0) for u in usage
-            ),
-            calls=trace_cb.calls,
-            max_call_input=trace_cb.max_input_tokens,
-        )
+        with usage.active():
+            async for _mode, data in graph.astream(
+                input, config=config, stream_mode=["messages"]
+            ):
+                chunk, meta = data
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                # A ceiling-summarization call nested in the turn streams through
+                # messages mode too; its output restates the conversation, so
+                # collected as reply text it posts as an echoed prompt. The call is
+                # tagged nostream at the source; this backstop mirrors the lc_source
+                # routing in the usage collector in case a chunk arrives anyway.
+                if (meta or {}).get("lc_source") == "summarization":
+                    continue
+                # Only the final model response's text is the answer (the agent loop
+                # ends on a response without tool calls), and chunks of one response
+                # share an id while a new model call gets a fresh one -- so a new id
+                # resets the buffer. Without this, two leaks concatenate an earlier
+                # response's text before the real answer: Gemini orders parts
+                # model-side and can emit a self-note AFTER its tool call (past the
+                # clear below), and a call retried mid-stream leaves the failed
+                # attempt's partial text behind. Id-less chunks never reset --
+                # continuation chunks may omit the id -- degrading to the old
+                # text-after-last-tool-call semantics, never worse.
+                if chunk.id is not None:
+                    if cur_msg_id is not None and chunk.id != cur_msg_id:
+                        parts.clear()
+                    cur_msg_id = chunk.id
+                for tc in chunk.tool_call_chunks or []:
+                    if tc.get("name"):
+                        # Text preceding a tool call within a response is preamble
+                        # ("Let me check foo.cc..."), not answer material; drop it.
+                        # With the id reset above this scopes within one response,
+                        # which still matters when the turn ends ON a tool-calling
+                        # response (call cap) and as the id-less fallback.
+                        parts.clear()
+                        if tc.get("id") not in seen_tool_ids:
+                            seen_tool_ids.add(tc.get("id"))
+                            await self._emit(agent_name, "tool", tc["name"])
+                blocks = (
+                    chunk.content
+                    if isinstance(chunk.content, list)
+                    else [{"type": "text", "text": chunk.content}]
+                )
+                for block in blocks:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and (text := block.get("text", ""))
+                    ):
+                        parts.append(text)
+        return "".join(parts), usage

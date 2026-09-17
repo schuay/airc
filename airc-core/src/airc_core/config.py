@@ -18,6 +18,7 @@ airc-watchers) -- the dependency only ever points inward, into core.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
@@ -26,6 +27,8 @@ from pathlib import Path
 from platformdirs import user_data_path
 
 from .providers import EFFORT_LEVELS, traits_for
+
+log = logging.getLogger(__name__)
 
 DATA_DIR = user_data_path("airc")
 DEFAULT_BUS_ROOT = DATA_DIR / "bus"
@@ -268,6 +271,26 @@ class CommonConfig:
     cache_ttl_minutes: int = 30
 
 
+def _warn_unpriced(models: Mapping[str, str]) -> None:
+    """Name, at load, every [models] entry the price table has no listing for.
+
+    Such a model is costed at the generic placeholder rate and every total it
+    touches is marked estimated. That is the intended fallback, but it should
+    be a known state rather than one discovered in a report, and startup is
+    where the operator is looking.
+    """
+    from .pricing import price_for
+
+    for key, model_id in models.items():
+        if price_for(model_id).generic:
+            log.warning(
+                "[models] %s = %s has no price listing; its cost is estimated at"
+                " the generic rate",
+                key,
+                model_id,
+            )
+
+
 def _load_model_providers(raw: Mapping, cfg: CommonConfig) -> None:
     """Parse [model_providers] and register each one with airc_core.model.
 
@@ -331,6 +354,7 @@ def load_common(raw: Mapping) -> CommonConfig:
         k: _parse_model_profile(k, v) for k, v in raw.get("models", {}).items()
     }
     cfg.models = {k: p.id for k, p in cfg.model_profiles.items()}
+    _warn_unpriced(cfg.models)
     _load_model_providers(raw, cfg)
     if mcp := raw.get("mcp"):
         reject_unknown(mcp, {"servers"}, "[mcp]")

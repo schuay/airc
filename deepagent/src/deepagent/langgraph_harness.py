@@ -37,6 +37,7 @@ from airc_core import (
     GroundingReminderMiddleware,
     MCPToolset,
     TokenLog,
+    UsageCollector,
     apply_gcp_env_defaults,
     base_middleware,
     growing_cache_middleware,
@@ -388,17 +389,6 @@ async def _thread_live(graph, thread_id: str) -> bool:
         log.warning("could not read thread state for %s: %s", thread_id, e)
         return False
     return bool(getattr(snap, "values", None))
-
-
-class _TurnUsage:
-    input_tokens = 0
-    output_tokens = 0
-    cached_in = 0
-    # Prompt-cache writes: billed at a premium and wasted unless a later call
-    # reads them, so kept apart from cached_in.
-    cache_written = 0
-    calls = 0
-    max_call_input = 0
 
 
 class LangGraphHarness:
@@ -757,13 +747,9 @@ class LangGraphHarness:
         log_path = result_path.with_suffix(".log")
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        from airc_core.agent import _CallTrace
-        from langchain_core.callbacks import UsageMetadataCallbackHandler
-
-        usage_cb = UsageMetadataCallbackHandler()
-        trace_cb = _CallTrace(agent or "turn", "turn")
+        usage = UsageCollector(agent or "turn", "turn", self._model_id)
         stop_cb = _StopReasonCallback()
-        callbacks = [usage_cb, trace_cb, stop_cb]
+        callbacks = [usage, stop_cb]
         if journal is not None:
             callbacks.append(_JournalCallback(journal, agent or "turn", turn_index))
         config = {
@@ -791,12 +777,13 @@ class LangGraphHarness:
         result: AgentResult | None = None
         code = 0
         try:
-            state = await asyncio.wait_for(
-                graph.ainvoke(
-                    {"messages": [{"role": "user", "content": turn}]}, config
-                ),
-                timeout=timeout_s,
-            )
+            with usage.active():
+                state = await asyncio.wait_for(
+                    graph.ainvoke(
+                        {"messages": [{"role": "user", "content": turn}]}, config
+                    ),
+                    timeout=timeout_s,
+                )
             report = state.get("structured_response")
             if isinstance(report, Report):
                 result = to_result(report)
@@ -841,35 +828,32 @@ class LangGraphHarness:
             log.exception("%s: turn errored", agent or "turn")
             code = -1
 
-        usage = self._aggregate(usage_cb, trace_cb)
         self._tokens.add(
-            zlib.crc32(thread_id.encode()),
-            agent or "turn",
-            "turn",
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cached_in,
-            self._model_id,
-            model_calls=usage.calls,
-            max_call_input_tokens=usage.max_call_input,
-            cache_write_tokens=usage.cache_written,
+            usage.total,
+            thread_id=zlib.crc32(thread_id.encode()),
+            agent=agent or "turn",
+            kind="turn",
         )
+        if not usage.aside.empty:
+            self._tokens.add(
+                usage.aside,
+                thread_id=zlib.crc32(thread_id.encode()),
+                agent=agent or "turn",
+                kind="overhead",
+            )
+        log.info("%s turn %d: %s", agent or "turn", turn_index, usage.total.line())
         if journal is not None:
+            # The journal is the file contract an out-of-process consumer (the
+            # sandboxed worker's runner) credits the ledger from, since
+            # tokens.db is never bound into the box; the payload is the Usage
+            # itself, so the credit is the same row this process would write.
             journal.emit(
                 EventKind.USAGE,
                 agent=agent or "turn",
                 turn=turn_index,
                 data={
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cached_in": usage.cached_in,
-                    "cache_written": usage.cache_written,
-                    "model_calls": usage.calls,
-                    # model + max_call_input let an out-of-process consumer (the
-                    # sandboxed worker's runner) credit the ledger fully from the
-                    # journal, since tokens.db is never bound into the box.
-                    "model": self._model_id,
-                    "max_call_input": usage.max_call_input,
+                    "kind": "turn",
+                    "usage": usage.total.model_dump(),
                     # Only when the turn produced no report -- on a clean report
                     # the reason is STOP/TOOL_CALLS and carries no diagnostic value.
                     # empty_candidate names the silent-dead-turn shape (a zero-part
@@ -884,6 +868,13 @@ class LangGraphHarness:
                     ),
                 },
             )
+            if not usage.aside.empty:
+                journal.emit(
+                    EventKind.USAGE,
+                    agent=agent or "turn",
+                    turn=turn_index,
+                    data={"kind": "overhead", "usage": usage.aside.model_dump()},
+                )
             if result is not None:
                 journal.emit(
                     EventKind.REPORT,
@@ -913,17 +904,3 @@ class LangGraphHarness:
             finish_reason=stop_cb.finish_reason,
             empty_candidate=stop_cb.empty,
         )
-
-    @staticmethod
-    def _aggregate(usage_cb, trace_cb) -> _TurnUsage:
-        u = _TurnUsage()
-        for meta in usage_cb.usage_metadata.values():
-            u.input_tokens += meta.get("input_tokens", 0)
-            u.output_tokens += meta.get("output_tokens", 0)
-            u.cached_in += meta.get("input_token_details", {}).get("cache_read", 0)
-            u.cache_written += meta.get("input_token_details", {}).get(
-                "cache_creation", 0
-            )
-        u.calls = trace_cb.calls
-        u.max_call_input = trace_cb.max_input_tokens
-        return u

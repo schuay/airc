@@ -9,6 +9,11 @@ per-component stores. WAL plus a busy timeout make concurrent writers from
 separate processes survivable: a brief wait, not an instant "database is
 locked".
 
+A row is one `Usage` (usage.py): the counts as the provider reported them and
+the dollars they cost at the price in force when the row was written. Cost is
+stored, not derived at query time, because prices change and a ledger should
+say what was paid.
+
 The ledger is deliberately ignorant of threads: it stores an opaque
 `thread_id` integer and never joins a titles table (that lives in airc's own
 store). `top_threads` returns ids and sums; a caller that wants titles resolves
@@ -24,6 +29,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from .usage import Usage
+
 log = logging.getLogger(__name__)
 
 _SCHEMA = """
@@ -38,11 +45,9 @@ CREATE TABLE IF NOT EXISTS token_usage (
     -- Subset of input_tokens served from the provider prompt cache. Lets the
     -- summaries report a cache hit rate; the cost lever for tool-heavy turns.
     cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-    -- Subset of input_tokens written to the provider prompt cache this call.
-    -- On Anthropic a write costs 1.25x base input and a read 0.1x, so writes
-    -- that never turn into reads cost more than not caching; without this
-    -- column they are booked as ordinary input and invisible. 0 for Gemini,
-    -- whose implicit cache reports no write.
+    -- Subset of input_tokens written to the provider prompt cache this call,
+    -- both TTLs. A write costs more than plain input and only pays off when a
+    -- later call reads it. 0 for Gemini, whose implicit cache reports no write.
     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     -- Configured model id that served the call (e.g. google_vertexai:gemini-...).
     -- Separates the cheap filter model (coordinator, triage) from agent/review
@@ -55,14 +60,37 @@ CREATE TABLE IF NOT EXISTS token_usage (
     model_calls INTEGER NOT NULL DEFAULT 0,
     -- Largest single-call input_tokens within this row. Distinguishes a turn
     -- that grew quadratically (max near the per-row sum) from many even calls.
-    max_call_input_tokens INTEGER NOT NULL DEFAULT 0
+    max_call_input_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Thinking subset of output_tokens.
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Explicit-cache storage booked at creation: tokens held times TTL hours.
+    cache_storage_token_hours REAL NOT NULL DEFAULT 0,
+    -- What the row cost at the price in force when it was written. estimated
+    -- marks a model priced at the generic fallback rate.
+    usd REAL NOT NULL DEFAULT 0,
+    estimated INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_thread ON token_usage(thread_id);
 """
 
+# Columns added after the table first shipped, with the DDL that adds each.
+# CREATE TABLE IF NOT EXISTS leaves a pre-existing table alone, so a file
+# written before a column existed needs an additive, idempotent migration.
+_ADDED_COLUMNS = (
+    ("cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("model", "TEXT NOT NULL DEFAULT ''"),
+    ("model_calls", "INTEGER NOT NULL DEFAULT 0"),
+    ("max_call_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("cache_storage_token_hours", "REAL NOT NULL DEFAULT 0"),
+    ("usd", "REAL NOT NULL DEFAULT 0"),
+    ("estimated", "INTEGER NOT NULL DEFAULT 0"),
+)
+
 
 class TokenLog:
-    """Append-only ledger of per-turn token usage, with aggregate report queries.
+    """Append-only ledger of per-turn usage, with aggregate report queries.
 
     One row is one turn/review/triage run (which may aggregate several model
     calls). Open one instance per component; multiple instances against the same
@@ -99,74 +127,41 @@ class TokenLog:
                 self._db = None
 
     def _migrate(self) -> None:
-        # CREATE TABLE IF NOT EXISTS leaves a pre-existing table alone, so a file
-        # written before a column existed needs an additive, idempotent migration
-        # (e.g. a ledger carried over from airc's old combined store).
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(token_usage)")}
-        if "cached_input_tokens" not in cols:
-            self._db.execute(
-                "ALTER TABLE token_usage ADD COLUMN cached_input_tokens"
-                " INTEGER NOT NULL DEFAULT 0"
-            )
-        if "model" not in cols:
-            self._db.execute(
-                "ALTER TABLE token_usage ADD COLUMN model TEXT NOT NULL DEFAULT ''"
-            )
-        if "model_calls" not in cols:
-            self._db.execute(
-                "ALTER TABLE token_usage ADD COLUMN model_calls INTEGER NOT NULL"
-                " DEFAULT 0"
-            )
-        if "max_call_input_tokens" not in cols:
-            self._db.execute(
-                "ALTER TABLE token_usage ADD COLUMN max_call_input_tokens INTEGER"
-                " NOT NULL DEFAULT 0"
-            )
-        if "cache_write_tokens" not in cols:
-            self._db.execute(
-                "ALTER TABLE token_usage ADD COLUMN cache_write_tokens INTEGER"
-                " NOT NULL DEFAULT 0"
-            )
+        for name, ddl in _ADDED_COLUMNS:
+            if name not in cols:
+                self._db.execute(f"ALTER TABLE token_usage ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         if self._db is not None:
             self._db.close()
 
-    def add(
-        self,
-        thread_id: int,
-        agent: str,
-        kind: str,
-        input_tokens: int,
-        output_tokens: int,
-        cached_input_tokens: int = 0,
-        model: str = "",
-        model_calls: int = 0,
-        max_call_input_tokens: int = 0,
-        # Last: call sites pass `*usage_counts(usage), model` positionally, so
-        # a parameter inserted earlier would shift model into a token column.
-        cache_write_tokens: int = 0,
-    ) -> None:
+    def add(self, usage: Usage, *, thread_id: int, agent: str, kind: str) -> None:
         if self._db is None:
             return
         try:
             self._db.execute(
                 "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
                 " output_tokens, cached_input_tokens, model, model_calls,"
-                " max_call_input_tokens, cache_write_tokens)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " max_call_input_tokens, cache_write_tokens, reasoning_tokens,"
+                " cache_storage_token_hours, usd, estimated)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     thread_id,
                     agent,
                     kind,
-                    input_tokens,
-                    output_tokens,
-                    cached_input_tokens,
-                    model,
-                    model_calls,
-                    max_call_input_tokens,
-                    cache_write_tokens,
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    usage.model,
+                    usage.calls,
+                    usage.max_call_input,
+                    usage.cache_write,
+                    usage.reasoning,
+                    usage.cache_storage_token_hours,
+                    usage.usd,
+                    int(usage.estimated),
                 ),
             )
             self._db.commit()
@@ -206,6 +201,18 @@ class TokenLog:
         ).fetchone()
         return (row[0], row[1])
 
+    def usd_total(self, since: float = 0.0) -> tuple[float, bool]:
+        """(dollars, any_estimated): the spend, and whether any of it was
+        priced at the generic fallback rate."""
+        if self._db is None:
+            return (0.0, False)
+        row = self._db.execute(
+            "SELECT COALESCE(SUM(usd), 0), COALESCE(MAX(estimated), 0)"
+            " FROM token_usage WHERE ts >= ?",
+            (since,),
+        ).fetchone()
+        return (float(row[0]), bool(row[1]))
+
     def recent_max_input(self, thread_id: int, since: float = 0.0) -> int:
         """The largest single-turn input on a thread since `since` -- the memory
         compaction size signal. Uses max_call_input (the biggest single model call
@@ -243,45 +250,51 @@ class TokenLog:
         ).fetchone()
         return row[0]
 
-    def totals_by_kind(self, since: float = 0.0) -> list[tuple[str, int, int]]:
+    def totals_by_kind(self, since: float = 0.0) -> list[tuple[str, int, int, float]]:
+        """(kind, input, output, usd), heaviest input first."""
         if self._db is None:
             return []
         rows = self._db.execute(
-            "SELECT kind, SUM(input_tokens), SUM(output_tokens) FROM token_usage"
-            " WHERE ts >= ? GROUP BY kind ORDER BY SUM(input_tokens) DESC",
+            "SELECT kind, SUM(input_tokens), SUM(output_tokens), SUM(usd)"
+            " FROM token_usage WHERE ts >= ? GROUP BY kind"
+            " ORDER BY SUM(input_tokens) DESC",
             (since,),
         ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
 
     def totals_by_model(
         self, since: float = 0.0
-    ) -> list[tuple[str, int, int, int, int]]:
-        """(model, input, output, cached, cache_written), heaviest first. Empty
-        model is '?'."""
+    ) -> list[tuple[str, int, int, int, int, float]]:
+        """(model, input, output, cached, cache_written, usd), heaviest input
+        first. Empty model is '?'."""
         if self._db is None:
             return []
         rows = self._db.execute(
             "SELECT COALESCE(NULLIF(model, ''), '?'), SUM(input_tokens),"
             " SUM(output_tokens), SUM(cached_input_tokens),"
-            " SUM(cache_write_tokens) FROM token_usage"
+            " SUM(cache_write_tokens), SUM(usd) FROM token_usage"
             " WHERE ts >= ? GROUP BY 1 ORDER BY SUM(input_tokens) DESC",
             (since,),
         ).fetchall()
-        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], float(r[5])) for r in rows]
 
-    def totals_by_agent(self, since: float = 0.0) -> list[tuple[str, int, int]]:
+    def totals_by_agent(self, since: float = 0.0) -> list[tuple[str, int, int, float]]:
+        """(agent, input, output, usd), heaviest first."""
         if self._db is None:
             return []
         rows = self._db.execute(
-            "SELECT agent, SUM(input_tokens), SUM(output_tokens) FROM token_usage"
-            " WHERE ts >= ? GROUP BY agent"
+            "SELECT agent, SUM(input_tokens), SUM(output_tokens), SUM(usd)"
+            " FROM token_usage WHERE ts >= ? GROUP BY agent"
             " ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC",
             (since,),
         ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
 
-    def top_threads(self, n: int = 5, since: float = 0.0) -> list[tuple[int, int, int]]:
-        """(thread_id, input, output) for the heaviest threads, heaviest first.
+    def top_threads(
+        self, n: int = 5, since: float = 0.0
+    ) -> list[tuple[int, int, int, float]]:
+        """(thread_id, input, output, usd) for the heaviest threads, heaviest
+        first.
 
         No title: the ledger does not own threads. A caller resolves the id to a
         title against its own store.
@@ -289,31 +302,32 @@ class TokenLog:
         if self._db is None:
             return []
         rows = self._db.execute(
-            "SELECT thread_id, SUM(input_tokens), SUM(output_tokens)"
+            "SELECT thread_id, SUM(input_tokens), SUM(output_tokens), SUM(usd)"
             " FROM token_usage WHERE ts >= ? GROUP BY thread_id"
             " ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC LIMIT ?",
             (since, n),
         ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
 
     def heaviest_turns(
         self, n: int = 10, since: float = 0.0
-    ) -> list[tuple[int, str, str, int, int, int, int]]:
+    ) -> list[tuple[int, str, str, int, int, int, int, float]]:
         """Single token_usage rows with the most input, heaviest first.
 
-        (thread_id, agent, kind, input, model_calls, max_call_input, output).
-        One row is one turn/review run; surfacing the heaviest individually --
-        with the call count and the largest single call -- is what distinguishes
-        a quadratic tool-calling loop (input >> max_call_input, many calls) from
-        one large prompt (input ~= max_call_input, one call). model_calls is 0
-        for rows written before that column existed.
+        (thread_id, agent, kind, input, model_calls, max_call_input, output,
+        usd). One row is one turn/review run; surfacing the heaviest
+        individually -- with the call count and the largest single call -- is
+        what distinguishes a quadratic tool-calling loop (input >>
+        max_call_input, many calls) from one large prompt (input ~=
+        max_call_input, one call). model_calls is 0 for rows written before
+        that column existed.
         """
         if self._db is None:
             return []
         rows = self._db.execute(
             "SELECT thread_id, agent, kind, input_tokens, model_calls,"
-            " max_call_input_tokens, output_tokens FROM token_usage"
+            " max_call_input_tokens, output_tokens, usd FROM token_usage"
             " WHERE ts >= ? ORDER BY input_tokens DESC LIMIT ?",
             (since, n),
         ).fetchall()
-        return [(r[0], r[1], r[2], r[3], r[4], r[5], r[6]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], float(r[7])) for r in rows]

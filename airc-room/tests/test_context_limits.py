@@ -5,12 +5,10 @@
 
 import asyncio
 import logging
-from uuid import uuid4
 
 from airc_core.agent import (
     _ELIDED_TOOL_RESULT,
     _MAX_KEPT_RESULT_CHARS,
-    _CallTrace,
     _estimate_input_tokens,
     compact_for_budget,
     prune_to_recent_tool_results,
@@ -130,27 +128,6 @@ def _llm_result(input_tokens: int) -> LLMResult:
         },
     )
     return LLMResult(generations=[[ChatGeneration(message=msg)]])
-
-
-def test_call_trace_tracks_calls_and_max_input(caplog):
-    trace = _CallTrace("perf", "turn")
-    for n, in_tok in enumerate((8000, 60_000, 240_000)):
-        rid = uuid4()
-        msgs = [HumanMessage("q")] + [
-            ToolMessage("Z" * 100, tool_call_id=f"c{i}") for i in range(n + 1)
-        ]
-        trace.on_chat_model_start({}, [msgs], run_id=rid)
-        with caplog.at_level(logging.INFO, logger="airc_core.agent"):
-            trace.on_llm_end(_llm_result(in_tok), run_id=rid)
-    assert trace.calls == 3
-    assert trace.max_input_tokens == 240_000
-    # The per-call line carries the growing input and the request's tool-result
-    # count, so the within-turn accumulation is legible in the log.
-    assert "call perf/turn #3: 240000 in (120000 cached, 50%)" in caplog.text
-    assert "3 tool results (300 chars)" in caplog.text
-    # The turn summary derives the hit rate and the uncached (full-price) tokens.
-    assert trace.summary()["hit_pct"] == 50
-    assert trace.summary()["uncached"] == (8000 + 60_000 + 240_000) // 2
 
 
 def _long_turn(n_tools, payload_chars=400):

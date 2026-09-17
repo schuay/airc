@@ -114,9 +114,10 @@ async def test_run_turn_builds_a_config_its_own_tools_can_read(tmp_path, monkeyp
     identity rather than on the config's shape is the point -- it stays true
     however the runner chooses to key its checkpoints next.
     """
+    from airc_core import UsageCollector
     from airc_room.config import Config
     from airc_room.personas import Persona
-    from airc_room.runner import AgentRunner, _AgentEntry, _TurnUsage
+    from airc_room.runner import AgentRunner, _AgentEntry
 
     store = Store(tmp_path / "airc.db")
     thread = store.create_thread("t")
@@ -140,9 +141,9 @@ async def test_run_turn_builds_a_config_its_own_tools_can_read(tmp_path, monkeyp
 
     seen: dict = {}
 
-    async def _fake_stream(graph, agent_name, payload, config):
+    async def _fake_stream(graph, agent_name, payload, config, model_id):
         seen.update(config)
-        return "ok", _TurnUsage()
+        return "ok", UsageCollector("Sonic", "turn", "m")
 
     monkeypatch.setattr(runner, "_stream", _fake_stream)
     await runner.run_turn("Sonic", thread.id, addressed=True, trigger_id=99)

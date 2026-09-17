@@ -60,10 +60,9 @@ from typing import Protocol, runtime_checkable
 
 from airc_core import (
     TokenLog,
-    cache_write_count,
+    Usage,
     make_model,
     retrying,
-    usage_counts,
 )
 
 from .config import Config
@@ -854,24 +853,11 @@ class Orchestrator:
             log.exception("coordinator failed for msg %d", msg.id)
             return []
         if usage := getattr(reply, "usage_metadata", None):
-            tin, tout, cached = usage_counts(usage)
+            u = Usage.of_call(usage, self._cfg.filter_model)
             self._tokens.add(
-                msg.thread_id,
-                "coordinator",
-                "coordinator",
-                tin,
-                tout,
-                cached,
-                self._cfg.filter_model,
-                cache_write_tokens=cache_write_count(usage),
+                u, thread_id=msg.thread_id, agent="coordinator", kind="coordinator"
             )
-            log.info(
-                "coordinator msg %d: %d in (%d cached) / %d out tokens",
-                msg.id,
-                tin,
-                cached,
-                tout,
-            )
+            log.info("coordinator msg %d: %s", msg.id, u.line())
         verdict = str(reply.text).strip()
         log.info(
             "coordinator msg %d: %s",
@@ -912,16 +898,11 @@ class Orchestrator:
             log.exception("announcement routing failed for msg %d", msg.id)
             return []
         if usage := getattr(reply, "usage_metadata", None):
-            tin, tout, cached = usage_counts(usage)
             self._tokens.add(
-                msg.thread_id,
-                "coordinator",
-                "coordinator",
-                tin,
-                tout,
-                cached,
-                self._cfg.filter_model,
-                cache_write_tokens=cache_write_count(usage),
+                Usage.of_call(usage, self._cfg.filter_model),
+                thread_id=msg.thread_id,
+                agent="coordinator",
+                kind="coordinator",
             )
         picked = parse_coordinator_reply(str(reply.text), set(candidates), 1)
         if not picked:

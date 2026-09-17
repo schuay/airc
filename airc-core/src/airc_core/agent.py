@@ -36,10 +36,6 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
-from langchain_core.callbacks import (
-    BaseCallbackHandler,
-    UsageMetadataCallbackHandler,
-)
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -53,6 +49,7 @@ from langgraph.constants import TAG_NOSTREAM
 
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
 from .providers import STOP_REASON_KEYS
+from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, book_aside
 
 log = logging.getLogger(__name__)
 
@@ -62,142 +59,6 @@ log = logging.getLogger(__name__)
 # safe-biased and the growing cache measures the real prefix exactly after the
 # first cached call, so the slack absorbs the difference for the models we run.
 CONTEXT_WINDOW = 1_000_000
-
-
-def _usage_from_response(response) -> dict:
-    """Pull usage_metadata off an LLMResult, via the generation message.
-
-    The aggregating UsageMetadataCallbackHandler sums across the turn and hides
-    per-call detail; this reads the single call's own counts so a tracer can log
-    the growth curve. Returns {} if the provider attached no usage.
-    """
-    for gens in getattr(response, "generations", None) or []:
-        for gen in gens:
-            usage = getattr(getattr(gen, "message", None), "usage_metadata", None)
-            if usage:
-                return usage
-    return {}
-
-
-class _CallTrace(BaseCallbackHandler):
-    """Per-model-call tracer: logs each call's request shape and reported usage.
-
-    The token_usage row sums every call in a turn, so a turn that grew from 8k
-    to 240k tokens over fifty tool-calling rounds and one that made a single
-    240k-token call look identical there. This logs each call as it returns --
-    its input/output/cached tokens next to how many messages and tool results
-    the request carried -- making the within-turn growth visible. It also tallies
-    the call count and the largest single-call input for the row the caller
-    persists. Model calls in a turn are sequential, so the plain counter is safe;
-    request shape is keyed by run_id to pair on_chat_model_start with on_llm_end.
-    """
-
-    def __init__(self, agent: str, kind: str) -> None:
-        self._agent = agent
-        self._kind = kind
-        self.calls = 0
-        self.max_input_tokens = 0
-        # Turn totals, so a caller can report the cache hit rate and uncached
-        # (full-price) tokens -- the real cost signal once prefix caching is on,
-        # since a re-sent tool result behind the cache boundary is a cheap
-        # cache_read, not a full re-charge.
-        self.total_input = 0
-        self.total_output = 0
-        self.total_cached = 0
-        self._shape: dict[object, tuple[int, int, int]] = {}
-        # run_ids of ceiling-summarization calls (tagged lc_source), so their
-        # tokens/calls are not booked against this turn -- they run on the cheap
-        # filter model and are not part of the persona's work.
-        self._skip: set = set()
-
-    def summary(self) -> dict:
-        """Turn aggregates plus the derived cache signals."""
-        hit = (
-            round(100 * self.total_cached / self.total_input) if self.total_input else 0
-        )
-        return {
-            "calls": self.calls,
-            "input": self.total_input,
-            "output": self.total_output,
-            "cached": self.total_cached,
-            "uncached": self.total_input - self.total_cached,
-            "hit_pct": hit,
-            "max_call_input": self.max_input_tokens,
-        }
-
-    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs) -> None:
-        if (kwargs.get("metadata") or {}).get("lc_source") == "summarization":
-            self._skip.add(run_id)
-            return
-        msgs = messages[0] if messages else []
-        tool_msgs = [m for m in msgs if isinstance(m, ToolMessage)]
-        tool_chars = sum(len(str(m.content)) for m in tool_msgs)
-        self._shape[run_id] = (len(msgs), len(tool_msgs), tool_chars)
-
-    def on_llm_error(self, error, *, run_id, **kwargs) -> None:
-        # A call that errors (e.g. retried by ModelRetryMiddleware) fires start
-        # but not end; drop its shape so the dict does not leak across retries.
-        self._shape.pop(run_id, None)
-
-    def on_llm_end(self, response, *, run_id, **kwargs) -> None:
-        if run_id in self._skip:
-            self._skip.discard(run_id)
-            return
-        usage = _usage_from_response(response)
-        in_tok = int(usage.get("input_tokens", 0))
-        out_tok = int(usage.get("output_tokens", 0))
-        cached = int(usage.get("input_token_details", {}).get("cache_read", 0))
-        self.calls += 1
-        self.max_input_tokens = max(self.max_input_tokens, in_tok)
-        self.total_input += in_tok
-        self.total_output += out_tok
-        self.total_cached += cached
-        n_msgs, n_tool, tool_chars = self._shape.pop(run_id, (0, 0, 0))
-        # Per-call cache hit %, so the growing cache warming over a turn (first
-        # call ~0%, later calls high) is visible at a glance -- a flat-low series
-        # means the cache is not taking (churn, or a non-Vertex model).
-        hit = round(100 * cached / in_tok) if in_tok else 0
-        log.info(
-            "call %s/%s #%d: %d in (%d cached, %d%%) / %d out; %d msgs, %d tool"
-            " results (%d chars)",
-            self._agent,
-            self._kind,
-            self.calls,
-            in_tok,
-            cached,
-            hit,
-            out_tok,
-            n_msgs,
-            n_tool,
-            tool_chars,
-        )
-
-
-class TurnUsageHandler(UsageMetadataCallbackHandler):
-    """UsageMetadataCallbackHandler that ignores ceiling-summarization calls, so a
-    compaction (run on the cheap filter model inside before_model) is not booked
-    against the persona's turn token row. Keyed on the lc_source metadata tag, so
-    it is robust regardless of whether the nested call inherits the turn's
-    callbacks (langchain merges rather than replaces them, so passing callbacks=[]
-    to the summarizer would not isolate it)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._skip: set = set()
-
-    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs) -> None:
-        if (kwargs.get("metadata") or {}).get("lc_source") == "summarization":
-            self._skip.add(run_id)
-            return
-        parent = getattr(super(), "on_chat_model_start", None)
-        if parent is not None:
-            parent(serialized, messages, run_id=run_id, **kwargs)
-
-    def on_llm_end(self, response, *, run_id, **kwargs) -> None:
-        if run_id in self._skip:
-            self._skip.discard(run_id)
-            return
-        super().on_llm_end(response, run_id=run_id, **kwargs)
 
 
 # How long to stop attempting cache creation after a failure. A permanent
@@ -1616,7 +1477,15 @@ class _SkipOnSummaryFailure(SummarizationMiddleware):
     backstop sizes this turn's request, and compaction retries next turn.
 
     Only the async path is overridden -- airc drives agents via astream. If a sync
-    caller ever appears, override _create_summary/before_model the same way."""
+    caller ever appears, override _create_summary/before_model the same way.
+
+    `model_id` is the configured id of `model`, tagged onto the summary call so
+    the usage collector can price it: the call runs on the filter model, not
+    the turn's, and the callback sees only the request."""
+
+    def __init__(self, *args, model_id: str = "", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._model_id = model_id
 
     async def _acreate_summary(self, messages_to_summarize):
         # The parent body, minus the try/except that swallows a failure into a
@@ -1634,13 +1503,13 @@ class _SkipOnSummaryFailure(SummarizationMiddleware):
         # every summary token would be emitted into the message stream and
         # collected as reply text (the summary restates the conversation, so the
         # posted reply reads as an echoed prompt). TAG_NOSTREAM keeps the call out
-        # of the message stream at the source; lc_source keeps it out of the
-        # usage/trace books.
+        # of the message stream at the source; the metadata lets the usage
+        # collector book it aside from the turn, on its own model.
         response = await self.model.ainvoke(
             self.summary_prompt.format(messages=formatted).rstrip(),
             config={
                 "tags": [TAG_NOSTREAM],
-                "metadata": {"lc_source": "summarization"},
+                "metadata": {SOURCE_KEY: SUMMARIZATION, MODEL_KEY: self._model_id},
             },
         )
         return response.text.strip()
@@ -2094,6 +1963,7 @@ def base_middleware(
         stack.append(
             _SkipOnSummaryFailure(
                 model=make_model(summarizer_model_id),
+                model_id=summarizer_model_id,
                 trigger=("tokens", _SUMMARY_TRIGGER_TOKENS),
                 keep=("tokens", _SUMMARY_KEEP_TOKENS),
                 trim_tokens_to_summarize=_SUMMARY_TRIM_TOKENS,
@@ -2675,12 +2545,19 @@ class _GrowingPrefixCache(AgentMiddleware):
         tools_tokens,
         *,
         max_calls,
+        model_id="",
+        ttl_minutes=0,
     ):
         self._create = create
         self._delete = delete
         self._model_for = model_for
         self._system = system_message
         self._tools_tokens = tools_tokens
+        # For booking a creation: it is billed as input plus storage over the
+        # TTL, and never reaches a model callback. Tests that exercise the
+        # cache mechanics alone leave them unset and book nothing priced.
+        self._model_id = model_id
+        self._ttl_minutes = ttl_minutes
         # The turn's model-call cap, so the horizon check knows how many calls a
         # new cache could still be read over. Mirrors the ModelCallLimitMiddleware
         # run_limit its caller installs.
@@ -2760,6 +2637,11 @@ class _GrowingPrefixCache(AgentMiddleware):
         old = st.name
         st.name, st.boundary = name, target
         st.model, st.prefix_tokens = self._model_for(name), ptok
+        # ptok is the estimate the create was sized from; the provider's own
+        # count arrives with the first cached call, after the money is spent.
+        book_aside(
+            Usage.of_cache_creation(self._model_id, ptok, self._ttl_minutes / 60)
+        )
         # A new generation restarts the payback clock: the next re-cache must be
         # earned over the calls THIS one serves.
         st.calls_since = 0
@@ -2934,4 +2816,6 @@ def growing_cache_middleware(
         SystemMessage(system_prompt),
         tools_tokens,
         max_calls=max_calls,
+        model_id=model_id,
+        ttl_minutes=cache_ttl_minutes,
     )

@@ -30,7 +30,7 @@ DEFAULT_DB = Path("~/.local/share/airc/tokens.db").expanduser()
 
 COLUMNS = (
     "ts, thread_id, agent, kind, input_tokens, output_tokens,"
-    " cached_input_tokens, model, model_calls, max_call_input_tokens"
+    " cached_input_tokens, model, model_calls, max_call_input_tokens, usd, estimated"
 )
 
 
@@ -76,6 +76,8 @@ class Agg:
         self.out = 0
         self.cached = 0
         self.calls = 0
+        self.usd = 0.0
+        self.estimated = False
 
     def add(self, r: sqlite3.Row) -> None:
         self.n += 1
@@ -83,6 +85,12 @@ class Agg:
         self.out += r["output_tokens"]
         self.cached += r["cached_input_tokens"]
         self.calls += r["model_calls"]
+        self.usd += r["usd"]
+        self.estimated = self.estimated or bool(r["estimated"])
+
+    @property
+    def cost(self) -> str:
+        return f"{'~' if self.estimated else ''}${self.usd:.2f}"
 
     @property
     def uncached(self) -> int:
@@ -99,17 +107,17 @@ def group(rows: list[sqlite3.Row], key) -> dict[str, Agg]:
 def table(title: str, groups: dict[str, Agg], total_inp: int, limit: int = 0) -> None:
     print(f"\n== {title} ==")
     print(
-        f"{'':<42} {'rows':>5} {'input':>9} {'uncached':>9} {'hit%':>5}"
+        f"{'':<42} {'cost':>9} {'rows':>5} {'input':>9} {'uncached':>9} {'hit%':>5}"
         f" {'output':>8} {'in%':>5}"
     )
-    items = sorted(groups.items(), key=lambda kv: -kv[1].inp)
+    items = sorted(groups.items(), key=lambda kv: -kv[1].usd)
     if limit:
         items = items[:limit]
     for name, a in items:
         hit = f"{100 * a.cached / a.inp:.0f}" if a.inp else "-"
         share = f"{100 * a.inp / total_inp:.1f}" if total_inp else "-"
         print(
-            f"{name:<42} {a.n:>5} {fmt(a.inp):>9} {fmt(a.uncached):>9}"
+            f"{name:<42} {a.cost:>9} {a.n:>5} {fmt(a.inp):>9} {fmt(a.uncached):>9}"
             f" {hit:>5} {fmt(a.out):>8} {share:>5}"
         )
 
@@ -154,8 +162,8 @@ def main() -> None:
     hit = 100 * total.cached / total.inp if total.inp else 0
     print(
         f"{first} .. {last}\n"
-        f"input {fmt(total.inp)} ({fmt(total.uncached)} uncached, {hit:.0f}% cache"
-        f" hit), output {fmt(total.out)}"
+        f"{total.cost}: input {fmt(total.inp)} ({fmt(total.uncached)} uncached,"
+        f" {hit:.0f}% cache hit), output {fmt(total.out)}"
     )
 
     table("by kind", group(rows, lambda r: r["kind"]), total.inp)

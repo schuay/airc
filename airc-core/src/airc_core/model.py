@@ -385,35 +385,6 @@ def _drop_unsupported_kwargs(kwargs: dict, model_id: str) -> None:
     )
 
 
-def usage_counts(usage) -> tuple[int, int, int]:
-    """(input, output, cached_input) from a langchain usage_metadata dict.
-
-    cached_input is the prompt-cache-served subset of input (cache_read), 0 when
-    the provider does not report it. Mirrors the aggregation the streaming runner
-    does over UsageMetadataCallbackHandler, for the direct-ainvoke call sites.
-
-    Still a 3-tuple: call sites splat it as `add(*usage_counts(u), model)`, so
-    widening it would shift later arguments. Writes are cache_write_count().
-    """
-    usage = usage or {}
-    details = usage.get("input_token_details") or {}
-    return (
-        int(usage.get("input_tokens", 0)),
-        int(usage.get("output_tokens", 0)),
-        int(details.get("cache_read", 0)),
-    )
-
-
-def cache_write_count(usage) -> int:
-    """Tokens written to the provider prompt cache by this call.
-
-    Anthropic bills a write at 1.25x base input, so writes without later reads
-    cost more than not caching. Gemini's implicit cache reports none; 0 there.
-    """
-    details = (usage or {}).get("input_token_details") or {}
-    return int(details.get("cache_creation", 0))
-
-
 class _VertexNoiseFilter(logging.Filter):
     """Drop ChatVertexAI's benign, constant per-call log warnings.
 

@@ -795,3 +795,33 @@ async def test_transient_error_on_a_cached_call_is_not_probed_uncached():
         await mw.awrap_model_call(_Req(msgs), handler)
     assert ei.value is overload
     assert seen["uncached"] == 0
+
+
+async def test_a_created_cache_is_booked_as_spend():
+    """Creation never reaches a model callback, so the middleware books it
+    itself: the prefix at the input rate plus storage over the TTL, against
+    the collector whose invocation is running."""
+    from airc_core import UsageCollector
+
+    async def create(prefix):
+        return "c1"
+
+    async def delete(name):
+        pass
+
+    mw = _GrowingPrefixCache(
+        create,
+        delete,
+        lambda n: f"M:{n}",
+        SYS,
+        5000,
+        max_calls=70,
+        model_id="google_vertexai:gemini-3.1-pro-preview",
+        ttl_minutes=30,
+    )
+    c = UsageCollector("perf", "turn", "google_vertexai:gemini-3.1-pro-preview")
+    with c.active():
+        await _run(mw, _Req(_history(2), thread="A"))
+    assert c.aside.calls == 0 and c.aside.input > 0
+    assert c.aside.cache_storage_token_hours == pytest.approx(c.aside.input * 0.5)
+    assert c.aside.usd > 0 and not c.aside.estimated
