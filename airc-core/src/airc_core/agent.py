@@ -387,6 +387,17 @@ _empty_retry: contextvars.ContextVar[int] = contextvars.ContextVar(
     "airc_empty_candidate_retries", default=0
 )
 
+# In-place attempts on an unparsable tool call, and the wait before a repeat one
+# (the first is immediate: the common shape is a one-off wire truncation). Two,
+# so an agent with no graph-level re-ask -- the room, which does not use
+# RequireStructuredResultMiddleware -- gets a second chance before its turn dies
+# silently. Cheap: _RETRY_UNPARSABLE keeps the cached prefix, so an attempt buys
+# only output tokens. Kept small deliberately: these calls never re-enter
+# before_model, so they are invisible to the call and time budgets, and the
+# graph-level re-ask (not more of the same request) is the real escape hatch.
+_UNPARSABLE_RETRIES = 2
+_UNPARSABLE_RETRY_DELAY = 2.0
+
 
 class EmptyCandidateError(Exception):
     """A model call returned a zero-part candidate: no text and no tool calls.
@@ -758,15 +769,15 @@ class _EmptyCandidateRetry(AgentMiddleware):
         )
 
     async def _retry_unparsable(self, request, handler, resp):
-        """One retry of a tool call whose arguments did not parse, then hand the
-        response back rather than raising.
+        """Retry a tool call whose arguments did not parse, in place and bounded,
+        then hand the response back rather than raising.
 
         Covers both a call langchain recorded in invalid_tool_calls and a bare
         tool-call stop reason with no call behind it (e.g. a stream truncated
         at the boundary between an omitted thinking block and the tool call).
         Not EmptyCandidateError: that names a different failure, _is_retryable
         rejects it by type, and its consumer logs a dead turn. A dropped tool
-        call is not a dead turn -- if the retry also fails,
+        call is not a dead turn -- if every attempt fails,
         RequireStructuredResultMiddleware re-asks without charging the prose
         re-ask budget.
 
@@ -776,27 +787,38 @@ class _EmptyCandidateRetry(AgentMiddleware):
         existing cached prefix instead of paying an uncached resend.
         """
         bad = _first_unparsable_tool_call(resp)
-        log.warning(
-            "unparsable tool call; retrying once: %s", _response_shape(resp, bad)
+        # One ephemeral request, reused by every attempt: a tail append, so each
+        # retry still reads the cached prefix.
+        retry_request = request.override(
+            messages=[*request.messages, _UNPARSABLE_TOOL_CALL_NUDGE]
         )
         _empty_retry.set(_RETRY_UNPARSABLE)
         try:
-            resp2 = await handler(
-                request.override(
-                    messages=[*request.messages, _UNPARSABLE_TOOL_CALL_NUDGE]
+            for attempt in range(1, _UNPARSABLE_RETRIES + 1):
+                log.warning(
+                    # Every shape is informative: a retry that comes back
+                    # identical says the request, not the wire, decides this.
+                    "unparsable tool call; retrying (%d/%d): %s",
+                    attempt,
+                    _UNPARSABLE_RETRIES,
+                    _response_shape(resp, bad),
                 )
-            )
+                # An immediate resend already failed, so wait out a connection
+                # hiccup before repeating it.
+                if attempt > 1:
+                    await asyncio.sleep(_UNPARSABLE_RETRY_DELAY)
+                resp = await handler(retry_request)
+                if (bad := _first_unparsable_tool_call(resp)) is None:
+                    return resp
         finally:
             _empty_retry.set(0)
-        # The second shape is the informative one: a retry that comes back
-        # identical says the request, not the wire, decides this.
-        if (bad2 := _first_unparsable_tool_call(resp2)) is not None:
-            log.warning(
-                "unparsable tool call again; handing the turn back to its own"
-                " recovery: %s",
-                _response_shape(resp2, bad2),
-            )
-        return resp2
+        log.warning(
+            "unparsable tool call after %d retries; handing the turn back to its"
+            " own recovery: %s",
+            _UNPARSABLE_RETRIES,
+            _response_shape(resp, bad),
+        )
+        return resp
 
 
 # The one-shot nudge appended on a truncated or malformed tool call. Names the

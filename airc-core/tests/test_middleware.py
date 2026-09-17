@@ -2041,6 +2041,51 @@ async def test_a_bare_stop_reason_retries_once_with_unparsable_flag():
     assert agent._empty_retry.get() == 0
 
 
+async def test_a_second_truncation_gets_a_second_in_place_attempt(monkeypatch):
+    """Back-to-back truncations are what the second attempt exists for: without
+    it an agent with no graph-level re-ask (the room) ends the turn silently."""
+    from airc_core import agent
+
+    monkeypatch.setattr(agent, "_UNPARSABLE_RETRY_DELAY", 0)
+    mw = agent._EmptyCandidateRetry()
+    good = AIMessage(
+        content="",
+        tool_calls=[{"name": "T", "args": {}, "id": "c"}],
+        response_metadata={"stop_reason": "tool_use"},
+    )
+    calls = []
+
+    async def handler(req):
+        calls.append(agent._empty_retry.get())
+        return SimpleNamespace(result=[good] if len(calls) == 3 else [_truncated()])
+
+    out = await mw.awrap_model_call(_Req(1), handler)
+    assert out.result == [good]
+    # The turn's own call, then both retries, all but the first flagged.
+    assert calls == [0, agent._RETRY_UNPARSABLE, agent._RETRY_UNPARSABLE]
+    assert agent._empty_retry.get() == 0
+
+
+async def test_the_in_place_attempts_are_bounded_and_do_not_raise(monkeypatch):
+    """Exhausted, it hands the broken response back rather than raising:
+    EmptyCandidateError would mark a recoverable call a dead turn, and
+    RequireStructuredResultMiddleware re-asks from here."""
+    from airc_core import agent
+
+    monkeypatch.setattr(agent, "_UNPARSABLE_RETRY_DELAY", 0)
+    mw = agent._EmptyCandidateRetry()
+    calls = []
+
+    async def handler(req):
+        calls.append(agent._empty_retry.get())
+        return SimpleNamespace(result=[_truncated()])
+
+    out = await mw.awrap_model_call(_Req(1), handler)
+    assert agent._first_unparsable_tool_call(out) is not None
+    assert len(calls) == 1 + agent._UNPARSABLE_RETRIES
+    assert agent._empty_retry.get() == 0
+
+
 async def test_vertex_cache_serves_cached_on_unparsable_retry_and_uncached_on_empty():
     """_RETRY_EMPTY steps aside from the cached prefix; _RETRY_UNPARSABLE keeps
     serving from st.name while skipping seen_len and recache bookkeeping."""
