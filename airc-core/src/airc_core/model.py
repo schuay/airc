@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
-from .providers import EFFORT_LEVELS, traits_for
+from .providers import EFFORT_LEVELS, google_sdk, traits_for
 
 log = logging.getLogger(__name__)
 
@@ -540,13 +540,9 @@ def proxy_placeholder_credentials():
     return _PlaceholderCredentials()
 
 
-def _google_sdk() -> str:
-    """Which client stack backs google_vertexai: ids: "genai" (the default:
-    ChatGoogleGenerativeAI on the google-genai SDK) or "vertexai" (the
-    deprecated langchain-google-vertexai path). Same endpoints either way.
-    Env-shaped (seeded from [gcp] sdk) so one deployment can revert without a
-    code change while the old path still exists."""
-    return os.environ.get("AIRC_GOOGLE_SDK", "genai")
+# The switch lives in providers.py, next to the adapter trait it selects; kept
+# under this name here for the callers that read it as the model module's.
+_google_sdk = google_sdk
 
 
 def _install_genai_tool_first_guard() -> None:

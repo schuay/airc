@@ -60,9 +60,11 @@ def test_anthropic_generic_cache_creation_key_is_a_5m_write():
     assert u.cache_write_5m == 5_000 and u.cache_write_1h == 0
 
 
-def test_vertex_gemini_adds_thoughts_to_billable_output():
-    """The Vertex adapter reports candidates alone as output_tokens and the
-    thoughts under output_token_details; Google bills both as output."""
+def test_legacy_vertex_gemini_adds_thoughts_to_billable_output(monkeypatch):
+    """The langchain-google-vertexai adapter reports candidates alone as
+    output_tokens and the thoughts under output_token_details; Google bills
+    both as output."""
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "vertexai")
     meta = {
         "input_tokens": 1_000,
         "output_tokens": 200,
@@ -75,6 +77,23 @@ def test_vertex_gemini_adds_thoughts_to_billable_output():
     # The same dict from a provider whose output_tokens already includes
     # thinking is not double counted.
     assert Usage.of_call(meta, OPUS).output == 200
+
+
+def test_genai_served_vertex_gemini_does_not_count_thoughts_twice(monkeypatch):
+    """The default stack serves google_vertexai: ids through langchain-google-genai,
+    whose output_tokens already sums candidates and thoughts and repeats the
+    thoughts under output_token_details. Adding them again billed every
+    thinking call for its thought twice."""
+    monkeypatch.delenv("AIRC_GOOGLE_SDK", raising=False)
+    meta = {
+        "input_tokens": 1_000,
+        "output_tokens": 4_200,
+        "input_token_details": {"cache_read": 0},
+        "output_token_details": {"reasoning": 4_000},
+    }
+    u = Usage.of_call(meta, PRO)
+    assert u.output == 4_200 and u.reasoning == 4_000
+    assert u.usd == pytest.approx((1000 * 2 + 4200 * 12) / 1e6)
 
 
 def test_gemini_pro_prices_each_call_at_its_own_tier():

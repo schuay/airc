@@ -18,6 +18,7 @@ configuration language.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -44,11 +45,12 @@ class ProviderTraits:
     # and this one would do it to the most expensive parameter there is.
     supports_effort: bool = False
     # Whether the reported output_tokens already includes thinking. Every
-    # provider bills thinking at the output rate, but the Vertex Gemini adapter
-    # reports candidates and thoughts as two numbers and puts only the
-    # candidates in output_tokens; the google_genai adapter to the same models
-    # sums them, as Anthropic and OpenAI do. A reader that trusts output_tokens
-    # on Vertex under-counts every thinking call by the whole thought.
+    # provider bills thinking at the output rate, but the langchain-google-vertexai
+    # adapter reports candidates and thoughts as two numbers and puts only the
+    # candidates in output_tokens; the langchain-google-genai adapter to the same
+    # models sums them, as Anthropic and OpenAI do. A reader that trusts
+    # output_tokens on the first under-counts every thinking call by the whole
+    # thought, and one that adds the thought on the second counts it twice.
     reasoning_in_output: bool = True
 
 
@@ -68,15 +70,28 @@ _ANTHROPIC = ProviderTraits(
     supports_effort=True,
 )
 
-_GEMINI_VERTEX = ProviderTraits(id="google_vertexai", reasoning_in_output=False)
+# A google_vertexai: id is served by one of two adapters (google_sdk), and the
+# trait that differs between them is the adapter's, not the endpoint's.
+_GEMINI_VERTEX_LEGACY = ProviderTraits(id="google_vertexai", reasoning_in_output=False)
+_GEMINI_VERTEX_GENAI = ProviderTraits(id="google_vertexai")
 
 _DEFAULT = ProviderTraits(id="")
 
 _TRAITS: dict[str, ProviderTraits] = {
     "anthropic": _ANTHROPIC,
     "google_anthropic_vertex": _ANTHROPIC,
-    "google_vertexai": _GEMINI_VERTEX,
 }
+
+
+def google_sdk() -> str:
+    """Which client stack backs google_vertexai: ids: "genai" (the default:
+    ChatGoogleGenerativeAI on the google-genai SDK) or "vertexai" (the
+    deprecated langchain-google-vertexai path). Same endpoints either way.
+    Env-shaped (seeded from [gcp] sdk) so one deployment can revert without a
+    code change while the old path still exists. Read here, without the
+    framework, because the usage reader has to know which adapter's numbers it
+    is looking at."""
+    return os.environ.get("AIRC_GOOGLE_SDK", "genai")
 
 
 def traits_for(model_id: str) -> ProviderTraits:
@@ -86,7 +101,12 @@ def traits_for(model_id: str) -> ProviderTraits:
     optimization over asking the provider, and a provider missing from it has to
     keep working.
     """
-    return _TRAITS.get(model_id.split(":", 1)[0], _DEFAULT)
+    prefix = model_id.split(":", 1)[0]
+    if prefix == "google_vertexai":
+        return (
+            _GEMINI_VERTEX_GENAI if google_sdk() == "genai" else _GEMINI_VERTEX_LEGACY
+        )
+    return _TRAITS.get(prefix, _DEFAULT)
 
 
 # Every name a provider might use for the stop reason, in table order. Readers
