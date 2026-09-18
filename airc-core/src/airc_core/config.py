@@ -270,6 +270,18 @@ class CommonConfig:
     repos: dict[str, str] = field(default_factory=dict)  # logical name -> checkout
     caching_explicit: bool = True
     cache_ttl_minutes: int = 30
+    #: Rolling fleet-wide spend caps in USD over the last 24h and 7d. None is no
+    #: cap; both are checked and either binds. Suite-wide for the reason
+    #: bus_root and token_db_path are: more than one component reads them, and a
+    #: per-component key is how two of them end up with different numbers --
+    #: which also sum to a fleet total nobody chose.
+    #:
+    #: Read live at each admission, deliberately unlike Limits, which is stamped
+    #: at enqueue so a job's behaviour is fixed at creation. A window cap is a
+    #: property of the fleet at the moment work starts, not of the job, so
+    #: raising a binding cap takes a config edit and a restart.
+    daily_usd_cap: float | None = None
+    weekly_usd_cap: float | None = None
 
 
 def _warn_unpriced(models: Mapping[str, str]) -> None:
@@ -412,6 +424,18 @@ def load_common(raw: Mapping) -> CommonConfig:
         reject_unknown(caching, {"explicit", "ttl_minutes"}, "[caching]")
         cfg.caching_explicit = bool(caching.get("explicit", True))
         cfg.cache_ttl_minutes = int(caching.get("ttl_minutes", 30))
+    # Presence-checked, not truth-checked: 0 is a cap of zero (admit nothing),
+    # a coherent thing to write while an incident is being looked at, and
+    # `if v :=` would silently read it as unset.
+    for key in ("daily_usd_cap", "weekly_usd_cap"):
+        if key in raw:
+            v = raw[key]
+            setattr(cfg, key, None if v is None else float(v))
+    if cfg.daily_usd_cap is not None or cfg.weekly_usd_cap is not None:
+        # Worse here than at a pass: a window cap sums EVERY model's rows, so one
+        # mis-priced model puts a placeholder number into the total that stalls
+        # every capped stream in the suite.
+        refuse_unpriced(cfg.models, "daily_usd_cap/weekly_usd_cap")
     _warn_explicit_vertex_cache(cfg)
     return cfg
 

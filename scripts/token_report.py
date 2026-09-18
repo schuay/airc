@@ -16,6 +16,11 @@ Usage:
     scripts/token_report.py --today
     scripts/token_report.py --days 7
     scripts/token_report.py --db path.db
+
+Always prints the rolling daily/weekly spend windows the fleet caps read
+(daily_usd_cap / weekly_usd_cap), including when the next dollars free up: a
+rolling window never visibly resets, so a bound fleet otherwise reads as a
+stuck one.
 """
 
 import argparse
@@ -34,14 +39,66 @@ COLUMNS = (
 )
 
 
-def resolve_db() -> Path:
+def _suite_config() -> dict:
+    if not CONFIG_PATH.exists():
+        return {}
+    with open(CONFIG_PATH, "rb") as f:
+        return tomllib.load(f)
+
+
+def resolve_db(cfg: dict) -> Path:
     # Same resolution as airc_core.load_common, without needing the venv: the
     # top-level token_db_path key, else the code default next to the store.
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "rb") as f:
-            if v := tomllib.load(f).get("token_db_path"):
-                return Path(v).expanduser()
+    if v := cfg.get("token_db_path"):
+        return Path(v).expanduser()
     return DEFAULT_DB
+
+
+# (label, seconds), matching airc_core.tokens.SpendWindows.
+WINDOWS = (("daily", 86400.0), ("weekly", 7 * 86400.0))
+
+
+def windows(path: Path, cfg: dict) -> None:
+    """What the rolling fleet caps see right now.
+
+    A rolling window never visibly resets, so a bound fleet reads as a stuck
+    one and the only other sign is a single log line. "next free" is what falls
+    out of the window in the coming hour -- the dollars that come back without
+    anybody doing anything -- which is the question an operator staring at a
+    quiet queue actually has.
+    """
+    now = time.time()
+    print("\n== rolling spend windows ==")
+    print(
+        f"{'window':<8} {'spent':>10} {'cap':>10} {'remaining':>10} {'next free':>10}"
+    )
+    for label, seconds in WINDOWS:
+        cap = cfg.get(f"{label}_usd_cap")
+        spent, estimated = _sum_usd(path, now - seconds, now)
+        # The rows about to roll out: the leaky bucket's next drip.
+        freeing, _ = _sum_usd(path, now - seconds, now - seconds + 3600.0)
+        mark = "~" if estimated else ""
+        print(
+            f"{label:<8} {mark + f'${spent:.2f}':>10}"
+            f" {(f'${cap:g}' if cap is not None else '-'):>10}"
+            f" {(f'${cap - spent:.2f}' if cap is not None else '-'):>10}"
+            f" {mark + f'${freeing:.2f}':>10}"
+        )
+    if not any(cfg.get(f"{label}_usd_cap") is not None for label, _ in WINDOWS):
+        print("(no daily_usd_cap / weekly_usd_cap set: nothing is being bound)")
+
+
+def _sum_usd(path: Path, since: float, until: float) -> tuple[float, bool]:
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = db.execute(
+            "SELECT COALESCE(SUM(usd), 0), COALESCE(MAX(estimated), 0)"
+            " FROM token_usage WHERE ts >= ? AND ts < ?",
+            (since, until),
+        ).fetchone()
+    finally:
+        db.close()
+    return float(row[0]), bool(row[1])
 
 
 def load_rows(path: Path, since: float) -> list[sqlite3.Row]:
@@ -146,11 +203,17 @@ def main() -> None:
         )
         since = max(since, time.mktime(midnight))
 
-    path = args.db or resolve_db()
+    cfg = _suite_config()
+    path = args.db or resolve_db(cfg)
     if not path.exists():
         raise SystemExit(f"no token db at {path}")
     rows = load_rows(path, since)
     print(f"source: {path} ({len(rows)} rows)")
+    # Before the early return and outside `since`: the windows are about the
+    # caps as they stand now, not about whatever slice the arguments selected,
+    # and "the fleet is bound" is the one thing worth saying even when the
+    # selected range is empty.
+    windows(path, cfg)
     if not rows:
         return
 

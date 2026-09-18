@@ -75,6 +75,10 @@ CREATE TABLE IF NOT EXISTS token_usage (
     usd_output REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_thread ON token_usage(thread_id);
+-- The window caps query "what did the fleet spend since <ts>" at every
+-- admission, and the reports scan by time too; the table was indexed on
+-- thread_id alone, so both were full scans over a growing ledger.
+CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(ts);
 """
 
 # Columns added after the table first shipped, with the DDL that adds each.
@@ -137,6 +141,18 @@ class TokenLog:
         for name, ddl in _ADDED_COLUMNS:
             if name not in cols:
                 self._db.execute(f"ALTER TABLE token_usage ADD COLUMN {name} {ddl}")
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the ledger is actually being kept.
+
+        The rest of TokenLog fails soft exactly as its docstring promises: a
+        disabled log's queries all return 0, which is right for a report (say
+        nothing rather than crash) and wrong for exactly one reader, the window
+        cap. A cap that reads that zero concludes nothing was spent and stops
+        existing at the moment nobody can see the spending.
+        """
+        return self._db is not None
 
     def close(self) -> None:
         if self._db is not None:
@@ -220,6 +236,17 @@ class TokenLog:
             (since,),
         ).fetchone()
         return (float(row[0]), bool(row[1]))
+
+    def usd_in(self, since: float, until: float) -> float:
+        """Dollars booked in [since, until). What the window-cap report calls
+        "next free": the rows about to roll out of a rolling window."""
+        if self._db is None:
+            return 0.0
+        row = self._db.execute(
+            "SELECT COALESCE(SUM(usd), 0) FROM token_usage WHERE ts >= ? AND ts < ?",
+            (since, until),
+        ).fetchone()
+        return float(row[0])
 
     def recent_max_input(self, thread_id: int, since: float = 0.0) -> int:
         """The largest single-turn input on a thread since `since` -- the memory
@@ -339,3 +366,95 @@ class TokenLog:
             (since, n),
         ).fetchall()
         return [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], float(r[7])) for r in rows]
+
+
+DAY_S = 24 * 3600.0
+WEEK_S = 7 * DAY_S
+
+
+class SpendWindows:
+    """The rolling daily and weekly fleet caps, as one admission decision.
+
+    Steps 4 and 5 bound one pass and one job; neither bounds how many of them a
+    day runs, so on an expensive roster the fleet's only protection against a
+    bad night is that somebody is watching it. This is that bound: one query per
+    window at each intake boundary, `usd_total(now - window) < cap`.
+
+    Deliberately not a reservation. It does not know what the work it admits
+    will cost, and exact observance is not what the cap is for: spend converges
+    to the cap plus one generation of work already running, and that generation
+    is bounded by the per-pass and per-job budgets. Nothing already admitted is
+    re-checked or killed -- cutting a review off mid-fan-out throws away what it
+    spent and reports clean, which is indistinguishable from a good commit.
+
+    The windows roll rather than aligning to a calendar: a calendar week permits
+    the whole cap on Sunday night and the whole cap again on Monday morning,
+    where a rolling window is a leaky bucket that actually bounds, with no
+    timezone or DST question. What rolling costs is that it never visibly
+    resets, so a bound fleet reads as a stuck one; `token_report.py` answers
+    that by naming when the next dollars free up.
+
+    One log line on the transition into bound and one out of it, never one per
+    refused admission.
+    """
+
+    def __init__(
+        self,
+        log: TokenLog,
+        daily_usd_cap: float | None = None,
+        weekly_usd_cap: float | None = None,
+    ) -> None:
+        self._log = log
+        self._caps = (
+            ("daily", DAY_S, daily_usd_cap),
+            ("weekly", WEEK_S, weekly_usd_cap),
+        )
+        self._bound: str | None = None
+        self._announced = False
+
+    @property
+    def configured(self) -> bool:
+        return any(cap is not None for _, _, cap in self._caps)
+
+    def bound(self, now: float | None = None) -> str | None:
+        """Why the fleet may not start new work, or None when it may.
+
+        A disabled ledger is no headroom, not an empty window: it is the one
+        state where "nothing was spent" and "nobody can see what was spent" look
+        identical from a query, and the safe reading of the second is to stop.
+        """
+        if not self.configured:
+            return None
+        now = time.time() if now is None else now
+        reason = None
+        if not self._log.enabled:
+            reason = (
+                "the token ledger is disabled, so the spend window cannot be"
+                " read; treating it as no headroom"
+            )
+        else:
+            for name, window, cap in self._caps:
+                if cap is None:
+                    continue
+                spent, estimated = self._log.usd_total(now - window)
+                if spent >= cap:
+                    reason = (
+                        f"{name} spend cap reached:"
+                        f" {'~' if estimated else ''}${spent:.2f} of ${cap:g}"
+                        f" in the last {window / DAY_S:g}d"
+                    )
+                    break
+        self._announce(reason)
+        return reason
+
+    def _announce(self, reason: str | None) -> None:
+        if reason == self._bound and self._announced:
+            return
+        self._announced = True
+        if reason is not None:
+            log.warning(
+                "spend cap: %s; deferring new work until the window frees", reason
+            )
+        elif self._bound is not None:
+            log.info("spend cap: window freed; taking new work again")
+        self._bound = reason

@@ -4,6 +4,7 @@
 """TokenLog: the shared token-usage ledger (aggregates, windowing, migration)."""
 
 import sqlite3
+import time
 
 import pytest
 from airc_core import TokenLog, Usage
@@ -270,3 +271,130 @@ def test_transient_busy_drops_the_row_and_keeps_the_ledger(tmp_path, caplog):
     tokens._db = real
     tokens.add(_u(5, 7), thread_id=1, agent="triage", kind="structured-task")
     assert tokens.totals() == (5, 7)
+
+
+# ── rolling spend windows ────────────────────────────────────────────────────
+
+
+def _spent(log, usd, ts):
+    """One booked row at a chosen time. add() stamps time.time(), so the ts is
+    rewritten -- the windows are entirely about how old a row is."""
+    from airc_core.usage import Usage
+
+    log.add(
+        Usage(model="claude-opus-5", calls=1, usd=usd), thread_id=0, agent="a", kind="k"
+    )
+    log._db.execute(
+        "UPDATE token_usage SET ts = ? WHERE id = last_insert_rowid()", (ts,)
+    )
+    log._db.commit()
+
+
+def test_no_cap_configured_never_binds(tmp_path):
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    _spent(log, 10_000.0, time.time())
+    windows = SpendWindows(log)
+    assert not windows.configured
+    assert windows.bound() is None
+
+
+def test_the_daily_cap_binds_on_the_last_24h_alone(tmp_path):
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    now = time.time()
+    _spent(log, 90.0, now - 25 * 3600)  # yesterday: out of the window
+    _spent(log, 40.0, now - 3600)
+    windows = SpendWindows(log, daily_usd_cap=50.0)
+    assert windows.bound(now) is None  # 40 of 50, the old row does not count
+    _spent(log, 15.0, now - 60)
+    reason = windows.bound(now)
+    assert reason is not None and "daily" in reason and "$55.00" in reason
+
+
+def test_either_window_binds(tmp_path):
+    """Both are checked; a week that is over does not need the day to be."""
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    now = time.time()
+    for day_ago in range(1, 7):
+        _spent(log, 30.0, now - day_ago * 86400 + 60)
+    windows = SpendWindows(log, daily_usd_cap=50.0, weekly_usd_cap=100.0)
+    assert windows.bound(now) is not None  # 180 over the week, 0 today
+
+
+def test_the_window_rolls_rather_than_resetting(tmp_path):
+    """The leaky bucket: spend that ages out of the window frees up, with no
+    calendar boundary that would permit the whole cap twice in two hours."""
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    now = time.time()
+    _spent(log, 60.0, now - 23 * 3600)
+    windows = SpendWindows(log, daily_usd_cap=50.0)
+    assert windows.bound(now) is not None
+    assert windows.bound(now + 2 * 3600) is None  # the row has rolled out
+
+
+def test_a_disabled_ledger_is_no_headroom_not_an_empty_window(tmp_path):
+    """The hazard the whole check is written around. TokenLog returns 0 from
+    every query when it cannot be opened or written, and a cap that reads that
+    zero concludes nothing was spent -- so it stops existing at exactly the
+    moment nobody can see the spending."""
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    assert log.enabled
+    log._db = None  # what a full disk or a vanished file leaves behind
+    assert not log.enabled
+    assert log.usd_total(0.0) == (0.0, False)  # reads as an empty window
+    windows = SpendWindows(log, daily_usd_cap=50.0)
+    reason = windows.bound()
+    assert reason is not None and "ledger is disabled" in reason
+
+
+def test_a_disabled_ledger_without_a_cap_is_nobody_business(tmp_path):
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    log._db = None
+    assert SpendWindows(log).bound() is None
+
+
+def test_the_transition_is_logged_once_in_each_direction(tmp_path, caplog):
+    """One line on the way into bound and one on the way out, never one per
+    refused admission -- the loop asks on every poll."""
+    import logging
+
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    now = time.time()
+    _spent(log, 60.0, now - 3600)
+    windows = SpendWindows(log, daily_usd_cap=50.0)
+    with caplog.at_level(logging.INFO, logger="airc_core.tokens"):
+        for _ in range(5):
+            windows.bound(now)
+        for _ in range(5):
+            windows.bound(now + 25 * 3600)
+    lines = [r.message for r in caplog.records if "spend cap" in r.message]
+    assert len(lines) == 2, lines
+    assert "deferring new work" in lines[0]
+    assert "window freed" in lines[1]
+
+
+def test_the_ledger_is_indexed_on_time(tmp_path):
+    """The window query runs at every admission; the table used to be indexed on
+    thread_id alone, so it was a full scan over a growing ledger."""
+    from airc_core.tokens import TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    names = {r[1] for r in log._db.execute("PRAGMA index_list(token_usage)")}
+    assert "idx_token_usage_ts" in names
+    plan = log._db.execute(
+        "EXPLAIN QUERY PLAN SELECT SUM(usd) FROM token_usage WHERE ts >= 0"
+    ).fetchall()
+    assert any("idx_token_usage_ts" in str(r) for r in plan), plan
