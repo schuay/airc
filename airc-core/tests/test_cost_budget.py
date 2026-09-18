@@ -365,14 +365,44 @@ async def test_the_trip_is_never_read_as_a_transient():
 # ── the two numbers, and what their degenerate values mean ───────────────────
 
 
-def test_a_non_positive_cost_limit_is_refused_rather_than_run():
-    """Not "no limit": before_model would end the turn before its first call, so
-    the graph would run nothing and hand back a verdict-shaped nothing that
-    every caller reads as "the model had nothing to report". The way to stop
-    doing the work is to stop asking for it."""
-    for bad in (0.0, -1.0):
-        with pytest.raises(ValueError, match="cost_limit must be positive"):
-            _budget(cost_limit=bad)
+def test_a_negative_cost_limit_is_a_typo_not_an_unset_one():
+    with pytest.raises(ValueError, match="cost_limit must be zero"):
+        _budget(cost_limit=-1.0)
+
+
+async def test_no_cost_limit_never_ends_the_turn_on_spend():
+    """0 is no ceiling, for a deployment whose model the price table cannot
+    price: a bound there would be a bound on the generic placeholder rate, a
+    dollar figure nobody chose. The turn then ends where the caller's own
+    backstops put it, not where the money runs out."""
+    mw = _budget(cost_limit=0.0)
+    spend = await _run_calls(mw, [_usage(400_000)] * 20)
+    # Well past the $25 every other test here is bounded by, and still running.
+    assert spend.usage.usd > 25.0
+    assert mw.before_model({BUDGET_KEY: spend}, None) is None
+    # The same spend against a ceiling ends the turn, so it is the limit doing
+    # the ending and not the absence of anything to spend.
+    assert _budget(cost_limit=25.0).before_model({BUDGET_KEY: spend}, None) is not None
+
+
+async def test_no_cost_limit_leaves_the_reads_open():
+    """The window closes reads once what REMAINS is a few calls' worth. With
+    nothing remaining to run down there is no point at which that is true, so a
+    pass keeps its tools to the end rather than losing them to a division that
+    never had a denominator."""
+    mw = _budget(cost_limit=0.0)
+    spend = await _run_calls(mw, [_usage(400_000)] * 10)
+    assert spend.calls_left == math.inf and not spend.closed
+
+
+def test_no_cost_limit_drops_the_percentage_instead_of_dividing_by_zero():
+    """Same reasoning as the absent context target: this is prose the model
+    reads on every call, and "20% of the $0 cap" is a sentence that means
+    nothing asserted a hundred times."""
+    spend = _Spend(usage=Usage(usd=5.0, calls=3), last_input=410_000)
+    assert _budget(cost_limit=0.0, context_target=0).pointer(spend) == "$5.00 spent"
+    both = _budget(cost_limit=0.0, context_target=400_000).pointer(spend)
+    assert both == "$5.00 spent; context 410k of 400k target"
 
 
 def test_no_context_target_drops_the_clause_instead_of_rendering_a_zero():

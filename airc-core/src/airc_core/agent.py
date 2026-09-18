@@ -1303,6 +1303,15 @@ class BudgetMiddleware(AgentMiddleware):
     drives nothing else yet -- the nudge cadence still runs off call counts in
     CallBudgetMiddleware until the schedule is re-sized against the ledger.
 
+    `cost_limit = 0` is no ceiling at all: the turn never ends on spend, the
+    reads never close, and the pointer stops quoting a percentage of a cap that
+    does not exist. It is for a deployment where the dollar figure means
+    nothing -- a model the price table cannot price, a flat-rate or local
+    endpoint -- where the alternative was a bound computed from the generic
+    placeholder rate, which is a number nobody chose. What still bounds such a
+    turn is the caller's recursion limit and whatever call-count nudges it
+    attached, so a caller that unsets the limit is choosing those instead.
+
     What it does per call:
 
     - Accumulates one `Usage` from the response just appended, priced through
@@ -1337,7 +1346,7 @@ class BudgetMiddleware(AgentMiddleware):
         model_id: str,
         *,
         context_target: int,
-        cost_limit: float,
+        cost_limit: float,  # 0 = no ceiling
         notice: str,
         refusal: str,
         window: float = 3.0,
@@ -1345,13 +1354,16 @@ class BudgetMiddleware(AgentMiddleware):
         zero_cache_trips: int = _ZERO_CACHE_TRIPS,
     ) -> None:
         super().__init__()
-        # A non-positive limit is not "no limit": before_model would end the turn
-        # before its first call, so the graph would run nothing and report a
-        # verdict-shaped nothing. Nobody means that -- the way to stop doing the
-        # work is to stop asking for it -- and the failure is silent, so it is
-        # refused where it is written rather than discovered in a log.
-        if cost_limit <= 0:
-            raise ValueError(f"cost_limit must be positive, got {cost_limit!r}")
+        # 0 is "no ceiling", and it is spelled as its own state rather than as
+        # a very large number: the read-closing window and the pointer both
+        # divide by the limit, and a stand-in like 1e9 would leave them quoting
+        # 0% of a cap forever instead of dropping the clause. Negative is a
+        # typo. Held as None from here down so no arithmetic site can reach the
+        # unbounded case by accident.
+        if cost_limit < 0:
+            raise ValueError(
+                f"cost_limit must be zero (no ceiling) or positive, got {cost_limit!r}"
+            )
         # 0 is legitimate and means "no target": it drives nothing yet, and the
         # pointer simply does not mention a target the operator has not chosen.
         # Negative is a typo.
@@ -1362,7 +1374,7 @@ class BudgetMiddleware(AgentMiddleware):
             )
         self._model_id = model_id
         self._context_target = context_target
-        self._cost_limit = cost_limit
+        self._cost_limit: float | None = cost_limit or None
         self._notice = notice
         self._refusal = refusal
         self._window = window
@@ -1375,12 +1387,15 @@ class BudgetMiddleware(AgentMiddleware):
     def _advance(self, prev: _Spend, response) -> _Spend:
         call = Usage.of_call(getattr(response, "usage_metadata", None), self._model_id)
         total = prev.usage + call
-        left = self._cost_limit - total.usd
         # A call the provider reported no usage for (or a fake model in a test)
         # gives no unit to divide by; inf is the reading that leaves every brake
         # and the window where they were rather than slamming them shut on a
-        # missing number.
-        calls_left = max(0.0, left / call.usd) if call.usd > 0 else math.inf
+        # missing number. An unbounded turn is the same reading for the same
+        # reason: nothing is running out, so nothing should close.
+        if self._cost_limit is None or call.usd <= 0:
+            calls_left = math.inf
+        else:
+            calls_left = max(0.0, (self._cost_limit - total.usd) / call.usd)
         lost = call.input >= self._zero_cache_floor and call.cache_read == 0
         return _Spend(
             usage=total,
@@ -1416,7 +1431,7 @@ class BudgetMiddleware(AgentMiddleware):
     @hook_config(can_jump_to=["end"])
     def before_model(self, state, runtime) -> dict[str, Any] | None:
         spend = self._spend(state)
-        if spend.usage.usd < self._cost_limit:
+        if self._cost_limit is None or spend.usage.usd < self._cost_limit:
             return None
         reason = (
             f"Cost limit reached: {spend.usage.cost()} of"
@@ -1436,13 +1451,16 @@ class BudgetMiddleware(AgentMiddleware):
         call of the turn. "Of cap", because the cap is a ceiling, not a target.
 
         With no context target set the clause is dropped rather than rendered
-        against a zero. This is prose the model reads on every call of the turn,
-        so "context 410k of 0 target" is not a cosmetic problem: it is a
-        sentence that means nothing being asserted to the model a hundred times.
+        against a zero, and with no cost ceiling the spend is reported without a
+        percentage. This is prose the model reads on every call of the turn, so
+        "context 410k of 0 target" is not a cosmetic problem: it is a sentence
+        that means nothing being asserted to the model a hundred times.
         """
         u = spend.usage
-        pct = round(100 * u.usd / self._cost_limit)
-        line = f"{u.cost()} spent, {pct}% of the ${self._cost_limit:g} cap"
+        line = f"{u.cost()} spent"
+        if self._cost_limit is not None:
+            pct = round(100 * u.usd / self._cost_limit)
+            line += f", {pct}% of the ${self._cost_limit:g} cap"
         if self._context_target > 0:
             line += (
                 f"; context {_k(spend.last_input)} of {_k(self._context_target)} target"
@@ -1458,10 +1476,13 @@ class BudgetMiddleware(AgentMiddleware):
         spend = self._spend(getattr(request, "state", None) or {})
         extra = [HumanMessage(self.pointer(spend))]
         if spend.closed:
+            # Only reachable with a ceiling set -- an unbounded turn never runs
+            # its window down -- but the format is guarded rather than assumed,
+            # since a caller could hand back a _Spend from a bounded run.
             log.info(
                 "budget: reads closed with %s of the $%g cap spent",
                 spend.usage.cost(),
-                self._cost_limit,
+                self._cost_limit or 0,
             )
             extra.append(HumanMessage(self._notice))
         return await handler(request.override(messages=[*request.messages, *extra]))
