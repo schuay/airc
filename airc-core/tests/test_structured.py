@@ -91,3 +91,33 @@ async def test_missing_result_fails_instead_of_becoming_a_clean_verdict(
 def test_requires_a_configured_model(tmp_path):
     with pytest.raises(ValueError, match="no model configured"):
         StructuredTaskRunner(CommonConfig(token_db_path=tmp_path / "tokens.db"))
+
+
+def test_the_configured_effort_reaches_make_model(tmp_path, monkeypatch):
+    """Asserted on the kwargs make_model actually receives, not on the profile
+    being looked up: resolving the profile and then dropping its knobs at the
+    call is exactly the bug."""
+    from airc_core import structured
+    from airc_core.config import ModelProfile
+
+    seen = {}
+
+    def fake_make_model(model_id, **kwargs):
+        seen["model_id"] = model_id
+        seen["kwargs"] = kwargs
+        return _ScriptedModel(scripted=[_tool()])
+
+    monkeypatch.setattr(structured, "make_model", fake_make_model)
+    common = CommonConfig(
+        models={"judge": "anthropic:claude-opus-5"},
+        model_profiles={
+            "judge": ModelProfile(
+                key="judge", id="anthropic:claude-opus-5", effort="xhigh"
+            )
+        },
+        token_db_path=tmp_path / "tokens.db",
+    )
+    runner = StructuredTaskRunner(common, model_key="judge")
+    runner._graph_for("judge", Verdict)
+    assert seen["model_id"] == "anthropic:claude-opus-5"
+    assert seen["kwargs"] == {"effort": "xhigh"}

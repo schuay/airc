@@ -373,3 +373,46 @@ def test_refuse_unpriced_passes_a_fully_listed_roster():
         },
         "[processors.review] cost_limit",
     )
+
+
+def test_profile_for_carries_the_knobs_the_id_lookup_dropped():
+    """The bug this exists to stop: `common.models` is ids alone, so a component
+    resolving there gets the checkpoint and silently drops the entry's effort --
+    a config that said xhigh parsed, validated and started clean while every
+    call ran at the provider default."""
+    from airc_core.config import CommonConfig, ModelProfile, profile_for
+
+    common = CommonConfig(
+        models={"coding": "anthropic:claude-opus-5"},
+        model_profiles={
+            "coding": ModelProfile(
+                key="coding", id="anthropic:claude-opus-5", effort="xhigh"
+            )
+        },
+    )
+    profile = profile_for(common, "coding", "")
+    assert profile.id == "anthropic:claude-opus-5"
+    assert profile.call_kwargs == {"effort": "xhigh"}
+
+
+def test_profile_for_falls_back_to_default_then_refuses():
+    from airc_core.config import CommonConfig, ModelProfile, profile_for
+
+    common = CommonConfig(
+        model_profiles={"default": ModelProfile(key="default", id="p:d")}
+    )
+    assert profile_for(common, "coding", "").id == "p:d"
+    with pytest.raises(ValueError, match=r"\[models\].coding or .default"):
+        profile_for(CommonConfig(), "coding", "")
+
+
+def test_profile_for_accepts_an_ids_only_config():
+    """Only load_common fills both tables. A CommonConfig built by hand -- a
+    test, a one-shot driver -- carries ids alone and cannot have meant "no
+    model" by it; it carries no knobs either, so a bare profile is exactly what
+    it expressed."""
+    from airc_core.config import CommonConfig, profile_for
+
+    common = CommonConfig(models={"judge": "test:model"})
+    profile = profile_for(common, "judge", "")
+    assert profile.id == "test:model" and profile.call_kwargs == {}

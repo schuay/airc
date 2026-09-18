@@ -284,6 +284,34 @@ class CommonConfig:
     weekly_usd_cap: float | None = None
 
 
+def profile_for(common: CommonConfig, key: str, where: str) -> ModelProfile:
+    """The [models] entry `key` names, falling back to `default`.
+
+    Resolved as a PROFILE, not an id. `CommonConfig.models` is ids alone, so a
+    component that reads it gets the checkpoint and silently drops every knob
+    beside it -- an operator who wrote `effort = "xhigh"` then has a config that
+    parses, validates and starts clean while the model runs at the provider
+    default, with nothing anywhere saying so. The profile carries the knobs
+    through `call_kwargs`, which is what make_model takes.
+
+    The fallback keys on the ID being present, not the profile: an entry with an
+    empty id is the same "not configured" the id-based lookup treated it as.
+
+    `models` is consulted when `model_profiles` has no entry, because only
+    load_common fills both. A CommonConfig built by hand -- a test, a one-shot
+    driver -- legitimately carries ids alone, and such a caller cannot have
+    meant "no model" by it. It carries no knobs either, so that path resolves to
+    a bare profile, which is exactly what it expressed.
+    """
+    for candidate in (key, "default"):
+        profile = common.model_profiles.get(candidate)
+        if profile is not None and profile.id:
+            return profile
+        if model_id := common.models.get(candidate):
+            return ModelProfile(key=candidate, id=model_id)
+    raise ValueError(f"no model configured: [models].{key} or .default{where}")
+
+
 def _warn_unpriced(models: Mapping[str, str]) -> None:
     """Name, at load, every [models] entry the price table has no listing for.
 

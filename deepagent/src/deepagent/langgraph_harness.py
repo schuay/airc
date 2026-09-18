@@ -42,6 +42,7 @@ from airc_core import (
     base_middleware,
     growing_cache_middleware,
     make_model,
+    profile_for,
 )
 from airc_tools.edit import apply_edits as _apply_edits
 from airc_tools.edit import write_file as _write_file
@@ -415,13 +416,14 @@ class LangGraphHarness:
         tool_wrapper: Callable[[list], list] | None = None,
     ) -> None:
         self._common = common
-        self._model_id = common.models.get(coding_model_key) or common.models.get(
-            "default", ""
-        )
-        if not self._model_id:
-            raise ValueError(
-                f"no model configured: [models].{coding_model_key} or .default"
-            )
+        # The profile, not the id: `common.models` is ids alone, so resolving
+        # there dropped the entry's `effort` on the floor -- a config that said
+        # xhigh parsed, validated and started clean while every turn ran at the
+        # provider default, and nothing anywhere said so. Thinking is billed at
+        # the output rate, so that is a cheaper and worse job than the operator
+        # asked for.
+        self._profile = profile_for(common, coding_model_key, "")
+        self._model_id = self._profile.id
         self._groups = list(coding_tool_groups)
         self._shell_timeout_s = shell_timeout_s
         self._schemas: dict[str, type[Report]] = dict(schemas or {})
@@ -681,7 +683,7 @@ class LangGraphHarness:
             ModelCallLimitMiddleware(run_limit=_MAX_MODEL_CALLS, exit_behavior="end"),
         ]
         graph = create_agent(
-            make_model(self._model_id),
+            make_model(self._model_id, **self._profile.call_kwargs),
             tools=tools,
             system_prompt=self._system,
             middleware=mw,

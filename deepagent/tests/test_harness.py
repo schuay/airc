@@ -180,3 +180,41 @@ async def test_no_wrapper_leaves_the_tools_alone(tmp_path):
     await h._ensure_init()
     assert h._tool_wrapper is None
     await h.aclose()
+
+
+async def test_the_configured_effort_reaches_make_model(tmp_path, monkeypatch):
+    """LangGraphHarness resolved its model out of `common.models`, which is ids
+    alone, so `[models.coding] effort = "xhigh"` parsed, validated and started
+    clean while every goal turn ran at the provider default -- and thinking is
+    billed at the output rate, so that is a cheaper and worse job than the
+    operator asked for. Asserted on the kwargs make_model receives, because
+    resolving the profile and dropping its knobs at the call is the bug."""
+    from airc_core.config import CommonConfig, ModelProfile
+    from langchain_core.language_models import GenericFakeChatModel
+
+    from deepagent import Report
+    from deepagent import langgraph_harness as lh
+
+    seen = {}
+
+    def fake_make_model(model_id, **kwargs):
+        seen["model_id"] = model_id
+        seen["kwargs"] = kwargs
+        return GenericFakeChatModel(messages=iter([]))
+
+    monkeypatch.setattr(lh, "make_model", fake_make_model)
+    common = CommonConfig(
+        models={"coding": "anthropic:claude-opus-5"},
+        model_profiles={
+            "coding": ModelProfile(
+                key="coding", id="anthropic:claude-opus-5", effort="xhigh"
+            )
+        },
+        token_db_path=tmp_path / "tokens.db",
+    )
+    h = lh.LangGraphHarness(common, coding_model_key="coding")
+    assert h._model_id == "anthropic:claude-opus-5"
+    assert h._profile.call_kwargs == {"effort": "xhigh"}
+    h._graph_for("t1", tmp_path, Report)
+    assert seen["model_id"] == "anthropic:claude-opus-5"
+    assert seen["kwargs"] == {"effort": "xhigh"}

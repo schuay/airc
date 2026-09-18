@@ -28,7 +28,7 @@ from .agent import (
     base_middleware,
 )
 from .collector import UsageCollector
-from .config import CommonConfig
+from .config import CommonConfig, profile_for
 from .model import make_model
 from .tokens import TokenLog
 
@@ -71,11 +71,10 @@ class StructuredTaskRunner:
         max_model_calls: int = _DEFAULT_MAX_MODEL_CALLS,
         max_reasks: int = _DEFAULT_MAX_REASKS,
     ) -> None:
-        self._model_id = common.models.get(model_key) or common.models.get(
-            "default", ""
-        )
-        if not self._model_id:
-            raise ValueError(f"no model configured: [models].{model_key} or .default")
+        # The profile, not the id: the entry's effort is part of what the
+        # operator configured, and reading `models` would drop it silently.
+        self._profile = profile_for(common, model_key, "")
+        self._model_id = self._profile.id
         if max_model_calls < 1:
             raise ValueError("max_model_calls must be positive")
         if max_reasks < 0:
@@ -117,7 +116,7 @@ class StructuredTaskRunner:
             ),
         ]
         graph = create_agent(
-            make_model(self._model_id),
+            make_model(self._model_id, **self._profile.call_kwargs),
             tools=[],
             system_prompt=system_prompt,
             middleware=middleware,
