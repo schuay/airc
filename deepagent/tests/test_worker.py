@@ -63,3 +63,30 @@ async def test_run_loop_abandon_is_persisted(tmp_path):
 
     assert res.disposition is Disposition.ABANDON
     assert read_outcome(Path(spec.control_dir)).reason == "cannot"
+
+
+async def test_the_step_budget_crosses_into_the_box(tmp_path):
+    """The loop runs INSIDE the sandbox on the normal path, so a cap that did
+    not ride the spec would bind the in-process driver and nothing else -- which
+    is the configuration nobody runs. Asserted on the caps the in-box loop is
+    actually built with, not on the field existing."""
+    from deepagent import worker as w
+
+    seen = {}
+
+    async def fake_loop(harness, **kw):
+        seen["caps"] = kw["caps"]
+        return AgentResult(disposition=Disposition.COMPLETE, summary="done")
+
+    spec = _spec(tmp_path)
+    spec = spec.model_copy(update={"max_usd": 12.5})
+    orig = w.run_agent_loop
+    w.run_agent_loop = fake_loop
+    try:
+        await w.run_loop_from_spec(MockHarness([]), spec)
+    finally:
+        w.run_agent_loop = orig
+    assert seen["caps"].max_usd == 12.5
+    # And the default stays "no cap", so a spec written before the field existed
+    # keeps running unbounded rather than being abandoned by a zero.
+    assert LoopSpec(**(spec.model_dump() | {"max_usd": None})).max_usd is None

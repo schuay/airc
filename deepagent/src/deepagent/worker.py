@@ -53,6 +53,11 @@ class LoopSpec(BaseModel):
     max_iters: int = 20
     timeout_s: float = 3600.0  # per turn
     no_result_cap: int = 3
+    # The step's dollar budget. It has to cross the file contract: the loop runs
+    # INSIDE the box on the normal path, so a cap left out here would bind the
+    # in-process driver and nothing else -- which is the configuration nobody
+    # runs.
+    max_usd: float | None = None
     checkpoint_turn: int | None = None  # reflection-turn index; see LoopCaps
     # Absolute path the orchestrator drops out-of-band news into (see
     # run_agent_loop's `interject`). A FILE rather than a callback because the
@@ -120,6 +125,7 @@ async def run_loop_from_spec(harness: Harness, spec: LoopSpec) -> AgentResult:
             timeout_s=spec.timeout_s,
             no_result_cap=spec.no_result_cap,
             checkpoint_turn=spec.checkpoint_turn,
+            max_usd=spec.max_usd,
         ),
         agent=spec.agent,
         casefile=Path(spec.casefile),

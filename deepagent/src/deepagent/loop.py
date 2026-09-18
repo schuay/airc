@@ -21,6 +21,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from airc_core import Usage
+
 from .harness import REPORT_TOOL_NAME, AgentResult, Disposition, Harness
 from .journal import Journal
 
@@ -61,6 +63,18 @@ _FINAL = (
 class LoopCaps:
     max_iters: int = 20
     timeout_s: float = 3600.0  # per harness invocation
+    # What one STEP of agent work may cost, in USD. None is no cap.
+    #
+    # A turn count is a poor proxy for spend: what a turn costs is the size of
+    # its context, which varies by an order of magnitude between steps and grows
+    # within one, so the same 20 turns buys a cheap review round or an expensive
+    # cold-build repro and nobody can say which in advance.
+    #
+    # Bounds one loop invocation, not the whole job: a job with four goal steps
+    # can spend four times this. That is deliberate for now -- it is the cheap
+    # version, and it is enough to stop a single runaway step, which is the
+    # blowup that actually happens.
+    max_usd: float | None = None
     # Consecutive *dead* turns (no result AND no progress) tolerated before
     # abandoning. A turn that advanced its progress file is alive (e.g. a long
     # build still running) and is retried for free -- max_iters is the ceiling on
@@ -72,13 +86,18 @@ class LoopCaps:
     checkpoint_turn: int | None = None
 
 
-def _resume_prompt(i: int, caps: LoopCaps) -> str:
+def _resume_prompt(i: int, caps: LoopCaps, last: bool = False) -> str:
     """The instruction for resume turn `i` (i > 0): a plain continue with turn
     awareness, escalating to a reflection checkpoint and then a final-turn
     verdict force. Turn awareness lets the model pace itself against the cap
-    instead of being surprised by it."""
+    instead of being surprised by it.
+
+    `last` is the money saying so rather than the turn count: a step that has
+    nearly spent its budget gets the same final-turn demand as one on turn 20,
+    so it ends with a verdict instead of being cut off mid-investigation.
+    """
     n = caps.max_iters
-    if i >= n - 1:
+    if last or i >= n - 1:
         return _FINAL
     head = (
         f"Continue from where you left off (turn {i + 1} of {n}) -- your previous"
@@ -209,7 +228,30 @@ async def run_agent_loop(
     if resumed_notice:
         log.info("%s: resuming into an existing control dir", agent or "agent")
     consecutive_empty = 0
+    # What this step has spent, accumulated from the turns themselves -- the
+    # harness prices each one to log and journal it, so nothing is read back off
+    # disk and this works identically in-process and inside the sandbox.
+    spent = Usage()
+    last_turn = False
     for i in range(caps.max_iters):
+        if caps.max_usd is not None and spent.usd >= caps.max_usd:
+            # One turn late at most: the turn that crossed the limit has already
+            # been paid for. It got the final-turn demand below, so the usual
+            # ending here is its verdict, not this.
+            log.warning(
+                "%s: step budget spent (%s of $%g) after %d turn(s)",
+                agent or "agent",
+                spent.cost(),
+                caps.max_usd,
+                i,
+            )
+            return AgentResult(
+                disposition=Disposition.ABANDON,
+                reason=(
+                    f"step budget spent: {spent.cost()} of ${caps.max_usd:g}"
+                    f" over {i} turn(s)"
+                ),
+            )
         result_path = control_dir / f"result.{i:03d}.json"
         before = journal.progress if journal is not None else 0
         run = await harness.run_once(
@@ -220,11 +262,28 @@ async def run_agent_loop(
             agent=agent,
             resume=i > 0,  # turn 0 sends the task; later turns continue the thread
             resume_prompt=_with_interjection(
-                _resume_prompt(i, caps) if i > 0 else resumed_notice, interject
+                _resume_prompt(i, caps, last_turn) if i > 0 else resumed_notice,
+                interject,
             ),
             casefile=casefile,
             journal=journal,
         )
+        spent = spent + run.usage
+        # Whether the NEXT turn is the last this step can afford, measured in
+        # turns like the one just made rather than in a count that means
+        # something different at a 20k context and a 600k one. Sticky, because a
+        # cheap turn after an expensive one must not reopen a step that was
+        # already told to wrap up.
+        if caps.max_usd is not None and not last_turn and run.usage.usd > 0:
+            remaining = caps.max_usd - spent.usd
+            last_turn = remaining / run.usage.usd <= 1
+            if last_turn:
+                log.info(
+                    "%s: %s of the $%g step budget spent; next turn is the last",
+                    agent or "agent",
+                    spent.cost(),
+                    caps.max_usd,
+                )
         if run.result is None:
             # No valid result: a turn that was cut (timeout) or violated the
             # contract. If the turn advanced the journal it was alive (a long

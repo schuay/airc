@@ -16,6 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from airc_core import Usage
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -102,6 +103,13 @@ class HarnessRun:
     # candidate that still reads finish_reason=STOP (so finish_reason alone looks
     # benign). Lets the loop's abandon reason name it rather than a bare STOP.
     empty_candidate: bool = False
+    # What this turn cost, agent calls plus the overhead beside them (a ceiling
+    # summarization, an explicit cache). The harness already prices it to log
+    # and journal it; handing it back is what lets the loop bound a step in
+    # dollars without reading anything back off disk. Both halves, matching the
+    # rows _job_usage sums, so a step's running total and the job's reported
+    # cost are the same arithmetic.
+    usage: Usage = field(default_factory=Usage)
 
 
 class Harness(Protocol):

@@ -428,3 +428,117 @@ async def test_a_dead_turn_abandon_also_drops_its_conversation(tmp_path):
     assert out.disposition is Disposition.ABANDON
     assert "dead attempts" in out.reason
     assert forgotten == [str(tmp_path / "ctl")]
+
+
+@dataclass
+class _CostingHarness:
+    """A harness that never finishes and charges a fixed price per turn, so the
+    only thing that can end the loop is a governor."""
+
+    usd: float = 5.0
+    calls: int = 0
+    prompts: list = field(default_factory=list)
+
+    async def run_once(
+        self,
+        *,
+        result_path,
+        journal=None,
+        agent="",
+        resume=False,
+        resume_prompt="",
+        **kw,
+    ) -> HarnessRun:
+        from airc_core import Usage
+
+        self.calls += 1
+        self.prompts.append(resume_prompt)
+        return HarnessRun(
+            exit_code=1,
+            result=None,
+            log_path=result_path,
+            duration_s=0.0,
+            usage=Usage(calls=1, usd=self.usd),
+        )
+
+
+async def _drive(tmp_path, harness, caps):
+    from deepagent.loop import run_agent_loop
+
+    prompt = tmp_path / "p.md"
+    prompt.write_text("go")
+    return await run_agent_loop(
+        harness,
+        prompt_path=prompt,
+        workdir=tmp_path,
+        control_dir=tmp_path / "ctl",
+        caps=caps,
+    )
+
+
+async def test_the_step_budget_ends_a_loop_the_turn_cap_would_not(tmp_path):
+    """$5 a turn against a $20 budget is four turns, even though 20 are allowed.
+    A turn count is a poor proxy for spend: the same 20 turns buys a cheap review
+    round or an expensive cold-build repro."""
+    from deepagent.loop import LoopCaps
+
+    h = _CostingHarness(usd=5.0)
+    out = await _drive(
+        tmp_path, h, LoopCaps(max_iters=20, no_result_cap=99, max_usd=20.0)
+    )
+    assert h.calls == 4
+    assert out.disposition is Disposition.ABANDON
+    assert "step budget spent" in out.reason and "$20" in out.reason
+
+
+async def test_without_a_budget_the_same_loop_runs_its_full_turn_cap(tmp_path):
+    """The control: this harness never finishes, so a loop that stopped at four
+    turns stopped because the budget stopped it."""
+    from deepagent.loop import LoopCaps
+
+    h = _CostingHarness(usd=5.0)
+    await _drive(tmp_path, h, LoopCaps(max_iters=20, no_result_cap=99))
+    assert h.calls == 20
+
+
+async def test_the_last_affordable_turn_is_told_to_wrap_up(tmp_path):
+    """The lesson the review stack already learned: a bounded run must not be
+    cut off with nothing to show. Abandoning a goal step at 90% throws away its
+    worktree and its cold builds, so the money arms the same final-turn demand
+    the turn count does."""
+    from deepagent.loop import _FINAL, LoopCaps
+
+    h = _CostingHarness(usd=5.0)
+    await _drive(tmp_path, h, LoopCaps(max_iters=20, no_result_cap=99, max_usd=20.0))
+    # $5 a turn, $20 budget: after turn 3 only one turn's worth remains, so the
+    # fourth turn is the one told to commit to a verdict.
+    assert h.prompts[3] == _FINAL
+    assert _FINAL not in h.prompts[:3]
+
+
+async def test_a_cheap_turn_does_not_reopen_a_step_told_to_wrap_up(tmp_path):
+    """The latch is sticky. calls_left is remaining over the LAST turn's cost,
+    so one cheap turn after an expensive one would otherwise un-say the final
+    demand the model has already been given."""
+    from deepagent.loop import _FINAL, LoopCaps
+
+    class _Swinging(_CostingHarness):
+        async def run_once(self, **kw):
+            # An expensive turn that arms the latch, then a near-free one.
+            self.usd = 18.0 if self.calls == 0 else 0.01
+            return await _CostingHarness.run_once(self, **kw)
+
+    h = _Swinging()
+    await _drive(tmp_path, h, LoopCaps(max_iters=6, no_result_cap=99, max_usd=20.0))
+    assert h.prompts[1] == _FINAL
+    assert all(p == _FINAL for p in h.prompts[1:])
+
+
+async def test_an_unpriced_turn_leaves_the_budget_alone(tmp_path):
+    """A harness that reports no usage (a double, a provider that omitted it)
+    gives nothing to divide by; the loop must not read that as "out of money"."""
+    from deepagent.loop import LoopCaps
+
+    h = _CostingHarness(usd=0.0)
+    await _drive(tmp_path, h, LoopCaps(max_iters=5, no_result_cap=99, max_usd=20.0))
+    assert h.calls == 5

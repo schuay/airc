@@ -905,4 +905,5 @@ class LangGraphHarness:
             duration_s=time.monotonic() - start,
             finish_reason=stop_cb.finish_reason,
             empty_candidate=stop_cb.empty,
+            usage=usage.total + usage.aside,
         )
