@@ -41,10 +41,17 @@ dev = [
 # shadows the installed package with a namespace module for the member dir
 # (dir name == package name). asyncio_mode must be repeated here because pytest
 # reads exactly one config file -- for a root run the member settings do not apply.
+#
+# importlib mode does NOT put a test directory on sys.path, so a test module that
+# imports a sibling by name fails here while passing under a member's own config
+# (which is prepend). airc-room's handler tests share doubles that way; pythonpath
+# makes that one directory importable by name. Only that directory, so the
+# duplicated basenames across members stay unresolvable as top-level modules.
 [tool.pytest.ini_options]
 testpaths = ["*/tests"]
 addopts = "--import-mode=importlib"
 consider_namespace_packages = true
+pythonpath = ["airc-room/tests"]
 asyncio_mode = "auto"
 
 # Lint policy for every workspace member. Kept at the ROOT so the rule set is one
