@@ -1932,7 +1932,10 @@ class _SkipOnSummaryFailure(SummarizationMiddleware):
 _ANTHROPIC_CACHE_TTL = "5m"
 
 # Session affinity: keeps a conversation's turns together so the prefix one
-# turn cached is readable by the next.
+# turn cached is readable by the next. One header for both Vertex dialects:
+# Claude's explicit breakpoints and Gemini's implicit cache are both served by
+# the replica that holds the prefix, and without the routing key a turn lands
+# wherever the balancer puts it and reads nothing back.
 _VERTEX_SESSION_HEADER = "X-Vertex-Ai-Session-Id"
 
 
@@ -1943,6 +1946,76 @@ def _vertex_session_id(key: object) -> str:
     carries no internal identifier off the process. 32 hex chars only has to
     separate concurrent conversations."""
     return hashlib.sha256(str(key).encode()).hexdigest()[:32]
+
+
+def _session_for(request, fallback: str) -> str:
+    """The session id for this request's conversation: keyed on the thread, or
+    `fallback` (one per middleware instance) for a checkpointer-less graph."""
+    key = _thread_key(request)
+    return fallback if key is None else _vertex_session_id(key)
+
+
+def _with_header(settings: dict | None, key: str, header: str, value: str) -> dict:
+    """model_settings with `header` added under settings[key] (a dict of
+    headers), merged rather than assigned: neither the settings nor the headers
+    already there are ours to drop."""
+    settings = settings or {}
+    return {**settings, key: {**(settings.get(key) or {}), header: value}}
+
+
+class _GeminiVertexSession(AgentMiddleware):
+    """The session-affinity header on every Gemini-on-Vertex call.
+
+    Gemini's prompt cache is implicit and server-side, so there is nothing to
+    mark on the request; what a turn needs is to reach the replica that holds
+    the prefix the previous turn wrote. Observed without it, 2026-09: passes at
+    ~400k context flipping between normal hit rates and runs of "0 cached"
+    within one pass, both directions, at full input rates on every miss.
+
+    The header rides `http_options`, the per-call hook langchain-google-genai
+    exposes: it pops that bind kwarg and merges it into the request's own
+    HttpOptions, whose headers the google-genai client merges into the wire
+    request. Gated on the Vertex backend, since the Developer API has no such
+    routing key; and the legacy ChatVertexAI stack is not covered -- it fixes
+    its metadata at construction and takes no per-call header.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fallback_session = uuid.uuid4().hex
+
+    def _applies(self, model) -> bool:
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+        except ImportError:
+            return False
+        if not isinstance(model, ChatGoogleGenerativeAI):
+            return False
+        return bool(getattr(getattr(model, "client", None), "vertexai", False))
+
+    def _settings(self, request) -> dict:
+        settings = request.model_settings or {}
+        opts = settings.get("http_options")
+        # A caller may pass the SDK's HttpOptions object; the merge below wants
+        # the dict form, which _prepare_request accepts too.
+        if opts is not None and not isinstance(opts, dict):
+            settings = {**settings, "http_options": opts.model_dump(exclude_none=True)}
+        opts = dict(settings.get("http_options") or {})
+        opts["headers"] = {
+            **(opts.get("headers") or {}),
+            _VERTEX_SESSION_HEADER: _session_for(request, self._fallback_session),
+        }
+        return {**settings, "http_options": opts}
+
+    def wrap_model_call(self, request, handler):
+        if not self._applies(request.model):
+            return handler(request)
+        return handler(request.override(model_settings=self._settings(request)))
+
+    async def awrap_model_call(self, request, handler):
+        if not self._applies(request.model):
+            return await handler(request)
+        return await handler(request.override(model_settings=self._settings(request)))
 
 
 @dataclass
@@ -2096,26 +2169,18 @@ class _AnthropicVertexCaching(AgentMiddleware):
         return SystemMessage(content=blocks)
 
     def _session_id(self, request) -> str:
-        key = _thread_key(request)
-        return self._fallback_session if key is None else _vertex_session_id(key)
+        return _session_for(request, self._fallback_session)
 
     def _with_session_header(self, request):
-        """model_settings plus the affinity header.
-
-        extra_headers is a bind kwarg passed straight to messages.create, the
-        only per-call hook; the model's additional_headers is fixed at
-        construction. Merged, not assigned: neither the settings nor existing
-        headers are ours to drop.
-        """
-        settings = request.model_settings or {}
-        headers = settings.get("extra_headers") or {}
-        return {
-            **settings,
-            "extra_headers": {
-                **headers,
-                _VERTEX_SESSION_HEADER: self._session_id(request),
-            },
-        }
+        """model_settings plus the affinity header. extra_headers is a bind
+        kwarg passed straight to messages.create, the only per-call hook; the
+        model's additional_headers is fixed at construction."""
+        return _with_header(
+            request.model_settings,
+            "extra_headers",
+            _VERTEX_SESSION_HEADER,
+            self._session_id(request),
+        )
 
     def _state(self, request, messages) -> _AnthropicPrefix:
         """This conversation's breakpoint state, LRU-bounded.
@@ -2412,6 +2477,8 @@ def base_middleware(
         # ChatAnthropic, ours on ChatAnthropicVertex. At most one fires.
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
         _AnthropicVertexCaching(max_calls=max_calls),
+        # Gemini on Vertex has no request-side cache mark, only the routing key.
+        _GeminiVertexSession(),
     ]
     # After summarization in the stack, so its before_model inserts against the
     # post-compaction state (a tail append via the messages reducer -- it settles
@@ -2918,8 +2985,8 @@ def _thread_key(request) -> object:
     for a checkpointer-less run (review), where one Semaphore(1)-serialized graph
     instance is one logical conversation. execution_info is populated inside a
     running model node but typed Optional, so guard it, and runtime too: this
-    runs on every Claude-on-Vertex call, and a missing attribute must mean "no
-    thread", not a failed call."""
+    runs on every Vertex call, and a missing attribute must mean "no thread",
+    not a failed call."""
     runtime = getattr(request, "runtime", None)
     ei = getattr(runtime, "execution_info", None) if runtime else None
     return getattr(ei, "thread_id", None) if ei else None

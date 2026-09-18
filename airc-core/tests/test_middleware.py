@@ -268,7 +268,7 @@ async def test_call_budget_nudges_fire_only_on_schedule():
 
 def test_shared_stack_present_for_any_model():
     # base_middleware carries no cache overlay -- that is the caller's job.
-    # Both Anthropic caching middlewares are always listed; they gate on
+    # The three Vertex/Anthropic middlewares are always listed; they gate on
     # mutually exclusive client types, so at most one acts on a given request.
     assert _names(base_middleware(_NON_VERTEX, "sys", [])) == [
         "_ContextBudget",
@@ -277,6 +277,7 @@ def test_shared_stack_present_for_any_model():
         "_EmptyCandidateRetry",
         "AnthropicPromptCachingMiddleware",
         "_AnthropicVertexCaching",
+        "_GeminiVertexSession",
         "GroundingReminderMiddleware",  # inner to _ContextBudget, on by default
     ]
 
@@ -460,6 +461,81 @@ async def test_session_header_preserves_headers_the_caller_already_set():
     assert headers[_SESSION_HEADER]
     # The rest of model_settings survives the merge too.
     assert seen["settings"]["temperature"] == 0
+
+
+def _fake_vertex_gemini(vertexai=True):
+    """A real ChatGoogleGenerativeAI without credentials, on a client that
+    reports its backend; only the type and that flag matter."""
+    pytest.importorskip("langchain_google_genai")
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    return ChatGoogleGenerativeAI.model_construct(
+        client=SimpleNamespace(vertexai=vertexai)
+    )
+
+
+async def _gemini_session_of(model=None, **kw):
+    from airc_core.agent import _GeminiVertexSession
+
+    seen = await _delivered(
+        model or _fake_vertex_gemini(), None, mw=_GeminiVertexSession(), **kw
+    )
+    return seen["settings"]["http_options"]["headers"][_SESSION_HEADER]
+
+
+async def test_gemini_on_vertex_carries_the_same_session_id_as_claude_would():
+    """One conversation, one routing key, whichever dialect serves it. The
+    header rides http_options, the per-call hook the genai model exposes."""
+    assert await _gemini_session_of(thread_id="thread-a") == await _session_of(
+        thread_id="thread-a"
+    )
+    assert await _gemini_session_of(thread_id="thread-a") != await _gemini_session_of(
+        thread_id="thread-b"
+    )
+
+
+async def test_gemini_session_header_preserves_the_callers_http_options():
+    from airc_core.agent import _GeminiVertexSession
+
+    seen = await _delivered(
+        _fake_vertex_gemini(),
+        None,
+        mw=_GeminiVertexSession(),
+        model_settings={
+            "http_options": {"timeout": 5, "headers": {"X-Other": "keep"}},
+            "temperature": 0,
+        },
+    )
+    opts = seen["settings"]["http_options"]
+    assert opts["timeout"] == 5 and opts["headers"]["X-Other"] == "keep"
+    assert opts["headers"][_SESSION_HEADER]
+    assert seen["settings"]["temperature"] == 0
+
+
+async def test_gemini_session_header_is_only_for_the_vertex_backend():
+    """The Developer API has no routing key to give; and a model of any other
+    class is somebody else's."""
+    from airc_core.agent import _GeminiVertexSession
+
+    seen = await _delivered(
+        _fake_vertex_gemini(vertexai=False), None, mw=_GeminiVertexSession()
+    )
+    assert "http_options" not in seen["settings"]
+    seen = await _delivered(_fake_vertex_anthropic(), None, mw=_GeminiVertexSession())
+    assert "http_options" not in seen["settings"]
+
+
+async def test_gemini_session_id_falls_back_when_there_is_no_thread():
+    from airc_core.agent import _GeminiVertexSession
+
+    a, b = _GeminiVertexSession(), _GeminiVertexSession()
+
+    async def sid(mw):
+        seen = await _delivered(_fake_vertex_gemini(), None, mw=mw, thread_id=None)
+        return seen["settings"]["http_options"]["headers"][_SESSION_HEADER]
+
+    assert await sid(a) == await sid(a)
+    assert await sid(a) != await sid(b)
 
 
 async def test_session_id_falls_back_when_there_is_no_thread():
