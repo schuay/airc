@@ -1225,6 +1225,33 @@ BUDGET_KEY = "budget"
 # the harness, until they migrate).
 CALLS_LEFT_KEY = "calls_left"
 
+# The zero-cache tripwire. A large prompt served with NOTHING read from cache
+# is a provider-side eviction, not a client decision: at these sizes nothing on
+# our side rewrites the prefix (the grounding reminder is a tail append, the
+# ceiling actions fire far higher), so a run of them means the cache is simply
+# not being served and every call is being billed at the full input rate.
+#
+# Observed 2026-09: Gemini 3.1 Pro passes at ~400k flipping between normal hit
+# rates and runs of "0 cached" within one pass, both directions, at up to $1.60
+# per uncached call. The floor keeps small calls out of it, and three in a row
+# is what separates a run from a single cold replica after a retry or a
+# re-route that warms again on the next call. Both are first guesses; read the
+# per-call lines of the first trips before trusting them.
+_ZERO_CACHE_FLOOR = 150_000
+_ZERO_CACHE_TRIPS = 3
+
+
+class CacheLossTrip(Exception):
+    """A turn abandoned because the provider stopped serving its prompt cache.
+
+    Its own type, and deliberately not folded into the cost limit: under the
+    symptom a 25 USD limit is about fifteen calls, so the limit alone lets every
+    affected pass burn most of its budget and then report "out of budget" for
+    what is a provider fault. A caller that can stop doing expensive work --
+    airc-processors exits the service on it -- needs to tell the two endings
+    apart by type, not by reading a message.
+    """
+
 
 @dataclass(frozen=True)
 class _Spend:
@@ -1244,6 +1271,9 @@ class _Spend:
     calls_left: float = math.inf
     closed: bool = False
     closed_prev: bool = False
+    #: Consecutive large calls served with no cache read. Reset by any call
+    #: that read something back, or that was too small to judge.
+    zero_cache_run: int = 0
 
 
 class _BudgetState(AgentState):
@@ -1290,6 +1320,8 @@ class BudgetMiddleware(AgentMiddleware):
       request, so with ToolStrategy's tool_choice="any" the result tool is the
       only call left that does anything.
     - Publishes calls-left under CALLS_LEFT_KEY for the two cache brakes.
+    - Raises CacheLossTrip when the provider stops serving the prompt cache on
+      a large context, which is a fault to stop on rather than to pay out.
 
     The per-turn usage here is the agent's own calls only. Spend an invocation
     causes beside them -- a ceiling summarization on the filter model, an
@@ -1309,6 +1341,8 @@ class BudgetMiddleware(AgentMiddleware):
         notice: str,
         refusal: str,
         window: float = 3.0,
+        zero_cache_floor: int = _ZERO_CACHE_FLOOR,
+        zero_cache_trips: int = _ZERO_CACHE_TRIPS,
     ) -> None:
         super().__init__()
         self._model_id = model_id
@@ -1317,6 +1351,8 @@ class BudgetMiddleware(AgentMiddleware):
         self._notice = notice
         self._refusal = refusal
         self._window = window
+        self._zero_cache_floor = zero_cache_floor
+        self._zero_cache_trips = zero_cache_trips
 
     def _spend(self, state) -> _Spend:
         return state.get(BUDGET_KEY) or _Spend()
@@ -1330,6 +1366,7 @@ class BudgetMiddleware(AgentMiddleware):
         # and the window where they were rather than slamming them shut on a
         # missing number.
         calls_left = max(0.0, left / call.usd) if call.usd > 0 else math.inf
+        lost = call.input >= self._zero_cache_floor and call.cache_read == 0
         return _Spend(
             usage=total,
             last_usd=call.usd,
@@ -1337,12 +1374,25 @@ class BudgetMiddleware(AgentMiddleware):
             calls_left=calls_left,
             closed=prev.closed or calls_left <= self._window,
             closed_prev=prev.closed,
+            zero_cache_run=prev.zero_cache_run + 1 if lost else 0,
         )
 
     def after_model(self, state, runtime) -> dict[str, Any]:
         spend = self._spend(state)
         if (msg := _last_ai(state.get("messages") or [])) is not None:
             spend = self._advance(spend, msg)
+        if spend.zero_cache_run >= self._zero_cache_trips:
+            # Raised rather than ended with a jump: a turn that ends returns a
+            # verdict-shaped nothing, which every caller reads as "the model had
+            # nothing to report". This is not a verdict about the work, and the
+            # caller has to be able to stop rather than take the next unit.
+            raise CacheLossTrip(
+                f"prompt cache not served: {spend.zero_cache_run} calls in a row"
+                f" at or above {_k(self._zero_cache_floor)} input with 0 read"
+                f" back (last {_k(spend.last_input)} for"
+                f" {spend.usage.cost(spend.last_usd)}); ending the turn after"
+                f" {spend.usage.calls} calls and {spend.usage.cost()}"
+            )
         return {BUDGET_KEY: spend, CALLS_LEFT_KEY: spend.calls_left}
 
     async def aafter_model(self, state, runtime) -> dict[str, Any]:

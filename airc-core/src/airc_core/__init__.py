@@ -11,6 +11,7 @@
 _LAZY = {
     "ArtifactLog": ".artifacts",
     "BudgetMiddleware": ".agent",
+    "CacheLossTrip": ".agent",
     "CallBudgetMiddleware": ".agent",
     "CommonConfig": ".config",
     "DATA_DIR": ".config",
@@ -71,6 +72,7 @@ __all__ = [
     "SUPPORTED_PROVIDERS",
     "ArtifactLog",
     "BudgetMiddleware",
+    "CacheLossTrip",
     "CallBudgetMiddleware",
     "CommonConfig",
     "EmptyCandidateError",

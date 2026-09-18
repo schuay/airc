@@ -14,6 +14,7 @@ import math
 
 import pytest
 from airc_core.agent import (
+    _ZERO_CACHE_FLOOR,
     BUDGET_KEY,
     CALLS_LEFT_KEY,
     BudgetMiddleware,
@@ -81,7 +82,19 @@ def _agent(middleware, usage=None, recursion_limit=200):
     return model, graph
 
 
-def _budget(cost_limit=25.0, context_target=400_000, window=3.0):
+# The tripwire is off unless a test asks for it: every other test here scripts
+# a model that reports no cache read at all, which is exactly what it watches
+# for, and a cost test that ended on the tripwire would assert nothing about
+# cost. The tripwire tests pass the real floor.
+_TRIPWIRE_OFF = 10**12
+
+
+def _budget(
+    cost_limit=25.0,
+    context_target=400_000,
+    window=3.0,
+    zero_cache_floor=_TRIPWIRE_OFF,
+):
     return BudgetMiddleware(
         _MODEL,
         context_target=context_target,
@@ -89,6 +102,7 @@ def _budget(cost_limit=25.0, context_target=400_000, window=3.0):
         notice="NOTICE: tools are closed, report now",
         refusal="REFUSED: reads are closed",
         window=window,
+        zero_cache_floor=zero_cache_floor,
     )
 
 
@@ -257,3 +271,92 @@ async def test_the_brakes_prefer_the_published_calls_left():
         )
         == 0.5
     )
+
+
+async def _run_calls(mw, shapes):
+    """Feed `shapes` (usage dicts) through after_model one at a time, carrying
+    the accumulator forward the way the graph does."""
+    state = {}
+    for shape in shapes:
+        state["messages"] = [AIMessage(content="", usage_metadata=shape)]
+        state.update(mw.after_model(state, None))
+    return state[BUDGET_KEY]
+
+
+async def test_three_large_uncached_calls_in_a_row_end_the_pass():
+    """The symptom: a large prompt served with nothing read back is a
+    provider-side eviction, and a run of them means every call is billed at the
+    full input rate for work the cache was paying for."""
+    from airc_core.agent import CacheLossTrip
+
+    mw = _budget(cost_limit=1000.0, zero_cache_floor=_ZERO_CACHE_FLOOR)
+    with pytest.raises(CacheLossTrip) as e:
+        await _run_calls(mw, [_usage(400_000)] * 3)
+    # The counts, so the log line says what tripped rather than that something did.
+    assert "3 calls in a row" in str(e.value) and "400k" in str(e.value)
+
+
+async def test_the_trip_is_not_the_cost_limit_ending():
+    """Two endings, told apart by type. A caller that stops the service on one
+    must not stop it on the other: a pass that spent its budget is a pass that
+    worked, and reporting a provider fault as "out of budget" hides it."""
+    from airc_core.agent import CacheLossTrip
+
+    mw = _budget(cost_limit=3.0, zero_cache_floor=_ZERO_CACHE_FLOOR)
+    # Under a dollar a call with healthy cache reads: the limit ends it after
+    # four, and nothing raises on the way.
+    spend = await _run_calls(mw, [_usage(1_000_000, cache_read=900_000)] * 4)
+    assert spend.zero_cache_run == 0
+    assert spend.usage.usd > 3.0
+    assert mw.before_model({BUDGET_KEY: spend}, None)["jump_to"] == "end"
+    assert CacheLossTrip is not None  # the other ending has its own type
+
+
+async def test_a_single_cold_call_is_not_a_trip():
+    """One zero after a retry is a cold replica, and a re-route that warms again
+    on the next call must not stop the fleet. The run has to be consecutive."""
+    mw = _budget(cost_limit=1000.0, zero_cache_floor=_ZERO_CACHE_FLOOR)
+    spend = await _run_calls(
+        mw,
+        [
+            _usage(400_000),
+            _usage(400_000),
+            _usage(400_000, cache_read=300_000),  # warm again: run resets
+            _usage(400_000),
+            _usage(400_000),
+        ],
+    )
+    assert spend.zero_cache_run == 2
+
+
+async def test_small_calls_are_never_judged():
+    """Below the floor a zero says nothing: a short prompt has no cache worth
+    serving, and every pass starts with one."""
+    mw = _budget(cost_limit=1000.0, zero_cache_floor=_ZERO_CACHE_FLOOR)
+    spend = await _run_calls(mw, [_usage(10_000)] * 10)
+    assert spend.zero_cache_run == 0
+
+
+async def test_the_trip_reaches_the_caller_through_the_graph():
+    """Raised, not ended with a jump: a turn that ends returns a verdict-shaped
+    nothing, which every caller reads as "the model had nothing to report"."""
+    from airc_core.agent import CacheLossTrip
+
+    _, graph = _agent(
+        [_budget(cost_limit=1000.0, zero_cache_floor=_ZERO_CACHE_FLOOR)],
+        usage=_usage(400_000),
+    )
+    with pytest.raises(CacheLossTrip):
+        await graph.ainvoke({"messages": [HumanMessage("go")]})
+
+
+async def test_the_trip_is_never_read_as_a_transient():
+    """_gather_passes contains a transient to one pass and re-raises everything
+    else; _is_transient's text fallback is a substring match, so the message has
+    to stay clear of its vocabulary."""
+    from airc_core.agent import CacheLossTrip, _is_transient
+
+    mw = _budget(cost_limit=1000.0, zero_cache_floor=_ZERO_CACHE_FLOOR)
+    with pytest.raises(CacheLossTrip) as e:
+        await _run_calls(mw, [_usage(400_000)] * 3)
+    assert not _is_transient(e.value)
