@@ -1345,6 +1345,21 @@ class BudgetMiddleware(AgentMiddleware):
         zero_cache_trips: int = _ZERO_CACHE_TRIPS,
     ) -> None:
         super().__init__()
+        # A non-positive limit is not "no limit": before_model would end the turn
+        # before its first call, so the graph would run nothing and report a
+        # verdict-shaped nothing. Nobody means that -- the way to stop doing the
+        # work is to stop asking for it -- and the failure is silent, so it is
+        # refused where it is written rather than discovered in a log.
+        if cost_limit <= 0:
+            raise ValueError(f"cost_limit must be positive, got {cost_limit!r}")
+        # 0 is legitimate and means "no target": it drives nothing yet, and the
+        # pointer simply does not mention a target the operator has not chosen.
+        # Negative is a typo.
+        if context_target < 0:
+            raise ValueError(
+                f"context_target must be zero (no target) or positive, got"
+                f" {context_target!r}"
+            )
         self._model_id = model_id
         self._context_target = context_target
         self._cost_limit = cost_limit
@@ -1419,13 +1434,20 @@ class BudgetMiddleware(AgentMiddleware):
         the ceiling, and how much has been read against the target. Data, not
         pressure -- the nudges do the steering, and this is on the tail of every
         call of the turn. "Of cap", because the cap is a ceiling, not a target.
+
+        With no context target set the clause is dropped rather than rendered
+        against a zero. This is prose the model reads on every call of the turn,
+        so "context 410k of 0 target" is not a cosmetic problem: it is a
+        sentence that means nothing being asserted to the model a hundred times.
         """
         u = spend.usage
-        pct = round(100 * u.usd / self._cost_limit) if self._cost_limit else 0
-        return (
-            f"{u.cost()} spent, {pct}% of the ${self._cost_limit:g} cap;"
-            f" context {_k(spend.last_input)} of {_k(self._context_target)} target"
-        )
+        pct = round(100 * u.usd / self._cost_limit)
+        line = f"{u.cost()} spent, {pct}% of the ${self._cost_limit:g} cap"
+        if self._context_target > 0:
+            line += (
+                f"; context {_k(spend.last_input)} of {_k(self._context_target)} target"
+            )
+        return line
 
     async def awrap_model_call(self, request, handler):
         # The empty-candidate retry re-enters with the request that already

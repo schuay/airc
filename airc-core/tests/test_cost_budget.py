@@ -360,3 +360,47 @@ async def test_the_trip_is_never_read_as_a_transient():
     with pytest.raises(CacheLossTrip) as e:
         await _run_calls(mw, [_usage(400_000)] * 3)
     assert not _is_transient(e.value)
+
+
+# ── the two numbers, and what their degenerate values mean ───────────────────
+
+
+def test_a_non_positive_cost_limit_is_refused_rather_than_run():
+    """Not "no limit": before_model would end the turn before its first call, so
+    the graph would run nothing and hand back a verdict-shaped nothing that
+    every caller reads as "the model had nothing to report". The way to stop
+    doing the work is to stop asking for it."""
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="cost_limit must be positive"):
+            _budget(cost_limit=bad)
+
+
+def test_no_context_target_drops_the_clause_instead_of_rendering_a_zero():
+    """This is prose the model reads on EVERY call of the turn, so "context 410k
+    of 0 target" is not cosmetic -- it is a sentence that means nothing,
+    asserted a hundred times. The target drives nothing yet and is genuinely
+    allowed to be unset until the ledger says what it should be."""
+    spend = _Spend(usage=Usage(usd=5.0, calls=3), last_input=410_000)
+    assert _budget(context_target=0).pointer(spend) == "$5.00 spent, 20% of the $25 cap"
+    with_target = _budget(context_target=400_000).pointer(spend)
+    assert with_target == "$5.00 spent, 20% of the $25 cap; context 410k of 400k target"
+
+
+def test_a_negative_context_target_is_a_typo_not_an_unset_one():
+    with pytest.raises(ValueError, match="context_target must be zero"):
+        _budget(context_target=-1)
+
+
+async def test_an_untargeted_pass_still_gets_the_money_pointer():
+    """The money half is the half that bounds the pass, so it rides every call
+    whether or not a target was configured."""
+    seen = []
+
+    async def handler(req):
+        seen.append([str(m.content) for m in req.messages])
+        return "ok"
+
+    mw = _budget(context_target=0)
+    await mw.awrap_model_call(_ModelReq(_Spend(usage=Usage(usd=5.0))), handler)
+    assert any("$5.00 spent" in m for m in seen[0])
+    assert not any("target" in m for m in seen[0])
