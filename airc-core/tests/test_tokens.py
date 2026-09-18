@@ -356,6 +356,23 @@ def test_a_disabled_ledger_is_no_headroom_not_an_empty_window(tmp_path):
     assert reason is not None and "ledger is disabled" in reason
 
 
+def test_an_unwritable_ledger_is_disabled_at_open_not_at_first_write(tmp_path):
+    """The schema statements are no-ops on a file that already carries it, so a
+    read-only file used to open clean and only a write disabled the handle. A
+    handle that never writes -- a window cap's own -- then reported a healthy
+    window that no writer was filling."""
+    import os
+
+    from airc_core.tokens import TokenLog
+
+    path = tmp_path / "t.db"
+    TokenLog(path).close()
+    os.chmod(path, 0o444)
+    if os.access(path, os.W_OK):
+        pytest.skip("chmod does not bind here (root or a permissive fs)")
+    assert not TokenLog(path).enabled
+
+
 def test_a_disabled_ledger_without_a_cap_is_nobody_business(tmp_path):
     from airc_core.tokens import SpendWindows, TokenLog
 
@@ -384,6 +401,25 @@ def test_the_transition_is_logged_once_in_each_direction(tmp_path, caplog):
     assert len(lines) == 2, lines
     assert "deferring new work" in lines[0]
     assert "window freed" in lines[1]
+
+
+def test_a_moving_ledger_does_not_re_announce_the_same_bound(tmp_path, caplog):
+    """The bound amount is never still: in-flight work keeps booking rows and
+    old rows keep rolling out, so a latch on the reason text (which carries the
+    amount) re-fires on nearly every poll. The latch is on WHICH cap binds."""
+    import logging
+
+    from airc_core.tokens import SpendWindows, TokenLog
+
+    log = TokenLog(tmp_path / "t.db")
+    now = time.time()
+    windows = SpendWindows(log, daily_usd_cap=50.0)
+    with caplog.at_level(logging.INFO, logger="airc_core.tokens"):
+        for _ in range(5):
+            _spent(log, 20.0, now - 60)  # 20, 40, 60, 80, 100
+            windows.bound(now)
+    lines = [r.message for r in caplog.records if "spend cap" in r.message]
+    assert len(lines) == 1, lines
 
 
 def test_the_ledger_is_indexed_on_time(tmp_path):

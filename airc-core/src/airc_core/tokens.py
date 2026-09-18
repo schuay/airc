@@ -130,6 +130,15 @@ class TokenLog:
             self._db = db
             self._migrate()
             db.commit()
+            # A ledger this handle cannot write is disabled now, not at its
+            # first add(): the schema statements above are no-ops on a file
+            # that already carries it, so a read-only file opens clean and a
+            # reader (the window cap's own handle) would report a healthy
+            # window that no writer is filling. It has to touch a page: under
+            # WAL, BEGIN IMMEDIATE takes its lock on the -shm file and passes,
+            # and an insert rolled back never reaches the file.
+            (version,) = db.execute("PRAGMA user_version").fetchone()
+            db.execute(f"PRAGMA user_version = {int(version)}")
         except (sqlite3.Error, OSError) as e:
             log.warning("token ledger disabled (%s not writable): %s", path, e)
             if self._db is not None:
@@ -409,6 +418,10 @@ class SpendWindows:
             ("daily", DAY_S, daily_usd_cap),
             ("weekly", WEEK_S, weekly_usd_cap),
         )
+        # Which bound is announced: a cap name, "ledger", or None for open. The
+        # latch is keyed on this rather than on the reason text, which carries
+        # the spent amount and so changes on nearly every poll while bound --
+        # in-flight work keeps booking rows and old rows keep rolling out.
         self._bound: str | None = None
         self._announced = False
 
@@ -426,8 +439,9 @@ class SpendWindows:
         if not self.configured:
             return None
         now = time.time() if now is None else now
-        reason = None
+        key = reason = None
         if not self._log.enabled:
+            key = "ledger"
             reason = (
                 "the token ledger is disabled, so the spend window cannot be"
                 " read; treating it as no headroom"
@@ -438,17 +452,18 @@ class SpendWindows:
                     continue
                 spent, estimated = self._log.usd_total(now - window)
                 if spent >= cap:
+                    key = name
                     reason = (
                         f"{name} spend cap reached:"
                         f" {'~' if estimated else ''}${spent:.2f} of ${cap:g}"
                         f" in the last {window / DAY_S:g}d"
                     )
                     break
-        self._announce(reason)
+        self._announce(key, reason)
         return reason
 
-    def _announce(self, reason: str | None) -> None:
-        if reason == self._bound and self._announced:
+    def _announce(self, key: str | None, reason: str | None) -> None:
+        if key == self._bound and self._announced:
             return
         self._announced = True
         if reason is not None:
@@ -457,4 +472,4 @@ class SpendWindows:
             )
         elif self._bound is not None:
             log.info("spend cap: window freed; taking new work again")
-        self._bound = reason
+        self._bound = key
