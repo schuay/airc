@@ -427,6 +427,10 @@ def load_common(raw: Mapping) -> CommonConfig:
     # Presence-checked, not truth-checked: 0 is a cap of zero (admit nothing),
     # a coherent thing to write while an incident is being looked at, and
     # `if v :=` would silently read it as unset.
+    #
+    # A shared top-level key added here must also be added to
+    # airc_room.config._KNOWN_TOPLEVEL: the suite shares one file, and the room
+    # rejects a top-level key it does not know before load_common ever sees it.
     for key in ("daily_usd_cap", "weekly_usd_cap"):
         if key in raw:
             v = raw[key]

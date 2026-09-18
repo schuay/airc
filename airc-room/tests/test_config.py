@@ -259,6 +259,24 @@ def test_known_sibling_sections_allowed(tmp_path):
     assert cfg.handover.enabled is True
 
 
+def test_a_shared_key_load_common_parses_is_not_a_typo(tmp_path):
+    """The suite shares ONE file, so every key airc_core.load_common reads has
+    to be in _KNOWN_TOPLEVEL as well -- the room rejects an unknown top-level
+    key BEFORE load_common ever sees it, so a key wired only in core makes the
+    room refuse to start on a file the processor reads happily.
+
+    The spend caps are the case that caught this. Named explicitly rather than
+    derived, because there is no machine-readable list of what load_common
+    parses and a test that derived one would drift with it."""
+    body = (
+        "daily_usd_cap = 150\n"
+        "weekly_usd_cap = 750\n"
+        "[models]\n"
+        'default = "google_anthropic_vertex:claude-opus-5"\n'
+    )
+    load_config(_write(tmp_path, body))
+
+
 def test_transport_kind_absent_and_parsed(tmp_path):
     assert load_config(_write(tmp_path, "")).transport_kind == ""
     cfg = load_config(_write(tmp_path, '[transport]\nkind = "gchat"\n'))

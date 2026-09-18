@@ -77,8 +77,10 @@ DATA_DIR = user_data_path("airc")
 # outside this set is a typo (`[watchers]`, `[air]`) that would otherwise be
 # silently ignored, so load_config errors on it. The set spans the whole suite,
 # not just the room: models/model_providers/mcp/gcp/tool_groups/caching/
-# bus_root/token_db_path/artifacts_dir/repos are the shared sections
-# airc_core.load_common parses; handover is suite
+# bus_root/token_db_path/artifacts_dir/repos/daily_usd_cap/weekly_usd_cap are
+# the shared sections airc_core.load_common parses -- a key added there has to
+# be added here too, or the room refuses to start on a file the processor reads
+# happily; handover is suite
 # policy read by airc and the processor; the sibling-daemon namespaces
 # ([watchers.*]/[processors.*]/[icompleteu.*]) live in this same file and are
 # known-not-ours, so they are permitted here rather than flagged. [airc] and
@@ -97,6 +99,8 @@ _KNOWN_TOPLEVEL = frozenset(
         "token_db_path",
         "artifacts_dir",
         "repos",
+        "daily_usd_cap",
+        "weekly_usd_cap",
         "handover",
         "transport",
         "matrix",
