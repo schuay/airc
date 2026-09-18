@@ -30,7 +30,16 @@ from pathlib import Path
 
 import tomllib
 
-CONFIG_PATH = Path("~/.config/airc/config.toml").expanduser()
+# The suite file every daemon is pointed at (see packaging/*.service), then the
+# older name, so a deploy that still uses it keeps resolving. This used to name
+# config.toml alone, which was survivable while token_db_path was the only key
+# read here -- the DB default is right on a standard layout, so a miss was
+# invisible. It stopped being survivable with the spend caps: a miss reads them
+# as unset and the report says the fleet is unbound when it is not.
+CONFIG_PATHS = (
+    Path("~/.config/airc/airc.toml").expanduser(),
+    Path("~/.config/airc/config.toml").expanduser(),
+)
 DEFAULT_DB = Path("~/.local/share/airc/tokens.db").expanduser()
 
 COLUMNS = (
@@ -39,11 +48,16 @@ COLUMNS = (
 )
 
 
-def _suite_config() -> dict:
-    if not CONFIG_PATH.exists():
-        return {}
-    with open(CONFIG_PATH, "rb") as f:
-        return tomllib.load(f)
+def _suite_config() -> tuple[dict, Path | None]:
+    """The parsed suite file and where it came from. The path is returned so the
+    report can SAY which file the caps below were read from -- "no cap set" and
+    "no config found" look identical in the output otherwise, and they are very
+    different states to be in."""
+    for path in CONFIG_PATHS:
+        if path.exists():
+            with open(path, "rb") as f:
+                return tomllib.load(f), path
+    return {}, None
 
 
 def resolve_db(cfg: dict) -> Path:
@@ -58,7 +72,7 @@ def resolve_db(cfg: dict) -> Path:
 WINDOWS = (("daily", 86400.0), ("weekly", 7 * 86400.0))
 
 
-def windows(path: Path, cfg: dict) -> None:
+def windows(path: Path, cfg: dict, source: Path | None) -> None:
     """What the rolling fleet caps see right now.
 
     A rolling window never visibly resets, so a bound fleet reads as a stuck
@@ -85,7 +99,8 @@ def windows(path: Path, cfg: dict) -> None:
             f" {mark + f'${freeing:.2f}':>10}"
         )
     if not any(cfg.get(f"{label}_usd_cap") is not None for label, _ in WINDOWS):
-        print("(no daily_usd_cap / weekly_usd_cap set: nothing is being bound)")
+        where = source or " or ".join(str(p) for p in CONFIG_PATHS)
+        print(f"(no daily_usd_cap / weekly_usd_cap in {where}: nothing is bound)")
 
 
 def _sum_usd(path: Path, since: float, until: float) -> tuple[float, bool]:
@@ -203,7 +218,7 @@ def main() -> None:
         )
         since = max(since, time.mktime(midnight))
 
-    cfg = _suite_config()
+    cfg, source = _suite_config()
     path = args.db or resolve_db(cfg)
     if not path.exists():
         raise SystemExit(f"no token db at {path}")
@@ -213,7 +228,7 @@ def main() -> None:
     # caps as they stand now, not about whatever slice the arguments selected,
     # and "the fleet is bound" is the one thing worth saying even when the
     # selected range is empty.
-    windows(path, cfg)
+    windows(path, cfg, source)
     if not rows:
         return
 
