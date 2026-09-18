@@ -24,7 +24,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, NotRequired
 
@@ -50,7 +50,7 @@ from langgraph.constants import TAG_NOSTREAM
 from .collector import book_aside
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
 from .providers import STOP_REASON_KEYS
-from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage
+from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, _k
 
 log = logging.getLogger(__name__)
 
@@ -1127,14 +1127,17 @@ class FinalAnswerMiddleware(AgentMiddleware):
     The count is this middleware's own, per turn like CallBudgetMiddleware's,
     so the window does not depend on which other governors are in the stack.
     `max_calls` must equal ModelCallLimitMiddleware's run cap, or the window
-    ends somewhere other than where the cap does.
+    ends somewhere other than where the cap does -- and it is None on a stack
+    whose turn ends on a dollar limit instead, where BudgetMiddleware owns the
+    window and keys it to the money. close_after_reasks is the other arm and is
+    about a different failure, so it survives that move.
     """
 
     state_schema = _FinalAnswerState
 
     def __init__(
         self,
-        max_calls: int,
+        max_calls: int | None,
         notice: str,
         refusal: str,
         window: int = 3,
@@ -1165,7 +1168,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
         model's first prose ending, leaving the result tool as the only call
         that does anything.
         """
-        if completed >= self._max - self._window:
+        if self._max is not None and completed >= self._max - self._window:
             return True
         if self._close_after_reasks is None or state is None:
             return False
@@ -1181,7 +1184,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
         n = request.state.get("answer_calls", 0)
         if not self._closed(n, request.state):
             return await handler(request)
-        log.info("final answer: tools closed at call %d/%d", n + 1, self._max)
+        log.info("final answer: tools closed at call %d/%s", n + 1, self._max or "-")
         # The empty-candidate retry re-enters this wrap with its own nudge on
         # the request; the notice is already there from the first pass (same
         # reasoning as CallBudgetMiddleware).
@@ -1195,6 +1198,204 @@ class FinalAnswerMiddleware(AgentMiddleware):
         # The call that issued this tool call has already been counted, so the
         # count it was made after is one less.
         if not self._closed(request.state.get("answer_calls", 0) - 1, request.state):
+            return None
+        call = request.tool_call
+        return ToolMessage(
+            content=self._refusal,
+            tool_call_id=call["id"],
+            name=call.get("name"),
+            status="error",
+        )
+
+    def wrap_tool_call(self, request, handler):
+        return self._refuse(request) or handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        return self._refuse(request) or await handler(request)
+
+
+# Per-turn spend, accumulated by BudgetMiddleware and read by its own governors.
+# UntrackedValue for the same reason model_calls is: a budget is per graph
+# invocation, never carried across the turns of a checkpointed conversation.
+BUDGET_KEY = "budget"
+# Calls left in the turn as the two cache brakes read it: remaining dollars over
+# what the last call cost. Its own key rather than a field of _Spend, because a
+# brake reads a scalar and knows nothing about this middleware -- it falls back
+# to `cap - model_calls` when no budget middleware is in the stack (the room and
+# the harness, until they migrate).
+CALLS_LEFT_KEY = "calls_left"
+
+
+@dataclass(frozen=True)
+class _Spend:
+    """What a turn has spent, and the shape of the call that last spent it.
+
+    `closed` is the read-closing window's latch: once what remains is under a
+    few calls' worth, it stays shut for the rest of the turn. `closed_prev` is
+    the latch as the model saw it when it made the call now issuing tool calls,
+    so a read is refused only by a call that was TOLD the tools were closed --
+    the same alignment FinalAnswerMiddleware gets by subtracting one from its
+    counter.
+    """
+
+    usage: Usage = field(default_factory=Usage)
+    last_usd: float = 0.0
+    last_input: int = 0
+    calls_left: float = math.inf
+    closed: bool = False
+    closed_prev: bool = False
+
+
+class _BudgetState(AgentState):
+    budget: NotRequired[Annotated[_Spend, UntrackedValue]]
+    calls_left: NotRequired[Annotated[float, UntrackedValue]]
+
+
+def _last_ai(messages: list):
+    for m in reversed(messages):
+        if isinstance(m, AIMessage):
+            return m
+    return None
+
+
+class BudgetMiddleware(AgentMiddleware):
+    """Bound one turn by what it costs rather than by how many calls it makes.
+
+    A model call is a poor proxy for spend: what a call costs is the size of its
+    context, which varies by an order of magnitude between turns and grows
+    within one, so a call cap buys a cheap short turn or an expensive long one
+    and the operator cannot say which in advance.
+
+    Two numbers, answering different questions. `cost_limit` (USD) is the most
+    a turn may ever cost: it ends the turn, keys the read-closing window, and is
+    what "calls left" is measured against. `context_target` (prompt tokens) is
+    where a typical turn should be wrapping up; it appears in the pointer and
+    drives nothing else yet -- the nudge cadence still runs off call counts in
+    CallBudgetMiddleware until the schedule is re-sized against the ledger.
+
+    What it does per call:
+
+    - Accumulates one `Usage` from the response just appended, priced through
+      `Usage.of_call`. Never recomputed from the message list: summarization
+      drops the AIMessages that carry usage, and a turn would then read as
+      free. The collector prices the same response again to book it; both go
+      through the one function, so they cannot disagree, and the graph must not
+      depend on which callbacks a caller happened to attach.
+    - Ends the turn once the limit is reached, which is one call late at most
+      (the call that crosses it has already been paid for).
+    - Closes the read tools once what remains is under `window` times the last
+      call's cost -- three calls at a 20k context and three at a 600k one,
+      rather than a count that means different things at each. Inside the
+      window every read is refused with `refusal` and `notice` rides each
+      request, so with ToolStrategy's tool_choice="any" the result tool is the
+      only call left that does anything.
+    - Publishes calls-left under CALLS_LEFT_KEY for the two cache brakes.
+
+    The per-turn usage here is the agent's own calls only. Spend an invocation
+    causes beside them -- a ceiling summarization on the filter model, an
+    explicit cache creation -- reaches the ledger through the collector and is
+    deliberately not charged against the turn's limit: the limit governs what
+    the model does, and neither of those is the model's decision.
+    """
+
+    state_schema = _BudgetState
+
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        context_target: int,
+        cost_limit: float,
+        notice: str,
+        refusal: str,
+        window: float = 3.0,
+    ) -> None:
+        super().__init__()
+        self._model_id = model_id
+        self._context_target = context_target
+        self._cost_limit = cost_limit
+        self._notice = notice
+        self._refusal = refusal
+        self._window = window
+
+    def _spend(self, state) -> _Spend:
+        return state.get(BUDGET_KEY) or _Spend()
+
+    def _advance(self, prev: _Spend, response) -> _Spend:
+        call = Usage.of_call(getattr(response, "usage_metadata", None), self._model_id)
+        total = prev.usage + call
+        left = self._cost_limit - total.usd
+        # A call the provider reported no usage for (or a fake model in a test)
+        # gives no unit to divide by; inf is the reading that leaves every brake
+        # and the window where they were rather than slamming them shut on a
+        # missing number.
+        calls_left = max(0.0, left / call.usd) if call.usd > 0 else math.inf
+        return _Spend(
+            usage=total,
+            last_usd=call.usd,
+            last_input=call.input,
+            calls_left=calls_left,
+            closed=prev.closed or calls_left <= self._window,
+            closed_prev=prev.closed,
+        )
+
+    def after_model(self, state, runtime) -> dict[str, Any]:
+        spend = self._spend(state)
+        if (msg := _last_ai(state.get("messages") or [])) is not None:
+            spend = self._advance(spend, msg)
+        return {BUDGET_KEY: spend, CALLS_LEFT_KEY: spend.calls_left}
+
+    async def aafter_model(self, state, runtime) -> dict[str, Any]:
+        return self.after_model(state, runtime)
+
+    @hook_config(can_jump_to=["end"])
+    def before_model(self, state, runtime) -> dict[str, Any] | None:
+        spend = self._spend(state)
+        if spend.usage.usd < self._cost_limit:
+            return None
+        reason = (
+            f"Cost limit reached: {spend.usage.cost()} of"
+            f" ${self._cost_limit:g} over {spend.usage.calls} calls."
+        )
+        log.info("budget: %s", reason)
+        return {"jump_to": "end", "messages": [AIMessage(content=reason)]}
+
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(self, state, runtime) -> dict[str, Any] | None:
+        return self.before_model(state, runtime)
+
+    def pointer(self, spend: _Spend) -> str:
+        """The position line riding every request: what has been spent against
+        the ceiling, and how much has been read against the target. Data, not
+        pressure -- the nudges do the steering, and this is on the tail of every
+        call of the turn. "Of cap", because the cap is a ceiling, not a target.
+        """
+        u = spend.usage
+        pct = round(100 * u.usd / self._cost_limit) if self._cost_limit else 0
+        return (
+            f"{u.cost()} spent, {pct}% of the ${self._cost_limit:g} cap;"
+            f" context {_k(spend.last_input)} of {_k(self._context_target)} target"
+        )
+
+    async def awrap_model_call(self, request, handler):
+        # The empty-candidate retry re-enters with the request that already
+        # carries the pointer and the notice; re-appending stacks copies of
+        # both (CallBudgetMiddleware's reasoning).
+        if _empty_retry.get():
+            return await handler(request)
+        spend = self._spend(getattr(request, "state", None) or {})
+        extra = [HumanMessage(self.pointer(spend))]
+        if spend.closed:
+            log.info(
+                "budget: reads closed with %s of the $%g cap spent",
+                spend.usage.cost(),
+                self._cost_limit,
+            )
+            extra.append(HumanMessage(self._notice))
+        return await handler(request.override(messages=[*request.messages, *extra]))
+
+    def _refuse(self, request):
+        if not self._spend(request.state).closed_prev:
             return None
         call = request.tool_call
         return ToolMessage(
@@ -1865,14 +2066,20 @@ class _AnthropicVertexCaching(AgentMiddleware):
         st.seen_len = len(messages)
         return st
 
-    def _calls_left(self, request):
+    def _calls_left(self, request) -> float:
         """Model calls left in this turn, THIS ONE INCLUDED, for the end-of-turn
         brake in _advance_pays.
 
-        state.model_calls is the count of calls already completed
-        (CallBudgetMiddleware increments it in after_model), so cap minus count
-        is the calls still permitted, of which the one being wrapped is the
-        first. 1 therefore means "this is the last call".
+        BudgetMiddleware publishes it directly under CALLS_LEFT_KEY when a turn
+        is bounded by dollars: remaining budget over what the last call cost,
+        which is the same question ("how many more calls like this one") asked
+        in the unit that actually ends the turn. It is unset before the turn's
+        first call, and on a stack without that middleware at all.
+
+        The fallback is the call cap: state.model_calls is the count of calls
+        already completed (CallBudgetMiddleware increments it in after_model),
+        so cap minus count is the calls still permitted, of which the one being
+        wrapped is the first. 1 therefore means "this is the last call".
 
         math.inf when no cap was configured. The brake exists to refuse an
         advance no later call can read back; with no cap there is no horizon to
@@ -1880,9 +2087,11 @@ class _AnthropicVertexCaching(AgentMiddleware):
         permanently rather than merely mistime it -- disabling history caching
         outright for every caller that does not pass max_calls.
         """
+        state = getattr(request, "state", None) or {}
+        if (left := state.get(CALLS_LEFT_KEY)) is not None:
+            return left
         if self._max_calls is None:
             return math.inf
-        state = getattr(request, "state", None) or {}
         calls = state.get("model_calls")
         if calls is None:
             return self._max_calls
@@ -2166,7 +2375,7 @@ _CACHE_FLOOR_TOKENS = 4096
 _GROWING_MAX_STATES = 256
 
 
-def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: int):
+def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: float):
     """Whether re-caching a `prefix_tokens` prefix to absorb a `delta`-token tail
     is worth its creation cost. Returns (due, reason) -- reason for the log.
 
@@ -2731,17 +2940,23 @@ class _GrowingPrefixCache(AgentMiddleware):
             if victim.name:
                 await self._delete_quietly(victim.name)
 
-    def _calls_left(self, request) -> int:
-        """Model calls remaining in this turn under the call cap.
+    def _calls_left(self, request) -> float:
+        """Model calls remaining in this turn, in whichever unit bounds it.
+
+        BudgetMiddleware publishes remaining dollars over the last call's cost
+        under CALLS_LEFT_KEY, which is the horizon on a turn the dollar limit
+        ends; the call cap is the fallback for a stack without it.
 
         CallBudgetMiddleware keeps the per-turn count in graph state, and this
-        middleware is installed outside it, so the key is visible here. It is an
-        UntrackedValue (never checkpointed), so a resumed thread starts a turn
-        with it unset -- which lands on the same branch as a graph built without
-        the budget middleware at all. Both mean "no count to go on", and the safe
-        reading is the full cap: assuming zero calls left would permanently
+        middleware is installed outside it, so the key is visible here. Both are
+        UntrackedValues (never checkpointed), so a resumed thread starts a turn
+        with them unset -- which lands on the same branch as a graph built
+        without either middleware. All of those mean "no count to go on", and the
+        safe reading is the full cap: assuming zero calls left would permanently
         suppress re-caching rather than merely mistime it.
         """
+        if (left := request.state.get(CALLS_LEFT_KEY)) is not None:
+            return left
         calls = request.state.get("model_calls")
         if calls is None:
             return self._max_calls

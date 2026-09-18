@@ -10,6 +10,7 @@
 # langchain for a config parse. A CLI listing job states pays none of it now.
 _LAZY = {
     "ArtifactLog": ".artifacts",
+    "BudgetMiddleware": ".agent",
     "CallBudgetMiddleware": ".agent",
     "CommonConfig": ".config",
     "DATA_DIR": ".config",
@@ -69,6 +70,7 @@ __all__ = [
     "EFFORT_LEVELS",
     "SUPPORTED_PROVIDERS",
     "ArtifactLog",
+    "BudgetMiddleware",
     "CallBudgetMiddleware",
     "CommonConfig",
     "EmptyCandidateError",
