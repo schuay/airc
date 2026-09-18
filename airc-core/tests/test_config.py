@@ -339,3 +339,37 @@ def test_enabling_the_explicit_vertex_cache_is_said_at_load(caplog):
         load_common(raw | {"caching": {"explicit": False}})
         load_common({"models": {"default": "google_anthropic_vertex:claude-opus-5"}})
     assert "explicit Vertex context cache" not in caplog.text
+
+
+def test_refuse_unpriced_names_every_unlisted_model_under_a_budget():
+    """A dollar bound on the placeholder rate is an arbitrary number wearing a
+    dollar sign. Every offender at once, so an operator fixing a roster is not
+    told about them one restart at a time."""
+    import pytest
+    from airc_core.config import refuse_unpriced
+
+    with pytest.raises(SystemExit) as e:
+        refuse_unpriced(
+            {
+                "review": "google_anthropic_vertex:claude-opus-5",
+                "verify": "someprovider:x",
+                "wide": "someprovider:y",
+            },
+            "[processors.review] cost_limit",
+        )
+    msg = str(e.value)
+    assert "someprovider:x" in msg and "someprovider:y" in msg
+    assert "claude-opus-5" not in msg
+    assert "[processors.review] cost_limit" in msg
+
+
+def test_refuse_unpriced_passes_a_fully_listed_roster():
+    from airc_core.config import refuse_unpriced
+
+    refuse_unpriced(
+        {
+            "review": "google_vertexai:gemini-3.1-pro-preview",
+            "verify": "google_anthropic_vertex:claude-opus-5@20260701",
+        },
+        "[processors.review] cost_limit",
+    )

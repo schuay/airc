@@ -26,6 +26,7 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
+from .pricing import price_for
 from .providers import EFFORT_LEVELS, traits_for
 
 log = logging.getLogger(__name__)
@@ -279,8 +280,6 @@ def _warn_unpriced(models: Mapping[str, str]) -> None:
     be a known state rather than one discovered in a report, and startup is
     where the operator is looking.
     """
-    from .pricing import price_for
-
     for key, model_id in models.items():
         if price_for(model_id).generic:
             log.warning(
@@ -289,6 +288,32 @@ def _warn_unpriced(models: Mapping[str, str]) -> None:
                 key,
                 model_id,
             )
+
+
+def refuse_unpriced(models: Mapping[str, str], what: str) -> None:
+    """Refuse, at load, a dollar budget over a model the price table does not
+    list. `what` names the budget in the error, e.g. "[processors.review]
+    review_cost_limit".
+
+    A warning is the right answer for an unlisted model in general (see
+    _warn_unpriced): the generic rate exists so an unlisted model is still
+    costed rather than dropped from every total, and an estimated row is
+    labelled as one. It is the wrong answer for a BOUND. A budget on the
+    placeholder rate reads as a dollar figure the operator chose and behaves as
+    an arbitrary one: the placeholder is a round mid-market number, so the same
+    "$25 a pass" is a different amount of work on every unlisted model and
+    changes meaning the moment a listing is added. Refused at startup, where the
+    operator is looking, rather than discovered in a report.
+    """
+    unpriced = sorted(f"{k} = {v}" for k, v in models.items() if price_for(v).generic)
+    if not unpriced:
+        return
+    raise SystemExit(
+        f"{what} is a dollar budget, and the price table has no listing for"
+        f" {', '.join(unpriced)}: the bound would be on the generic placeholder"
+        " rate rather than on what the model costs. Add the model to"
+        " airc_core.pricing, or point the budgeted stage at a listed model."
+    )
 
 
 def _load_model_providers(raw: Mapping, cfg: CommonConfig) -> None:
