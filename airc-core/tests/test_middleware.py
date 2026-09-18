@@ -483,10 +483,10 @@ async def _gemini_session_of(model=None, **kw):
     return seen["settings"]["http_options"]["headers"][_SESSION_HEADER]
 
 
-async def test_gemini_on_vertex_carries_the_same_session_id_as_claude_would():
-    """One conversation, one routing key, whichever dialect serves it. The
+async def test_gemini_on_vertex_session_id_is_keyed_on_the_thread():
+    """Stable across turns of one conversation, distinct between two. The
     header rides http_options, the per-call hook the genai model exposes."""
-    assert await _gemini_session_of(thread_id="thread-a") == await _session_of(
+    assert await _gemini_session_of(thread_id="thread-a") == await _gemini_session_of(
         thread_id="thread-a"
     )
     assert await _gemini_session_of(thread_id="thread-a") != await _gemini_session_of(
