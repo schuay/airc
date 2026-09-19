@@ -180,7 +180,7 @@ async def test_dead_transport_surfaces_as_error_tool_message():
 
 async def test_adapter_error_handler_is_preserved():
     # The MCP adapter installs a handle_tool_error callback that preserves
-    # non-text content blocks in an isError result (it calls this load-bearing
+    # non-text content blocks in an isError result (it documents this as required
     # and locks it with its own test). _fix_tool used to clobber it with a bare
     # True, collapsing those blocks to str(); it must now compose instead.
     from langchain_core.tools import StructuredTool
@@ -256,7 +256,7 @@ def test_clean_schema_keeps_per_parameter_descriptions():
     nowhere else -- unlike the root one, which restates the tool description
     sent alongside it. Stripping descriptions recursively deleted the argument
     docs of every server that documents its arguments in the schema (the place
-    the protocol provides for them) rather than in tool-level prose.
+    the protocol provides for them) instead of in tool-level prose.
     """
     schema = {
         "type": "object",

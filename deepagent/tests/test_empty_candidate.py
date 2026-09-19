@@ -5,9 +5,9 @@
 
 _EmptyCandidateRetry (airc-core) retries a zero-part Gemini candidate through
 the shared backoff and, on exhaustion, raises EmptyCandidateError. run_once
-catches it by type so the abandon reason says "empty candidate" rather than an
+catches it by type so the abandon reason says "empty candidate" instead of an
 opaque exit -- and, crucially, reports exit_code 1 (a dead turn the loop may
-retry) rather than -1 (a hard error), which is what distinguishes it from a
+retry), not -1 (a hard error), which distinguishes it from a
 genuine crash in the loop's accounting.
 """
 

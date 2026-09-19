@@ -110,7 +110,7 @@ def _resume_prompt(i: int, caps: LoopCaps, last: bool = False) -> str:
 
 # The per-attempt ledger, appended to on every turn. Its readers, in order of
 # how much they can be trusted to exist: a human following the job, the agent's
-# own next attempt (which reads conclusions rather than re-deriving them), and
+# own next attempt (which reads conclusions instead of re-deriving them), and
 # the resume path when a checkpoint is missing. That ordering is why the ledger
 # is a plain file and the checkpoint is a cache -- correctness rests on the file.
 ATTEMPTS_FILE = "ATTEMPTS.md"
@@ -145,7 +145,7 @@ def _with_interjection(prompt: str, interject) -> str:
     """Append pending out-of-band news to a turn's prompt.
 
     Also applies to turn 0 (whose resume prompt is empty), so a goal that starts
-    with news already waiting carries it into its first turn rather than only
+    with news already waiting carries it into its first turn instead of only
     from the second.
     """
     if interject is None or not (news := interject()):
@@ -269,7 +269,7 @@ async def run_agent_loop(
         )
         spent = spent + run.usage
         # Whether the NEXT turn is the last this step can afford, measured in
-        # turns like the one just made rather than in a count that means
+        # turns like the one just made instead of in a count that means
         # something different at a 20k context and a 600k one. Sticky, because a
         # cheap turn after an expensive one must not reopen a step that was
         # already told to wrap up.
@@ -314,7 +314,7 @@ async def run_agent_loop(
             # finish_reason distinguishes a provider-side empty candidate (a
             # deterministic SAFETY/RECITATION/MALFORMED_FUNCTION_CALL block that
             # reproduces every resume) from a plain cut turn; empty_candidate names
-            # the silent shape (a zero-part STOP). Name both in the log and the
+            # the silent case (a zero-part STOP). Name both in the log and the
             # abandon reason so a dead-turn abandon is not opaque.
             why = f"exit {run.exit_code}"
             if run.finish_reason:

@@ -130,7 +130,7 @@ def _fence_overhead(text: str) -> int:
 
     The longest fence in the text bounds the one that can be open at a page
     boundary, and a page pays for it twice -- a reopen at the top and a close at
-    the bottom, each on its own line. Derived rather than fixed at three
+    the bottom, each on its own line. Derived instead of fixed at three
     backticks: a block quoting a fence is opened with more (see the sender-side
     fencing helper), and budgeting three for a four-backtick reopen overruns the
     wire limit by exactly the difference.
@@ -142,7 +142,7 @@ def _fence_overhead(text: str) -> int:
 def _fence_open_after(text: str, opened: int) -> int:
     """The length of the fence open at the end of text, or 0 if none is.
 
-    Takes the state at the start in the same terms. A walk rather than a parity
+    Takes the state at the start in the same terms. A walk instead of a parity
     count, because the two directions do not obey the same rule: a fence line
     carrying an info string (```js) can only open a block. Markdown closes only
     on backticks and whitespace, so a ```js inside an inlined diff is content,

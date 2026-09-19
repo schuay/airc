@@ -483,7 +483,7 @@ async def test_dedup_holds_across_real_turns(tmp_path):
 
 async def test_runner_hands_the_index_to_the_graph(tmp_path, monkeypatch):
     # The runner's half of the split: read the store once per turn and pass it
-    # in. The key rides only for a memory-enabled persona -- a graph without the
+    # in. The key is passed only for a memory-enabled persona -- a graph without the
     # middleware has no such state key to accept it.
     from airc_core import UsageCollector
     from airc_room.config import Config
@@ -544,12 +544,12 @@ async def test_runner_hands_the_index_to_the_graph(tmp_path, monkeypatch):
 
 def test_reminder_interval_stays_inside_the_compaction_keep_window():
     # The refresh interval is what keeps a copy of the block inside the tail a
-    # summarization keeps, so absence stays a backstop rather than the usual
-    # path. Reaching across packages for a private constant is the point: the
+    # summarization keeps, so absence stays a backstop, not the usual
+    # path. Reaching across packages for a private constant is intended: the
     # relationship is invisible from either side alone, and lowering
     # _SUMMARY_KEEP_TOKENS without looking here would degrade recall silently
     # (every long thread losing the index at each compaction, recovering only on
-    # the next call) rather than fail anything.
+    # the next call) instead of failing anything.
     from airc_core.agent import _SUMMARY_KEEP_TOKENS
 
     assert _REMINDER_TOKENS < _SUMMARY_KEEP_TOKENS

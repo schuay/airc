@@ -4,9 +4,9 @@
 """MatrixTransport against a faked matrix-nio AsyncClient.
 
 The transport is exercised with a real in-memory Store (its thread-mapping is
-load-bearing) and a stub client that records room_send calls and lets a test
+required) and a stub client that records room_send calls and lets a test
 drive the inbound callback. No network, no nio server. These pin the behaviour a
-live smoke test cannot cheaply re-check every run: the sent content shape (plain
+live smoke test cannot cheaply re-check every run: the sent content form (plain
 + html, thread relation), own-echo/dedup filtering, and flat-vs-threaded routing.
 """
 
@@ -360,7 +360,7 @@ async def test_aclose_clears_live_typing(tmp_path, monkeypatch):
 
 def test_conforms_to_transport_protocol(tmp_path, monkeypatch):
     # Transport is a plain (non-runtime-checkable) Protocol, so assert the two
-    # required members structurally rather than via isinstance.
+    # required members structurally instead of via isinstance.
     t, *_ = _make(tmp_path, monkeypatch)
     assert t.name == "matrix"
     assert callable(t.run) and callable(t.deliver)

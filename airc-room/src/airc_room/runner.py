@@ -490,7 +490,7 @@ class AgentRunner:
         )
         # After base_middleware, so it runs after the summarizer inside it: a
         # compaction that dropped the last index block is then seen as an absence
-        # in the same pass rather than the next one. Only correctness-neutral
+        # in the same pass instead of the next one. Only correctness-neutral
         # ordering -- absence is re-checked every call either way -- but it keeps
         # the persona from spending a call without the index it just lost.
         if not extra_system and self._memory_enabled(persona):
@@ -534,7 +534,7 @@ class AgentRunner:
             ),
         ]
         return create_agent(
-            # call_kwargs is where the entry's thinking effort rides; the
+            # call_kwargs carries the entry's thinking effort; the
             # middleware above takes the id alone, so depth reaches the API here
             # and nowhere else.
             make_model(model_id, **profile.call_kwargs),
@@ -559,8 +559,8 @@ class AgentRunner:
         """Run one agent turn against a thread; return the reply text.
 
         `trigger_id` is the message that caused this turn, when one did; it
-        rides the turn config for a tool that needs to read what a human
-        actually asked rather than scan the thread guessing. See turn_config.
+        travels in the turn config for a tool that needs to read what a human
+        actually asked instead of scanning the thread. See turn_config.
 
         Returns None if the agent declined (NOTHING_TO_ADD) or produced no
         text -- except when addressed is set (a human named this agent

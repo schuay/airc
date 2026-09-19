@@ -5,7 +5,7 @@
 
 A single bot user backs the whole room: one fixed identity carries every
 persona, so a persona is rendered inside the message (a bold "name" prefix)
-rather than as a distinct Matrix user.
+instead of as a distinct Matrix user.
 
 Outbound (`deliver`): agent and watcher messages are sent into the Matrix room
 their room thread maps to. Flat by default -- every message lands in the room
@@ -24,7 +24,7 @@ deduplicated by event id.
 Encryption: unencrypted for v1. The seam for E2E is nio's own store plus the
 `encryption_enabled` client flag -- a later `[e2e]` extra (python-olm) flips it
 on and the send path already routes through `room_send`, which encrypts
-transparently for an encrypted room. Nothing in this module's shape assumes
+transparently for an encrypted room. Nothing in this module assumes
 plaintext, so E2E plugs in without an interface change (see design D4).
 """
 

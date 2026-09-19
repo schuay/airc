@@ -64,7 +64,7 @@ def test_read_fifo_refused(tmp_path, monkeypatch):
 
 
 def test_read_unreadable_returns_error_not_raises(tmp_path):
-    # A regular file the process cannot read (permission bit) passes the shape
+    # A regular file the process cannot read (permission bit) passes the type
     # guards but open() raises. It must surface as the tool's error string.
     f = tmp_path / "secret.txt"
     f.write_text(SRC)

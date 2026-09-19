@@ -86,7 +86,7 @@ def test_tool_first_index_matches_only_a_leading_tool_response():
 def test_tool_first_guard_converts_a_tool_opening_history():
     # The growing cache's tail opens on the tool response(s) answering a cached
     # function call; without the guard the converter raises IndexError on that
-    # shape (langchain-google issue #392).
+    # history (langchain-google issue #392).
     from airc_core.model import _install_vertex_tool_first_guard
     from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_vertexai import chat_models as cm
@@ -103,7 +103,7 @@ def test_tool_first_guard_converts_a_tool_opening_history():
         AIMessage("both read"),
     ]
     # Bare, and with the system turn langchain prepends after middleware runs --
-    # the latter is the shape a real request has, and matching only history[0]
+    # the latter is the form a real request has, and matching only history[0]
     # missed it while passing this test on the former.
     for history in (tail, [SystemMessage("you are a reviewer"), *tail]):
         system, contents = cm._parse_chat_history_gemini(
@@ -136,8 +136,8 @@ def test_tool_first_guard_leaves_normal_histories_alone():
 
 
 def test_genai_tool_first_guard_converts_a_tool_opening_history():
-    # Same tail shape as the vertexai guard test; the genai converter's failure
-    # mode is silent DROPPING of orphan tool responses rather than a crash.
+    # Same tail as the vertexai guard test; the genai converter's failure
+    # mode is silent dropping of orphan tool responses, not a crash.
     from airc_core.model import _install_genai_tool_first_guard
     from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_genai import chat_models as cm
@@ -266,7 +266,7 @@ def test_anthropic_vertex_gets_the_same_call_time_guards_as_gemini(monkeypatch):
     assert m.max_output_tokens == _ANTHROPIC_MAX_OUTPUT_TOKENS
     assert m.max_retries == 1
     assert m.location == "global"
-    # On the constructed client, which is what the deadline rides on.
+    # On the constructed client, which is where the deadline is set.
     assert m.client.timeout == _VERTEX_CALL_TIMEOUT_S
     assert m.async_client.timeout == _VERTEX_CALL_TIMEOUT_S
 
@@ -302,7 +302,7 @@ def test_anthropic_vertex_drops_the_sampling_the_messages_api_removed(monkeypatc
     temperature therefore raises TypeError on every call to the provider rather
     than degrading. Review sets temperature and seed.
 
-    Asserted against the SDK's signature rather than a hardcoded key list, so
+    Asserted against the SDK's signature instead of a hardcoded key list, so
     the test tracks the API if a parameter returns.
     """
     pytest.importorskip("langchain_google_vertexai")
@@ -422,7 +422,7 @@ def test_make_model_rejects_bad_id_with_hint():
 
 
 def test_list_models_unknown_provider_is_none():
-    # Unsupported provider returns None rather than raising (offline).
+    # Unsupported provider returns None instead of raising (offline).
     assert list_models("nope:whatever") is None
 
 
@@ -473,9 +473,9 @@ def test_make_model_openrouter_rewrites_to_openai_with_base_url(monkeypatch):
 def test_make_model_openrouter_unset_key_does_not_leak_openai_key(monkeypatch):
     # With OPENROUTER_API_KEY unset and OPENAI_API_KEY set, make_model must NOT
     # produce a client that carries the OpenAI key. init_chat_model is left
-    # UNMOCKED on purpose: the leak lives in ChatOpenAI's api_key default_factory
+    # unmocked: the leak lives in ChatOpenAI's api_key default_factory
     # (it reads OPENAI_API_KEY when no key is passed), so a test that mocks
-    # init_chat_model cannot see it. make_model refuses rather than build a
+    # init_chat_model cannot see it. make_model refuses instead of building a
     # openrouter.ai client bound to the OpenAI key.
     from airc_core import model as m
 
@@ -579,7 +579,7 @@ def test_make_model_shallows_vertex_sdk_retries(monkeypatch):
 def test_vertex_proxy_env_configures_the_client_for_the_loopback_seam(monkeypatch):
     """The sandbox proxy hook: no credential, async REST transport, our endpoint.
 
-    Both settings are forced rather than chosen. With a custom endpoint langchain
+    Both settings are forced, not chosen. With a custom endpoint langchain
     skips its "rest" -> "grpc_asyncio" upgrade and plain "rest" resolves to a
     SYNC transport whose methods return non-awaitables -- and airc drives models
     via astream, so that path fails at runtime, not at construction. The aio
@@ -671,13 +671,13 @@ _STUB = f"{__name__}:_stub_factory"
 
 
 def test_registered_provider_passes_check_and_unregistered_still_fails(registry):
-    # The pair is the point: without the second half, a check_model_id that
+    # Both assertions are needed: without the second, a check_model_id that
     # accepted everything would pass the first half just as well.
     registry.register_provider("mybackend", _STUB)
     assert check_model_id("mybackend:v1") is None
     assert check_model_id("otherbackend:v1") is not None
     assert "unknown provider" in check_model_id("otherbackend:v1")
-    # The shape check still applies to a registered provider.
+    # The format check still applies to a registered provider.
     assert check_model_id("mybackend") is not None
 
 
@@ -699,7 +699,7 @@ def test_make_model_uses_factory_and_never_touches_init_chat_model(
 
 def test_make_model_unregistered_provider_raises(registry):
     # The guard that has to stay live: an id that merely LOOKS like a custom
-    # provider is rejected, so a typo'd prefix fails at startup rather than
+    # provider is rejected, so a typo'd prefix fails at startup instead of
     # reaching a factory that does not exist.
     with pytest.raises(ValueError, match="unknown provider"):
         registry.make_model("mybackend:v1")
@@ -742,7 +742,7 @@ def test_register_provider_rejects_builtin_and_conflicting_prefixes(registry):
 
     registry.register_provider("mybackend", _STUB)
     # Idempotent for the identical spec (icompleteu parses its config several
-    # times per process), but a CONFLICTING one raises rather than silently
+    # times per process), but a CONFLICTING one raises instead of silently
     # deciding by parse order.
     registry.register_provider("mybackend", _STUB)
     with pytest.raises(ValueError, match="already registered"):
@@ -765,7 +765,7 @@ def test_hint_lists_registered_providers_and_stays_clean_when_empty(registry):
 
 def test_factory_shape_is_rejected_at_registration_not_first_use(registry):
     # Shape is checkable without importing, and a path that is not "module:attr"
-    # at all can never become one -- so it fails at startup rather than inside
+    # at all can never become one -- so it fails at startup instead of inside
     # the first turn that happens to need this model.
     for bad in ("not_a_dotted_path", "mod:", ":attr"):
         with pytest.raises(ValueError, match="must be 'module:attr'"):

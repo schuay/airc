@@ -3,7 +3,7 @@
 
 """Token usage and its cost, as one value the whole suite books.
 
-`Usage` is the only shape usage takes once it leaves the provider: the ledger
+`Usage` is the only form usage takes once it leaves the provider: the ledger
 row, the journal event, the job result on the bus and the log line are all
 this value or a rendering of it. `Usage.of_call` is the only reader of a
 provider's usage_metadata and the only place a price is applied, so the
@@ -62,7 +62,7 @@ class Usage(BaseModel):
     cache_storage_token_hours: float = 0.0
     # Dollars, split by side: the prompt (uncached input, cache reads and
     # writes, explicit-cache storage) and the output (thinking included).
-    # `usd` is their sum, stored rather than derived so a row or a payload
+    # `usd` is their sum, stored, not derived, so a row or a payload
     # reads as one number without arithmetic.
     usd_input: float = 0.0
     usd_output: float = 0.0
@@ -204,7 +204,7 @@ class Usage(BaseModel):
         return "".join(parts)
 
     def line(self) -> str:
-        """One log line: the cost first, then the shape that produced it.
+        """One log line: the cost first, then the counts that produced it.
         "$1.84 over 37 calls: 412k in ($0.61, 93% cached, 12k written), 8k out
         ($1.23, 5k thinking)"."""
         calls = f"{self.calls} call{'s' if self.calls != 1 else ''}"

@@ -73,7 +73,7 @@ def _trunc(s: str, n: int = _JOURNAL_TRUNC) -> str:
 # turn grew ~3.3k tokens per call (174k peak input at call 52), so summarization
 # (_SUMMARY_TRIGGER_TOKENS, 80% of a 1M window) would not trigger until roughly
 # call 240 -- the cap binds ~3x earlier than the window can support. 100 buys
-# turns that end on their own work rather than mid-investigation; the nudges
+# turns that end on their own work instead of mid-investigation; the nudges
 # keep their old distance from it (cap minus 30 / minus 10).
 _SOFT_NUDGE_CALLS = 70
 _HARD_NUDGE_CALLS = 90
@@ -113,7 +113,7 @@ _REPORT_ACK = (
 # RequireStructuredResultMiddleware appends this and jumps back to the model.
 # Distinct from the wrap-up nudges -- those steer a still-running turn; this
 # recovers one that already stopped -- and it names the concrete failure so the
-# model calls the tool rather than re-explaining in prose.
+# model calls the tool instead of re-explaining in prose.
 _REQUIRE_RESULT_REMINDER = (
     "You ended your turn with a plain-text message and did not CALL the"
     f" `{REPORT_TOOL_NAME}` tool, so nothing was recorded and the turn is lost. Do"
@@ -297,7 +297,7 @@ class _JournalCallback(BaseCallbackHandler):
             # losing one event is far cheaper than losing the model call that
             # produced it. But swallowing it silently means a systematically
             # broken emitter looks like a model that never says anything, so it
-            # is logged at debug rather than dropped on the floor.
+            # is logged at debug instead of dropped.
             log.debug("journal callback: on_llm_end: %s: %s", type(e).__name__, e)
 
     def _emit_content(self, content) -> None:
@@ -378,7 +378,7 @@ class _StopReasonCallback(BaseCallbackHandler):
 async def _thread_live(graph, thread_id: str) -> bool:
     """Whether `thread_id` already holds a conversation in the graph's saver.
 
-    Asked of the saver rather than of a per-process dict, because with a durable
+    Asked of the saver, not of a per-process dict, because with a durable
     saver those are different questions -- see the call site. Anything that goes
     wrong reading the checkpoint answers "not live": that re-sends the full
     prompt and clears the report channel, which costs context and is safe, where
@@ -444,7 +444,7 @@ class LangGraphHarness:
         # afterwards: the tools are resolved here and baked into cached graphs,
         # so a consumer that needs them adapted has no seam of its own.
         #
-        # A callable rather than a declarative rule, for the layering: a rule
+        # A callable, not a declarative rule, for the layering: a rule
         # expressive enough to be useful would have to name tools and arguments,
         # and naming those is naming a domain.
         self._tool_wrapper = tool_wrapper
@@ -462,7 +462,7 @@ class LangGraphHarness:
         all yielded a working-looking saver that raised much later, inside
         `ainvoke`. There it lands in run_once's generic handler: a dead turn,
         three of them, and the goal abandons as "no valid result after 3 dead
-        attempts" -- checkpointing costing the job rather than a few turns,
+        attempts" -- checkpointing costing the job instead of a few turns,
         which is the opposite of the guarantee it is documented under.
 
         Probing it here with the stdlib driver is the cheap way to make the
@@ -493,12 +493,12 @@ class LangGraphHarness:
         With `checkpoint_db`, a SQLite saver that OUTLIVES the process: a goal
         killed at attempt 6 resumes with its thread intact instead of re-sending
         the whole prompt and re-deriving six attempts of context. Without it,
-        in-memory -- the shape every test and one-shot run wants, and the
+        in-memory -- what every test and one-shot run wants, and the
         fallback when the DB cannot be opened.
 
         One saver for every thread, not one per graph: they are keyed by
         thread_id internally, and a per-graph connection would leave a file
-        handle per LRU slot. A failure to open degrades to memory rather than
+        handle per LRU slot. A failure to open degrades to memory instead of
         raising -- checkpointing is a cache, never the correctness path (see
         run_once's thread_live check), so losing it costs turns, not work.
         """
@@ -555,9 +555,9 @@ class LangGraphHarness:
         self._tokens.close()
         # aiosqlite runs its connection on a NON-daemon thread, so leaving it
         # open hangs interpreter exit: the process then dies to the unit's
-        # TimeoutStopSec rather than shutting down, and SIGKILL leaves the WAL
-        # uncheckpointed. Closing also commits it, which is the point of a
-        # durable saver. Best-effort -- shutdown must not raise.
+        # TimeoutStopSec instead of shutting down, and SIGKILL leaves the WAL
+        # uncheckpointed. Closing also commits it, which a durable saver
+        # needs. Best-effort -- shutdown must not raise.
         if self._saver_conn is not None:
             conn, self._saver_conn = self._saver_conn, None
             # `forget` deletes rows; sqlite keeps the pages on its freelist, so
@@ -653,7 +653,7 @@ class LangGraphHarness:
         )
         # Before the cache middleware, matching base_middleware's placement of the
         # grounding reminder: an insert is a tail append via the messages reducer,
-        # so it settles into the growing prefix rather than poisoning it.
+        # so it settles into the growing prefix instead of poisoning it.
         for src, text, interval in self._reminders:
             mw.append(GroundingReminderMiddleware(interval, text, src))
         if cache := growing_cache_middleware(

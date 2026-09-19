@@ -26,7 +26,7 @@ def io_guarded(fn):
     """Turn an OSError from the underlying filesystem into the tool's own
     error-string contract instead of letting it escape.
 
-    The per-tool guards catch the file's *shape* (dir, FIFO, too big), but the
+    The per-tool guards catch the file's *type* (dir, FIFO, too big), but the
     read/write itself can still fail for reasons the path alone does not show --
     a read-only mount, a permission bit, a symlink into a mirror the worktree
     only mounts ro. Uncaught, that raises out through the tool node and kills the

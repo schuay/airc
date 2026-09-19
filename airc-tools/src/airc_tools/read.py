@@ -75,7 +75,7 @@ def read_file(
             f"{offset + i:6}\t{line}" for i, line in enumerate(body.splitlines())
         )
         # A gutter makes this unsafe to paste into an edit_file SEARCH. Say so
-        # here rather than trusting the tool description to be recalled at the
+        # here instead of trusting the tool description to be recalled at the
         # moment it matters -- the failure is a mystery non-matching edit.
         note += " (numbered: strip the gutter before an edit_file SEARCH)"
         body = numbered + ("\n" if body.endswith("\n") else "")

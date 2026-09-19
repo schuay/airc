@@ -23,7 +23,7 @@ those.
 
 `airc --init-config` scaffolds a starter config with the sections core itself
 loads. Add `--plugin <module>` to append that app's own sections and set
-`plugin_module`, so an app is configured in one command rather than a core file
+`plugin_module`, so an app is configured in one command instead of a core file
 plus a manual paste -- see `config_template()` in `airc-room/PLUGINS.md`.
 
 Talk in the console like IRC. Write `perf:` anywhere in a message (or a leading
@@ -49,7 +49,7 @@ workspace (not itself a package). Every member is identically shaped
   except through the same tool-group gate any MCP server passes.
 - `deepagent/` -- reusable agent-turn runtime: the harness, the bounded resumable
   reentry loop, the journal, the skill index. Extracted to be application-neutral;
-  apps pass their own system prompt and tools. See its `DESIGN.md`.
+  apps pass their own system prompt and tools.
 - `airc-room/` -- the chat room core: `Room`, orchestrator, runner, personas,
   `subscribers/base`, `transports/` (console + Matrix), the store, timers, the
   structural prompts with domain holes. The `airc` console command launches it.

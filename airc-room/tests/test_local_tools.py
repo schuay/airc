@@ -103,8 +103,8 @@ def test_room_is_passed_to_a_hook_that_takes_it():
 
 
 def test_room_reaches_a_kwargs_hook():
-    # **kwargs is the forward-compat idiom, so a plugin that wrote it precisely
-    # to receive a later addition must not be the one shape that silently misses
+    # **kwargs is the forward-compat idiom, so a plugin that wrote it
+    # to receive a later addition must not be the one form that silently misses
     # it: the tool would build with room=None and quietly fail to post.
     room = object()
     assert _call_local_tools(_KwargsPlugin(), None, room) == {"icu_tasks": [room]}
@@ -120,7 +120,7 @@ def test_a_hook_without_room_still_loads():
 def test_a_raising_hook_propagates_and_is_called_exactly_once():
     # Why the dispatch inspects the signature instead of calling with the keyword
     # and catching TypeError. Both halves matter and only together do they rule
-    # the fallback out: the error must reach the operator rather than being read
+    # the fallback out: the error must reach the operator instead of being read
     # as "this plugin ships no local tools", AND the hook body must not run a
     # second time -- a retry would repeat whatever it did before it raised.
     plugin = _RaisingPlugin()

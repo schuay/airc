@@ -52,7 +52,7 @@ class Persona:
     nickname: str = ""
     # Stable identity for persisted per-thread state (seen offsets, checkpoints):
     # the folder name, unchanged by the nickname swap. Keeping state keyed on this
-    # rather than the addressable handle lets use_nicknames toggle on/off without
+    # instead of the addressable handle lets use_nicknames toggle on/off without
     # orphaning a persona's thread memory. Defaults to name for direct construction.
     key: str = ""
 

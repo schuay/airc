@@ -130,11 +130,11 @@ def test_the_durable_saver_ships_its_own_dependencies():
     They were not: `aiosqlite` and `langgraph-checkpoint-sqlite` were declared
     only by airc-room, which deepagent does not depend on, so they arrived
     transitively in a suite install and were absent from deepagent alone. The
-    failure is silent by design -- _saver catches ImportError and degrades to
+    failure is silent: _saver catches ImportError and degrades to
     InMemorySaver -- so a dep trim in another package would have turned durable
     conversations off across the fleet, announced by one warning line.
 
-    Read from the installed metadata rather than from what happens to be
+    Read from the installed metadata and not from what happens to be
     importable, because in this venv airc-room supplies both and any import
     check would pass whether or not the declaration exists.
     """
@@ -143,7 +143,7 @@ def test_the_durable_saver_ships_its_own_dependencies():
 
     # The distribution name is the leading run of name characters; everything
     # after it is a version specifier, extras or an environment marker. Split by
-    # hand rather than with packaging.Requirement -- packaging is itself an
+    # hand instead of with packaging.Requirement -- packaging is itself an
     # undeclared transitive, which is the bug this test is about.
     declared = {
         m.group(0).lower()
@@ -156,8 +156,8 @@ def test_the_durable_saver_ships_its_own_dependencies():
 async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
     """The tools are resolved here and baked into cached graphs, so a consumer
     that needs them adapted -- an argument defaulted, a call bounded -- has no
-    seam of its own once the harness is built. A callable rather than a
-    declarative rule keeps this package free of any tool's vocabulary."""
+    seam of its own once the harness is built. A callable, not a
+    declarative rule, keeps this package free of any tool's vocabulary."""
     from deepagent import LangGraphHarness
 
     seen = []

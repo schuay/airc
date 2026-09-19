@@ -102,7 +102,7 @@ def reject_unknown(
     empty, which means unrestricted). Since the two are indistinguishable at the
     point of the typo, every section is strict.
 
-    SystemExit rather than an exception: this runs during startup config parsing,
+    SystemExit, not an exception: this runs during startup config parsing,
     where a traceback buries the one line the operator needs.
 
     Open sections (user-named maps like [repos], [tool_groups], [mcp.servers],
@@ -119,7 +119,7 @@ def reject_unknown(
 def parse_handover_fields(
     h: Mapping, *, error: type[BaseException] = SystemExit
 ) -> HandoverFields:
-    """Parse the shared [handover] shape without owning its kind vocabulary."""
+    """Parse the shared [handover] fields without owning its kind vocabulary."""
     if "repro_only" in h:
         raise error(
             "[handover] repro_only is gone: allowlist the kinds instead -- "
@@ -229,7 +229,7 @@ def _parse_model_profile(key: str, value: object) -> ModelProfile:
 class CommonConfig:
     """The sections shared across every component config.
 
-    `models` is the raw `[models]` table rather than resolved ids: components
+    `models` is the raw `[models]` table, not resolved ids: components
     legitimately want different defaults from one shared section (airc a cheap
     conversational model, the processor a capable review model), so each selects
     the key it needs (`models["default"]`, `models["filter"]`, ...).
@@ -312,7 +312,7 @@ def _warn_unpriced(models: Mapping[str, str]) -> None:
 
     Such a model is costed at the generic placeholder rate and every total it
     touches is marked estimated. That is the intended fallback, but it should
-    be a known state rather than one discovered in a report, and startup is
+    be a known state instead of one discovered in a report, and startup is
     where the operator is looking.
     """
     for key, model_id in models.items():
@@ -332,13 +332,13 @@ def refuse_unpriced(models: Mapping[str, str], what: str) -> None:
 
     A warning is the right answer for an unlisted model in general (see
     _warn_unpriced): the generic rate exists so an unlisted model is still
-    costed rather than dropped from every total, and an estimated row is
+    costed instead of dropped from every total, and an estimated row is
     labelled as one. It is the wrong answer for a bound. A budget on the
     placeholder rate reads as a dollar figure the operator chose and behaves as
     an arbitrary one: the placeholder is a round mid-market number, so the same
     "$25 a pass" is a different amount of work on every unlisted model and
     changes meaning the moment a listing is added. Refused at startup, where the
-    operator is looking, rather than discovered in a report.
+    operator is looking, instead of discovered in a report.
     """
     unpriced = sorted(f"{k} = {v}" for k, v in models.items() if price_for(v).generic)
     if not unpriced:
@@ -436,7 +436,7 @@ def load_common(raw: Mapping) -> CommonConfig:
         cfg.bus_root = Path(v).expanduser()
     if v := raw.get("token_db_path"):
         cfg.token_db_path = Path(v).expanduser()
-    # Presence-checked rather than truth-checked: "" is the documented spelling
+    # Checked for presence, not truth: "" is the documented spelling
     # for "no on-disk trail", and `if v :=` would silently leave the default.
     if "artifacts_dir" in raw:
         v = raw["artifacts_dir"]
@@ -470,9 +470,9 @@ def _warn_explicit_vertex_cache(cfg: CommonConfig) -> None:
     """Say loudly, at load, when a config would run the explicit Vertex
     context cache: a google_vertexai model with [caching] explicit on (the
     default). That path has been inactive since 2026-09 and its cost rule
-    still carries a read-price ratio tuned by hand rather than read from the
+    still carries a read-price ratio tuned by hand instead of read from the
     price table (agent.py _CACHE_READ_RATIO); enabling it again means
-    checking that rule first. A warning rather than a refusal because a
+    checking that rule first. A warning, not a refusal, because a
     google_vertexai entry may serve a role that never builds an agent graph.
     """
     if not cfg.caching_explicit:

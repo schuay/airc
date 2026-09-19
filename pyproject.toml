@@ -1,7 +1,7 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
-# Virtual workspace root for the airc CORE: no package of its own. The five
+# Virtual workspace root for the airc core: no package of its own. The five
 # members here are the domain-neutral substrate -- the chat room and
 # everything under it, carrying no application specifics. An app
 # lives in a separate repo that consumes this one as a git submodule; see that
@@ -34,7 +34,7 @@ dev = [
 # `uv run pytest` from the root spans every member. Test basenames repeat
 # across members (each has a tests/test_config.py, ...), which the default
 # prepend import mode rejects as module collisions; importlib gives each file
-# its own module identity. tests/__init__.py would NOT fix this: every tests/
+# its own module identity. tests/__init__.py would not fix this: every tests/
 # dir would become the same package name. consider_namespace_packages stops
 # importlib mode from deriving module names from the member directories --
 # without it, loading a member's tests/conftest.py under the member's own name
@@ -42,7 +42,7 @@ dev = [
 # (dir name == package name). asyncio_mode must be repeated here because pytest
 # reads exactly one config file -- for a root run the member settings do not apply.
 #
-# importlib mode does NOT put a test directory on sys.path, so a test module that
+# importlib mode does not put a test directory on sys.path, so a test module that
 # imports a sibling by name fails here while passing under a member's own config
 # (which is prepend). airc-room's handler tests share doubles that way; pythonpath
 # makes that one directory importable by name. Only that directory, so the
@@ -54,22 +54,22 @@ consider_namespace_packages = true
 pythonpath = ["airc-room/tests"]
 asyncio_mode = "auto"
 
-# Lint policy for every workspace member. Kept at the ROOT so the rule set is one
-# decision rather than five that drift; ruff walks up from each member directory
+# Lint policy for every workspace member. Kept at the root so the rule set is one
+# decision instead of five that drift; ruff walks up from each member directory
 # and finds this.
 #
-# Ruff is deliberately NOT pinned (a pin ends up different on the prod box and
+# Ruff is not pinned (a pin ends up different on the prod box and
 # fights every deploy), so a new release can surface findings in code that has
 # not changed. The way that stays workable is keeping the backlog at zero, which
-# means a rule we do not intend to honour must be turned off HERE, with a reason,
-# rather than accumulating inline noqas.
+# means a rule we do not intend to honour must be turned off here, with a reason,
+# instead of accumulating inline noqas.
 [tool.ruff.lint]
 extend-select = [
     "B",      # bugbear: real mistakes, not style
     "BLE",    # blind except -- see the ignore below
     "C4",     # comprehension misuse
     "DTZ",    # naive datetimes: this codebase has been bitten by expiry handling
-    "G",      # logging call shape
+    "G",      # logging call format
     "ISC",    # implicit string concat, i.e. the missing-comma bug
     "PL",     # pylint subset
     "RET",    # return-path smells
@@ -80,21 +80,21 @@ extend-select = [
     "UP",     # pyupgrade
 ]
 ignore = [
-    # Blind `except Exception` is the intended shape at this codebase's
+    # Blind `except Exception` is the intended form at this codebase's
     # boundaries: callbacks that must not fail a turn, best-effort artifact
-    # writes, a bus record that must be quarantined rather than crash the loop.
+    # writes, a bus record that must be quarantined instead of crashing the loop.
     # Every such site logs and explains itself; narrowing them would mean
     # enumerating exception types from libraries that do not document them, and
-    # the failure mode of missing one is exactly what these guards exist to stop.
-    # S110 (try/except/pass) stays ENABLED -- silent is the part we do not want.
+    # the failure mode of missing one is what these guards exist to stop.
+    # S110 (try/except/pass) stays enabled: silence is the part we do not want.
     "BLE001",
-    # Asserts in tests are the point.
+    # Asserts are what tests do.
     "S101",
-    # Function-level imports are load-bearing here, not laziness: they keep
+    # Function-level imports are intentional here: they keep
     # optional dependencies optional (google-cloud, vertexai, matrix) and keep
-    # import cost off the startup path. 200+ deliberate sites.
+    # import cost off the startup path. 200+ sites.
     "PLC0415",
-    # A literal in an assertion IS the specification; naming it moves the fact
+    # A literal in an assertion is the specification; naming it moves the fact
     # away from the check that reads it.
     "PLR2004",
     # Message-in-raise is how these exceptions are read in logs and tracebacks;
@@ -102,7 +102,7 @@ ignore = [
     # easier.
     "TRY003",
     # Argument counts, branch/statement counts: these flag real complexity, but
-    # the fix is a refactor with its own risk. Left off rather than suppressed
+    # the fix is a refactor with its own risk. Left off instead of suppressed
     # inline, so the decision is visible and revisitable in one place.
     "PLR0913",
     "PLR0917",
@@ -118,14 +118,14 @@ ignore = [
     # timeout has no informative traceback, and the parse-error sites already
     # carry the exception in the message.
     "TRY400",
-    # Naive datetimes are load-bearing in two places and harmless in the rest:
-    # google.auth compares token expiry as NAIVE UTC (attaching a tzinfo makes
+    # Naive datetimes are required in two places and harmless in the rest:
+    # google.auth compares token expiry as naive UTC (attaching a tzinfo makes
     # every comparison raise), and the console/search timestamps are local time
     # printed next to a human's own clock. Checked site by site.
     "DTZ001",
     "DTZ006",
     "DTZ007",
-    # Unicode dashes appear only as DATA -- a regex character class that
+    # Unicode dashes appear only as data -- a regex character class that
     # normalizes them, and the test asserting it does.
     "RUF001",
     # dict(...) with kwargs is sometimes the clearer form, e.g. when it mirrors
@@ -150,6 +150,6 @@ ignore = [
     "S603",  # subprocess in a test harness, with fixed argv
     "S607",
     "B017",  # a bare-Exception assertRaises is sometimes exactly the assertion
-    "RUF012",  # dataclass-ish test doubles carry mutable defaults by design
+    "RUF012",  # test doubles that mimic dataclasses carry mutable defaults
     "ASYNC221",  # a git fixture in an async test is setup, not I/O under test
 ]

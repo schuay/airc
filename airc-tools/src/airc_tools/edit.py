@@ -9,7 +9,7 @@ file is written only if every chunk matches. On any miss nothing is written and
 a failure message names the failed block(s) with a did-you-mean hint -- the
 message is the model's next prompt.
 
-All-or-nothing, rather than aider's partial apply, because our chunks are small:
+All-or-nothing, unlike aider's partial apply, because our chunks are small:
 resending the fixed array is cheap, and it never leaves the file half-edited
 under searches the model computed against the original. Cross-file edits are
 separate calls (the model emits several in one turn); a single typed `path` per
@@ -33,8 +33,8 @@ def write_file(path: str, content: str) -> str:
     file (a new test, a scratch script), edit_file when changing part of an
     existing one. Shares path resolution and the size ceiling with edit_file;
     it does not go through the SEARCH/REPLACE engine because there is nothing to
-    match -- and edit_file's empty-search path appends rather than overwrites,
-    which is the wrong shape for "write this file".
+    match -- and edit_file's empty-search path appends instead of overwriting,
+    which is wrong for "write this file".
     """
     p = resolve_path(path)
     if p.is_dir():
@@ -70,7 +70,7 @@ def apply_edits(path: str, edits: list[tuple[str, str]]) -> str:
     creating = not p.exists()
     if creating:
         # A non-existent file can only be created, not searched. Require the
-        # explicit create shape so a typo'd path is a clear error, not a
+        # explicit create form so a typo'd path is a clear error, not a
         # surprise new file half-full of one edit's replace text.
         if any(search.strip() for search, _ in edits):
             return (

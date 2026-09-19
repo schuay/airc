@@ -89,7 +89,7 @@ def turn_trigger(config: RunnableConfig | None) -> int | None:
     """The id of the message that caused this turn, or None when it had no one
     message behind it (a timer wake, a structured turn, an older config).
 
-    Read on its own rather than as a third element of turn_context, because it
+    Read on its own, not as a third element of turn_context, because it
     is genuinely optional where the identity pair is not: making it part of the
     all-or-nothing check would turn every triggerless turn into "no identity"
     and silently disable the tools that read it.

@@ -30,7 +30,7 @@ for a policy that demands the stronger "the row is gone" story, and is not the
 default for that reason.
 
 SYSTEM messages survive: the commit digest and the perf summary. They are
-rendered from public git data, and keeping them is what makes a scrubbed thread
+rendered from public git data, and keeping them makes a scrubbed thread
 intelligible in an audit. The line is drawn on kind alone because that is a rule
 an operator can state and a reviewer can check -- notably it also catches review
 findings, which post under kind AGENT (so a "keep the automated posts" rule would
@@ -227,7 +227,7 @@ def aged_threads(
     long window applied to space_class_threads. None means one window for
     everything (the pre-split behavior, kept for callers that do not classify).
 
-    The content check is what keeps a weekly timer cheap and its report honest:
+    The content check keeps a weekly timer cheap and its report honest:
     a thread whose non-SYSTEM messages are all blank has nothing left to redact,
     so re-reporting it every week would make the counts meaningless. The floor
     row is not the marker -- a thread can have one and still hold new messages
@@ -261,7 +261,7 @@ def live_threads(db: sqlite3.Connection, control_root: Path | None) -> set[int]:
 
     The third reaches into another component's on-disk layout, which is why it is
     best-effort and gated on control_root being passed: a missing or unreadable
-    file skips the check rather than failing the sweep. That is acceptable because
+    file skips the check instead of failing the sweep. That is acceptable because
     the exclusion is not what makes a late result safe -- redaction is, by keeping
     commit_threads resolving so the result still routes to its thread. This only
     avoids gutting the context of a thread someone is mid-way through.
@@ -289,7 +289,7 @@ def live_threads(db: sqlite3.Connection, control_root: Path | None) -> set[int]:
 def _icompleteu_live(control_root: Path) -> set[int]:
     """Thread ids of unterminated icompleteu jobs, best-effort.
 
-    Reads the job state files directly rather than importing icompleteu: core
+    Reads the job state files directly instead of importing icompleteu: core
     must not depend on a plugin's component, and this tool has to run on a deploy
     where icompleteu is not installed at all. The cost is that the two terminal
     step names below duplicate icompleteu's `TERMINAL`; being wrong here only
@@ -332,7 +332,7 @@ def delete_checkpoints(
     finer grain: every announcement worth keeping lives in airc.db and is
     untouched by this.
 
-    A persona then resumes the thread with empty context rather than a cold
+    A persona then resumes the thread with empty context, not a cold
     cache -- it never re-reads that history in any form, because the seen offset
     (in airc.db, floored by the sweep) keeps it from being re-injected. What is
     actually lost is the persona's own tool results, all re-derivable.
@@ -345,7 +345,7 @@ def delete_checkpoints(
     for tid in thread_ids:
         # No LIKE-escaping needed: the key is "<int>:<persona>[:g<gen>]", so the
         # prefix is digits and a colon -- no `_` or `%` can appear in it. The
-        # colon is what makes this exact: '1:%' cannot reach thread 12.
+        # colon makes this exact: '1:%' cannot reach thread 12.
         like = f"{tid}:%"
         if "checkpoints" in have:
             n_ckpt += ckpt.execute(
@@ -376,7 +376,7 @@ def redact_threads(
     # once, before opening the transaction.
     have = existing_tables(db)
     orchestrated = "orchestrated" in have
-    # "Is this thread a watcher announcement rather than a human's?" -- OR'd over
+    # "Is this thread a watcher announcement and not a human's?" -- OR'd over
     # whichever signals this store actually has (see the title UPDATE below).
     # A SYSTEM message needs no table check: messages is always present.
     tests = [
@@ -427,7 +427,7 @@ def redact_threads(
             # Pin both offsets to the thread's own tip, in this transaction.
             # The floor covers every persona including those with no agent_seen
             # row (which would read 0 and replay everything); `orchestrated`
-            # is pinned for the same one-line cost rather than relying on a
+            # is pinned for the same one-line cost instead of relying on a
             # restart's _recover to repair it, which a running daemon never does.
             db.execute(
                 "INSERT INTO thread_seen_floor (thread_id, last_msg_id) VALUES (?, ?)"
@@ -449,7 +449,7 @@ def redact_threads(
                     f"DELETE FROM {table} WHERE thread_id = ?", (tid,)
                 ).rowcount
             # The bug still wants filing; it just loses its follow-up
-            # destination. Null the link rather than dropping the row.
+            # destination. Null the link instead of dropping the row.
             if "pending_bugs" in have:
                 c.bugs_unlinked += db.execute(
                     "UPDATE pending_bugs SET thread_id = NULL WHERE thread_id = ?",
@@ -501,7 +501,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=parse_duration,
         default=parse_duration("540d"),
         metavar="DURATION",
-        # Defaulted long rather than to --older-than: the asymmetric risk is
+        # Defaulted long, not to --older-than: the asymmetric risk is
         # a hand-run without the flag wiping space threads 17 months early
         # (irreversible), not a deploy without the split retaining them (idle
         # bytes). A single-window sweep is --space-older-than equal to
@@ -639,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
 def _control_root(config_path: Path | None) -> Path | None:
     """icompleteu's control root from the shared suite config, or None.
 
-    Read straight out of the TOML rather than via Config or icompleteu's own
+    Read straight out of the TOML and not via Config or icompleteu's own
     parser: `[icompleteu]` is a top-level suite section that core does not
     interpret (Config keeps only the `[airc]` leftovers in plugin_config), and
     core must not import a plugin's component -- this tool has to run on a deploy

@@ -6,13 +6,13 @@
 One table, one lookup. Every dollar figure in the suite comes from here through
 `Usage.of_call` (usage.py); nothing else holds a rate or a ratio. Prices are USD
 per million tokens as the provider lists them publicly, with the date they were
-read, so a stale entry is visible rather than silently wrong.
+read, so a stale entry is visible instead of silently wrong.
 
 A model missing from the table gets GENERIC: a placeholder rate at a
 mid-market magnitude with the ratios the listed providers share (a cache read
 at a tenth of input, output at five times). It exists so an unlisted model --
-a private deployment, a new checkpoint -- is still costed rather than dropped
-from every total, and so its rows are flagged as estimated rather than passed
+a private deployment, a new checkpoint -- is still costed instead of dropped
+from every total, and so its rows are flagged as estimated instead of passed
 off as measured.
 """
 

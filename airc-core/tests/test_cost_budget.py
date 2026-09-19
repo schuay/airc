@@ -1,7 +1,7 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
-"""BudgetMiddleware: a turn bounded by what it costs rather than by how many
+"""BudgetMiddleware: a turn bounded by what it costs, not by how many
 calls it makes.
 
 Driven through a real create_agent graph on a scripted model, because the three
@@ -130,7 +130,7 @@ async def test_without_the_limit_the_same_turn_runs_on():
 
 
 async def test_a_cheaper_model_buys_more_calls_at_the_same_limit():
-    """The point of pricing the bound rather than counting it: the same $25
+    """Why the bound is priced, not counted: the same $25
     limit is 5 calls at a 1M-token context and 50 at a 100k one."""
     model, graph = _agent(
         [_budget(cost_limit=25.0)], usage=_usage(100_000), recursion_limit=400
@@ -174,7 +174,7 @@ async def test_reads_are_refused_once_the_money_runs_low():
 
 async def test_a_read_is_only_refused_by_a_call_that_was_told_so():
     """The alignment FinalAnswerMiddleware gets by subtracting one from its
-    counter: the notice rides the request, so a call made before the window
+    counter: the notice is appended to the request, so a call made before the window
     closed must still have its reads executed -- otherwise the model is refused
     for a rule it was never shown."""
     mw = _budget(cost_limit=25.0)
@@ -292,7 +292,7 @@ async def test_three_large_uncached_calls_in_a_row_end_the_pass():
     mw = _budget(cost_limit=1000.0, zero_cache_floor=_ZERO_CACHE_FLOOR)
     with pytest.raises(CacheLossTrip) as e:
         await _run_calls(mw, [_usage(400_000)] * 3)
-    # The counts, so the log line says what tripped rather than that something did.
+    # The counts, so the log line says what tripped, not just that something did.
     assert "3 calls in a row" in str(e.value) and "400k" in str(e.value)
 
 
@@ -338,8 +338,8 @@ async def test_small_calls_are_never_judged():
 
 
 async def test_the_trip_reaches_the_caller_through_the_graph():
-    """Raised, not ended with a jump: a turn that ends returns a verdict-shaped
-    nothing, which every caller reads as "the model had nothing to report"."""
+    """Raised, not ended with a jump: a turn that ends returns no verdict,
+    which every caller reads as "the model had nothing to report"."""
     from airc_core.agent import CacheLossTrip
 
     _, graph = _agent(
@@ -388,7 +388,7 @@ async def test_no_cost_limit_never_ends_the_turn_on_spend():
 async def test_no_cost_limit_leaves_the_reads_open():
     """The window closes reads once what REMAINS is a few calls' worth. With
     nothing remaining to run down there is no point at which that is true, so a
-    pass keeps its tools to the end rather than losing them to a division that
+    pass keeps its tools to the end instead of losing them to a division that
     never had a denominator."""
     mw = _budget(cost_limit=0.0)
     spend = await _run_calls(mw, [_usage(400_000)] * 10)
@@ -422,7 +422,7 @@ def test_a_negative_context_target_is_a_typo_not_an_unset_one():
 
 
 async def test_an_untargeted_pass_still_gets_the_money_pointer():
-    """The money half is the half that bounds the pass, so it rides every call
+    """The spend bounds the pass, so it is reported on every call
     whether or not a target was configured."""
     seen = []
 

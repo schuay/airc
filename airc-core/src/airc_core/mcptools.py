@@ -75,7 +75,7 @@ _MAX_TOOL_RESULT_CHARS = 50_000
 _TOOL_CALL_TIMEOUT_S = 120
 
 # Per-server startup budget: spawn, initialize, and list tools. A stdio server is
-# an arbitrary external binary, so it can hang rather than fail -- waiting on a
+# an arbitrary external binary, so it can hang instead of failing -- waiting on a
 # credential prompt, or wedged mid-handshake -- and without a bound here every
 # caller inherits that hang, including ones that never wanted this server's
 # tools. Generous, because a cold uv-tool launcher genuinely takes seconds.
@@ -128,7 +128,7 @@ def _truncate_text(text: str, limit: int = _MAX_TOOL_RESULT_CHARS) -> str:
 def _truncated(value):
     """Cap a tool result's text payload at _MAX_TOOL_RESULT_CHARS.
 
-    Two shapes occur. A plain-function tool returns a string. The MCP adapter
+    Two forms occur. A plain-function tool returns a string. The MCP adapter
     returns content as a list of content blocks, with text in
     {"type": "text", "text": ...} dicts; a bare isinstance(str) check passes
     that whole list through uncapped, so one multi-megabyte result reaches the
@@ -180,10 +180,10 @@ def _clean_schema(schema: dict, top: bool = True) -> None:
 def _result_chars(value) -> int:
     """Total characters of a tool result's text payload.
 
-    Handles both shapes: a plain string, and the content_and_artifact tuple
+    Handles both forms: a plain string, and the content_and_artifact tuple
     whose content is a list of content blocks (the MCP path -- text lives in
-    {"type": "text", "text": ...} dicts). Returns 0 for shapes with no
-    measurable text, so the size/log signal is simply absent rather than wrong.
+    {"type": "text", "text": ...} dicts). Returns 0 for forms with no
+    measurable text, so the size/log signal is absent, not wrong.
     """
     if isinstance(value, tuple) and len(value) == 2:
         value = value[0]
@@ -203,7 +203,7 @@ def _install_error_handler(tool: BaseTool) -> None:
 
     The MCP adapter installs its own handle_tool_error callback whose job is to
     preserve non-text content blocks (image/file) in an isError result; it
-    documents that as load-bearing and locks it with a test. Overwriting it with
+    documents that as required and locks it with a test. Overwriting it with
     a bare True -- which this used to do -- collapses those blocks to str().
 
     It cannot be kept unchanged either: that callback re-raises every

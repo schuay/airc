@@ -78,7 +78,7 @@ async def post_caught_up(
     room: Room, noun: str, skipped: int, oldest: float, window: float
 ) -> None:
     """A single operational notice after a restart drained a stale backlog, so
-    the room shows the gap was handled rather than going eerily silent. Its own
+    the room shows the gap was handled instead of going silent. Its own
     thread (these events spawn a thread each, so there is no shared home), kind
     `notice` so the orchestrator does not route it to a persona."""
     thread = room.create_thread("[airc] caught up")
@@ -139,7 +139,7 @@ async def _drain(
             result = await handle(env)
         except ValidationError as e:
             # A poison event -- its payload no longer fits the schema (a producer
-            # on a newer/older event shape). Deterministic, so retrying forever
+            # on a newer/older event schema). Deterministic, so retrying forever
             # would wedge the whole topic. Skip it loudly (ERROR:) and advance; a
             # transient handler error still propagates below and retries.
             log.error(

@@ -86,7 +86,7 @@ def test_plugin_config_empty_by_default(tmp_path):
 
 def test_bare_room_with_plugin_sections_warns(tmp_path, caplog):
     # No plugin_module but plugin sections present: nobody parses them, so they
-    # would be silently dropped. Core warns rather than booting a quietly-wrong
+    # would be silently dropped. Core warns instead of booting a quietly-wrong
     # room. (plugin_module defaults to "" -- a bare room -- so just omit it.)
     import logging
 
@@ -237,7 +237,7 @@ def test_open_sections_stay_open(tmp_path, body):
 
 def test_unknown_toplevel_section_errors(tmp_path):
     # A mis-namespaced or typo'd top-level section is a silent-misconfig footgun,
-    # so the loader rejects it rather than ignoring it.
+    # so the loader rejects it instead of ignoring it.
     with pytest.raises(SystemExit, match="unknown config section"):
         load_config(_write(tmp_path, "[watcher]\nx = 1\n"))  # should be [watchers]
     with pytest.raises(SystemExit, match="chat"):
@@ -265,7 +265,7 @@ def test_a_shared_key_load_common_parses_is_not_a_typo(tmp_path):
     key BEFORE load_common ever sees it, so a key wired only in core makes the
     room refuse to start on a file the processor reads happily.
 
-    The spend caps are the case that caught this. Named explicitly rather than
+    The spend caps are the case that caught this. Named explicitly instead of
     derived, because there is no machine-readable list of what load_common
     parses and a test that derived one would drift with it."""
     body = (
@@ -389,14 +389,14 @@ def test_template_config_writes_and_loads(tmp_path):
     assert cfg.default_model == "google_vertexai:gemini-2.5-flash"
     assert cfg.orchestrator.max_turns == 24
     # Core scaffolds only what core loads: no plugin is named, and no app
-    # section rides along. An app's sections come from its config_template().
+    # section is included. An app's sections come from its config_template().
     assert cfg.plugin_module == ""
     assert cfg.plugin_config == {}
 
 
 def test_template_config_appends_plugin_sections(tmp_path):
-    # The two halves must concatenate into ONE parseable file -- the whole point
-    # of the hook is that setup stays a single command.
+    # The two halves must concatenate into ONE parseable file -- the hook
+    # exists so setup stays a single command.
     path = tmp_path / "config.toml"
     write_template_config(
         path,
@@ -467,7 +467,7 @@ def test_startup_validation_covers_a_key_the_room_never_reads(tmp_path):
 
 
 def test_scalar_entries_and_profile_tables_coexist_in_one_models_section(tmp_path):
-    """The shape the scaffold documents. TOML allows scalar keys and sub-tables
+    """The form the scaffold documents. TOML allows scalar keys and sub-tables
     under one header only in that order, so a config mixing the two forms is
     the case worth pinning -- getting it wrong is a parse error in the
     operator's file, not in ours."""
@@ -502,7 +502,7 @@ def test_resolve_profile_carries_the_effort_of_the_role_a_persona_names(tmp_path
     # No `model` in agent.toml, and the explicit spelling of the same role.
     assert cfg.resolve_profile(None).call_kwargs == {"effort": "low"}
     assert cfg.resolve_profile("default").call_kwargs == {"effort": "low"}
-    # filter is unset: it rides the default ID (the loader's fallback) but not
+    # filter is unset: it falls back to the default ID (the loader's fallback) but not
     # the default's depth -- two roles exist because they may differ.
     assert cfg.resolve_profile("filter") == ModelProfile(
         key="filter", id="google_anthropic_vertex:claude-opus-5"

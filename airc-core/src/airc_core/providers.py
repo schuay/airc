@@ -1,7 +1,7 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
-"""Per-provider facts, as data rather than as branches.
+"""Per-provider facts, as data, not branches.
 
 One table keeps separate "is this Claude?" tests (a model_id prefix in
 make_model, an isinstance check in a middleware, a boolean parameter) from each
@@ -36,7 +36,7 @@ class ProviderTraits:
     # Whether the provider takes a reasoning-depth level (EFFORT_LEVELS). False
     # is not "this provider cannot think" -- Gemini thinks too, but it is
     # configured by a token budget (thinking_budget), which is a different knob
-    # with a different unit. A level is refused on such a provider rather than
+    # with a different unit. A level is refused on such a provider instead of
     # converted into a budget: an invented equivalence would change the request
     # into something nobody asked for, on the most expensive parameter there is.
     supports_effort: bool = False
@@ -93,7 +93,7 @@ def google_sdk() -> str:
 def traits_for(model_id: str) -> ProviderTraits:
     """Traits for `model_id`'s provider; a neutral record for anything else.
 
-    An unknown provider gets the default rather than an error: this table is an
+    An unknown provider gets the default, not an error: this table is an
     optimization over asking the provider, and a provider missing from it has to
     keep working.
     """
@@ -119,7 +119,7 @@ STOP_REASON_KEYS: tuple[str, ...] = tuple(
 
 
 # output_config.effort, in increasing depth. The Messages API's own vocabulary,
-# so it is repeated here rather than derived: the SDK exposes it as a Literal
+# so it is repeated here instead of derived: the SDK exposes it as a Literal
 # that cannot be iterated, and config validation needs the set before any
 # langchain import has happened.
 #

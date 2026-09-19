@@ -140,7 +140,7 @@ def make_memory_tools(store_root: Path) -> list:
         git failure) with the file left on disk and unstaged so the agent can fix
         and retry.
 
-        The commit is pathspec-scoped (`git commit -- <path>`) rather than a plain
+        The commit is pathspec-scoped (`git commit -- <path>`) instead of a plain
         commit of the index, because a store is a shared checkout an operator also
         touches by hand. A plain commit takes everything staged, so one unrelated
         malformed file sitting in the index fails the hook for every write: the

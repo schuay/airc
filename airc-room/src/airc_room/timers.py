@@ -7,7 +7,7 @@ An agent (typically in a DM) can schedule its own follow-up -- "check the
 pinpoint job in 60 min and summarize" -- and end its turn. A single waiter fires
 the wake at time T by driving a fresh turn for the SAME agent on the SAME thread,
 so it resumes with its own context (its checkpoint plus a catch-up of anything
-posted meanwhile) rather than a cold prompt.
+posted meanwhile) instead of a cold prompt.
 
 Design notes:
 - ONE waiter for any number of timers: a min-heap keyed by fire time plus a poke
@@ -22,14 +22,14 @@ Design notes:
   chat's timers.
 - Cancellation is lazy tombstoning: a live-timer dict is the source of truth, and
   a heap entry whose id is no longer live is skipped when it surfaces. This keeps
-  the single-heap/single-waiter shape (a heap cannot cheaply remove an interior
+  the single-heap/single-waiter design (a heap cannot cheaply remove an interior
   entry); the per-thread pending count is decremented exactly once, at whichever
   of cancel-or-fire happens first.
 - Durable across restart when a store is wired: add/cancel/fire mirror to a
   `timers` table, and `restore()` repopulates the heap at startup. A timer whose
   fire time already passed while the daemon was down surfaces with a non-positive
   delay and so fires once, immediately, on the next run() tick. Without a store
-  the scheduler is purely in-memory (the shape tests and a bare room use).
+  the scheduler is purely in-memory (what tests and a bare room use).
 - Firing goes through the orchestrator (deliver), which runs the turn under the
   per-(thread, agent) lock -- never a raw run_turn, which would race a concurrent
   human-triggered turn for the same agent.

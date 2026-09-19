@@ -131,7 +131,7 @@ def test_a_long_fence_survives_the_pages_it_is_split_across():
 def test_a_reopened_long_fence_is_paid_for_in_the_budget():
     # The fence allowance was fixed at three backticks, so a four-backtick
     # reopen overran the wire limit by exactly the difference -- and _page_pairs
-    # turns that into "page decorator is not body-linear" rather than a short
+    # turns that into "page decorator is not body-linear" instead of a short
     # page.
     text = "`````\n" + "x\n" * 200 + "`````"
     pages = paginate(text, limit=64)

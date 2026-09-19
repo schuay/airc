@@ -3,11 +3,11 @@
 
 """Transport-kind resolution: flags, config, and the TTY/plugin default.
 
-_resolve_transport_kind is the load-bearing prod-path branch that decides which
+_resolve_transport_kind is the prod-path branch that decides which
 frontend the room binds; these pin its precedence so a config or flag change
 cannot silently swing prod onto the wrong transport. Core names no transport
 itself -- the headless default comes from the plugin's default_transport_kind,
-so these fake a plugin object rather than a plugin-module string.
+so these fake a plugin object instead of a plugin-module string.
 """
 
 import argparse

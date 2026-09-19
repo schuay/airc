@@ -91,7 +91,7 @@ DEFANG_ENV = {
 # given, so the default is short and the agent raises it per call
 # for work that is honestly long. That only works if the agent can tell the two
 # cases apart, so the hint turns on the one thing it can read off the output it
-# already has -- was the command still talking when we killed it -- rather than
+# already has -- was the command still talking when we killed it -- and not
 # on a rule about hangs it has no way to evaluate. SLOW/HUNG are literal labels
 # to give that decision something to match on.
 #

@@ -344,14 +344,14 @@ class TurnContext:
         self.store = orch._store
 
     async def run_turn(self, *, task_prompt: str | None = None) -> str | None:
-        """A plain conversational turn (the room's default response shape)."""
+        """A plain conversational turn (the room's default response)."""
         return await self._orch._guarded_turn(
             self.responder,
             self.thread_id,
             addressed=False,
             task_prompt=task_prompt,
             # The announcement IS this turn's trigger, even though it came from
-            # a watcher rather than a person -- a tool reading provenance wants
+            # a watcher, not a person -- a tool reading provenance wants
             # what caused the turn, and is the one that decides whether a
             # non-human trigger counts for what it is checking.
             trigger_id=self.announcement.id,
@@ -465,7 +465,7 @@ class Orchestrator:
             watermark = self._store.get_orchestrated(t.id)
             if watermark is None:
                 # Thread predates the watermark table: treat history as
-                # orchestrated rather than replaying months of it.
+                # orchestrated instead of replaying months of it.
                 self._store.set_orchestrated(t.id, msgs[-1].id if msgs else 0)
                 continue
             pending = [m for m in msgs if m.id > watermark]
@@ -537,7 +537,7 @@ class Orchestrator:
         # Streak of consecutive agent messages ending at msg (0 if msg is from
         # a human or the watcher, which always reset the discussion). There is
         # no hard cutoff: the streak feeds escalating pressure signals to the
-        # coordinator, so discussions peter out rather than stop mid-sentence.
+        # coordinator, so discussions peter out instead of stopping mid-sentence.
         streak = (
             self._agent_streak(msg.thread_id) if msg.kind == MessageKind.AGENT else 0
         )
@@ -590,7 +590,7 @@ class Orchestrator:
     async def _consumed(self, msg: Message) -> bool:
         """Run the plugin handler chain; True once one claims the message.
 
-        Here in the worker loop rather than in room.post, because _recover
+        Here in the worker loop and not in room.post, because _recover
         replays persisted messages above the watermark straight into the worker
         queues -- a hook on post would silently skip every replayed message, and
         consumption would not be crash-durable. In the loop the handlers inherit

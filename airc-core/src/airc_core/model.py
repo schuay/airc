@@ -8,14 +8,14 @@ any installed langchain provider package works. Two auth styles:
 
   - API key providers (google_genai, anthropic, openai, deepseek, ...):
     the provider package reads its env var; missing keys disable the persona
-    at startup rather than failing mid-conversation.
+    at startup instead of failing mid-conversation.
   - google_vertexai: no key; uses Application Default Credentials. Project
     and location come from GOOGLE_CLOUD_* env vars, seeded from [gcp] config
     (see config.apply_gcp_env_defaults).
 
 openrouter is an OpenAI-compatible aggregator with no langchain package of its
 own, so it is served through the openai provider with OpenRouter's base_url and
-OPENROUTER_API_KEY (same shape as deepseek). A persona with an "openrouter:..."
+OPENROUTER_API_KEY (as for deepseek). A persona with an "openrouter:..."
 model_id constructs with no google-cloud/ADC dependency, so a deploy can run its
 personas without any Google Cloud setup (e.g. GLM via OpenRouter).
 
@@ -136,9 +136,9 @@ class _ProviderSpec:
 # External model providers, registered from config ([model_providers], parsed by
 # load_common). A custom backend is a BaseChatModel subclass wrapping an in-house
 # mechanism -- it has no init_chat_model id, so make_model needs a branch that
-# returns a caller-built object rather than a provider string.
+# returns a caller-built object instead of a provider string.
 #
-# Module state rather than something hung off a config object because make_model
+# Module state, not a field of a config object, because make_model
 # is a free function with no cfg in scope, and every one of its call sites
 # reaches it that way. The registry has to live here and not behind the room's
 # plugin contract: airc-processors and the coding subscribers import make_model
@@ -169,7 +169,7 @@ def register_provider(
         raise ValueError(f"provider prefix {prefix!r} must be non-empty and colon-free")
     if prefix in SUPPORTED_PROVIDERS:
         raise ValueError(f"{prefix!r} is a built-in provider; pick another prefix")
-    # Only the shape is checked now; the import stays deferred. A factory that is
+    # Only the format is checked now; the import stays deferred. A factory that is
     # not "module:attr" at all cannot become one, so there is nothing to gain by
     # discovering it mid-turn, and importing the package here would make a
     # chat-only backend a hard dependency of every component.
@@ -235,7 +235,7 @@ def missing_key(model_id: str) -> str | None:
 def check_model_id(model_id: str) -> str | None:
     """Return a problem description for a model id, or None if it looks valid.
 
-    Only the "<provider>:<model>" shape and the provider are checked; the model
+    Only the "<provider>:<model>" format and the provider are checked; the model
     name is validated by the provider at call time.
     """
     provider, sep, name = model_id.partition(":")
@@ -250,7 +250,7 @@ def supported_models_hint() -> str:
     """One-line reminder of the valid provider prefixes and id format.
 
     Registered external providers are listed alongside the built-ins so an
-    `airc --check` failure names a configured prefix rather than implying it is
+    `airc --check` failure names a configured prefix instead of implying it is
     invalid -- the hint is printed by the same code that rejected the id.
     """
     return (
@@ -352,7 +352,7 @@ def _drop_unsupported_kwargs(kwargs: dict, model_id: str) -> None:
     """Remove constructor kwargs the provider's API refuses. Mutates `kwargs`.
 
     Which ones those are is ProviderTraits.unsupported_kwargs, so a provider
-    that starts refusing something is a table edit rather than another branch
+    that starts refusing something is a table edit instead of another branch
     here.
 
     Without this every call fails: ChatAnthropicVertex re-emits
@@ -412,7 +412,7 @@ class _RetryNoiseFilter(logging.Filter):
     every retry, so a prefill-overload storm fills the journal with repeated 26k
     blocks. The retry itself is worth surfacing (an ongoing overload), the dump
     is not: rewrite the record to the status code and the retry delay, keeping
-    one readable line. Mutates and passes the record rather than dropping it."""
+    one readable line. Mutates and passes the record instead of dropping it."""
 
     # "... Retrying ... in N seconds as it raised <Error>: <huge text>".
     _RETRY_RE = re.compile(r"in ([\d.]+) seconds as it raised (\w+)")
@@ -454,13 +454,13 @@ def _silence_vertex_noise() -> None:
 
 def _tool_first_index(history, system_cls, tool_cls) -> int | None:
     """Index of the leading tool response in a history the growing cache's tail
-    produced, or None when the history is not of that shape.
+    produced, or None when the history is not of that form.
 
     The tail handed to a middleware opens on the ToolMessage answering the
     cached function call, but langchain prepends the system message AFTER every
     middleware has run (agents/factory.py), so what reaches a provider's history
     converter is [system, tool, ...]. Matching only on history[0] therefore
-    never fires in a real request -- the shape both converters mishandle sails
+    never fires in a real request -- the history both converters mishandle passes
     straight through. Leading system turns are skipped, not counted: neither
     converter emits content for them (they become the separate
     system_instruction), so the sentinel a caller splices in at this index still
@@ -478,7 +478,7 @@ def _install_vertex_tool_first_guard() -> None:
     The growing prefix cache cuts the cached prefix after the model's function
     call (gemini-3.8-flash rejects a prefix ending on the function response),
     so the uncached tail begins with a ToolMessage. langchain's history
-    converter crashes on exactly that shape -- an unguarded vertex_messages[-1]
+    converter crashes on exactly that history -- an unguarded vertex_messages[-1]
     in its ToolMessage branch -- although the API accepts it. Known upstream
     since 2024 with the one-line fix spelled out, never landed:
     https://github.com/langchain-ai/langchain-google/issues/392
@@ -490,7 +490,7 @@ def _install_vertex_tool_first_guard() -> None:
 
     TODO: retire by migrating off langchain-google-vertexai (ChatVertexAI is
     deprecated upstream) to google-genai -- after verifying its converter
-    against this shape: today it silently DROPS a ToolMessage whose calling
+    against this history: today it silently DROPS a ToolMessage whose calling
     AIMessage is absent from the history.
     """
     from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -547,7 +547,7 @@ _google_sdk = google_sdk
 def _install_genai_tool_first_guard() -> None:
     """Make a request that opens on a tool response convertible (genai stack).
 
-    Same growing-cache shape as _install_vertex_tool_first_guard, worse
+    Same growing-cache history as _install_vertex_tool_first_guard, worse
     failure: langchain-google-genai's converter re-emits ToolMessages only
     paired to the AIMessage whose tool_calls ids match, so a history opening
     on tool responses (their calling AIMessage lives inside the cached
@@ -597,12 +597,12 @@ def _make_genai_vertex(model_id: str, kwargs: dict):
     """A google_vertexai: id served by ChatGoogleGenerativeAI (google-genai
     SDK) when AIRC_GOOGLE_SDK=genai.
 
-    Backend selection is delegated to the class's own detection rather than
+    Backend selection is delegated to the class's own detection instead of
     forcing vertexai=True: a project kwarg (present whenever
     GOOGLE_CLOUD_PROJECT is set, i.e. prod) selects Vertex over ADC -- the
     same endpoints the vertexai stack hits -- while a box with only
     GOOGLE_API_KEY reaches the Developer API, which runs the identical client
-    code. That fallback is what makes the stack verifiable on a machine
+    code. That fallback makes the stack verifiable on a machine
     without Vertex access.
 
     The sandbox proxy seam is wired but unverified on this stack (the genai
@@ -642,14 +642,14 @@ def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
     is a warning in a log nobody reads until the bill arrives. A raise at
     construction is a startup failure instead -- and every config path validates
     the same fact earlier, so this is reached by direct callers (tests, scripts)
-    rather than by a running daemon.
+    and not by a running daemon.
 
     The two Claude routes name the parameter differently, which is why this is
     here and not in the traits table: langchain-anthropic has a first-class
     `effort` field, while ChatAnthropicVertex has no field for it at all and
     reaches the API through model_kwargs, whose contents are splatted into
     messages.create(). The caller's own output_config (a response format, say)
-    is merged rather than replaced.
+    is merged, not replaced.
     """
     if effort not in EFFORT_LEVELS:
         raise ValueError(
@@ -727,7 +727,7 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
         #   included, and its default of 3 under ModelRetryMiddleware turns one
         #   logical call into a dozen prefills against an overloaded server. The
         #   middleware is the retry authority; _is_transient knows this SDK's
-        #   error shapes.
+        #   error types.
         # * timeout: its None reaches the Anthropic client explicitly, which
         #   means no deadline at all, so a hung stream hangs forever.
         # * location: its default us-central1 has no quota for this model

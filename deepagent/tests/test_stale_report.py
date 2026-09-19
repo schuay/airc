@@ -29,7 +29,7 @@ class _StageReport(Report):
 
 class _Scripted(GenericFakeChatModel):
     """Turn 1 calls the report tool; every later turn answers with plain text and
-    no tool call -- the ghost-turn shape that leaves structured_response stale."""
+    no tool call -- the ghost turn that leaves structured_response stale."""
 
     def __init__(self):
         super().__init__(messages=iter([]))

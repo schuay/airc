@@ -4,14 +4,14 @@
 """Core does not depend on aisan, in either the import graph or the metadata.
 
 The bind model left airc-tools for its own package (`aisan`), and what makes that
-a removal rather than a relocation is that the arrow does not come back: aisan
+a removal and not a relocation is that the arrow does not come back: aisan
 imports nothing of core's (asserted on its side by tests/test_aisan_boundary.py),
 and core imports nothing of aisan's. Neither half is implied by the other, and
 neither is visible in a suite that only exercises behaviour -- the day a helper in
 airc_tools.shell reaches for `aisan.sandbox` to build a wrapper, every other test
 here still passes and the graph has quietly grown a cycle.
 
-Stated as a rule about the whole repo rather than about this package, because the
+Stated as a rule about the whole repo and not about this package, because the
 edge could appear in any of the five and this is the one that used to own the code.
 """
 
@@ -25,7 +25,7 @@ import tomllib
 REPO = Path(__file__).resolve().parents[2]
 
 # Every core package's importable source. Derived from the workspace member list
-# rather than a glob, so a new member is covered the moment it is declared -- and
+# instead of a glob, so a new member is covered the moment it is declared -- and
 # a member that is renamed makes this fail loudly instead of silently skipping.
 _MEMBERS = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["uv"][
     "workspace"

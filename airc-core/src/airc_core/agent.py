@@ -77,7 +77,7 @@ def _is_cache_gone(e: Exception, name: str | None = None) -> bool:
     """A cached_content reference the server will not honor: deleted
     ("CachedContent not found", 404) or TTL-lapsed ("Cache content <id> is
     expired.", 400 INVALID_ARGUMENT). Either way the fix is to recreate and
-    retry rather than fail the turn.
+    retry, not fail the turn.
 
     When the cache id is known it is the most reliable signal -- the server
     quotes it in the error, so a match is wording-independent. Otherwise fall
@@ -270,7 +270,7 @@ class EmptyCandidateError(Exception):
     reads as a benign end-of-turn but carries nothing, so the turn dies
     silently. Raised by _EmptyCandidateRetry after its own single mutated retry
     (drop the cached prefix + append a nudge) also comes back empty, so the
-    empty is deterministic rather than a one-off flake. Not retryable by
+    empty is deterministic, not a one-off flake. Not retryable by
     ModelRetryMiddleware (see _is_retryable): an identical resend would
     reproduce it. on_failure="error" re-raises; the harness catches it by type
     and surfaces a named diagnostic instead of a generic traceback.
@@ -337,7 +337,7 @@ _ELIDED_TOOL_RESULT = "[tool result from an earlier turn elided to save context]
 # and every retry 400s. This caps that survivor. Set above the source cap in
 # mcptools (_MAX_TOOL_RESULT_CHARS, 50k) so a normally-capped result passes
 # untouched; only a result that bypassed the source cap (an unexpected content
-# shape, a tool from another server) is truncated here. ~240k chars is ~60-120k
+# type, a tool from another server) is truncated here. ~240k chars is ~60-120k
 # tokens depending on density.
 _MAX_KEPT_RESULT_CHARS = 240_000
 
@@ -868,7 +868,7 @@ def _response_shape(resp, bad) -> str:
 
     Also reports the keys of additional_kwargs and response_metadata for the
     matched message, where a provider puts what it could not model otherwise,
-    the model that produced it (the shape has only been seen on one provider,
+    the model that produced it (the failure has only been seen on one provider,
     and a roster runs several), and the refusal details if any.
 
     stop_details is Anthropic's structured refusal field. It is None on
@@ -1089,7 +1089,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
     model to stop; this leaves it nothing else to do.
 
     Mechanism: inside the window every tool call is answered with `refusal`
-    instead of being executed, and `notice` rides on each model request
+    instead of being executed, and `notice` is appended to each model request
     (request-only, like a nudge) saying the tools are closed and to report what
     it has. With ToolStrategy the model is bound with tool_choice="any", so a
     refused read leaves exactly one productive call: the result tool, which the
@@ -1239,7 +1239,7 @@ class CacheLossTrip(Exception):
 
 @dataclass(frozen=True)
 class _Spend:
-    """What a turn has spent, and the shape of the call that last spent it.
+    """What a turn has spent, and the size and cost of the last call.
 
     `closed` is the read-closing window's latch: once what remains is under a
     few calls' worth, it stays shut for the rest of the turn. `closed_prev` is
@@ -1273,7 +1273,7 @@ def _last_ai(messages: list):
 
 
 class BudgetMiddleware(AgentMiddleware):
-    """Bound one turn by what it costs rather than by how many calls it makes.
+    """Bound one turn by what it costs, not by how many calls it makes.
 
     A model call is a poor proxy for spend: what a call costs is the size of its
     context, which varies by an order of magnitude between turns and grows
@@ -1308,13 +1308,13 @@ class BudgetMiddleware(AgentMiddleware):
       (the call that crosses it has already been paid for).
     - Closes the read tools once what remains is under `window` times the last
       call's cost -- three calls at a 20k context and three at a 600k one,
-      rather than a count that means different things at each. Inside the
-      window every read is refused with `refusal` and `notice` rides each
+      instead of a count that means different things at each. Inside the
+      window every read is refused with `refusal` and `notice` is appended to each
       request, so with ToolStrategy's tool_choice="any" the result tool is the
       only call left that does anything.
     - Publishes calls-left under CALLS_LEFT_KEY for the two cache brakes.
     - Raises CacheLossTrip when the provider stops serving the prompt cache on
-      a large context, which is a fault to stop on rather than to pay out.
+      a large context, which is a fault to stop on, not to pay for.
 
     The per-turn usage here is the agent's own calls only. Spend an invocation
     causes beside them -- a ceiling summarization on the filter model, an
@@ -1372,7 +1372,7 @@ class BudgetMiddleware(AgentMiddleware):
         total = prev.usage + call
         # A call the provider reported no usage for (or a fake model in a test)
         # gives no unit to divide by; inf is the reading that leaves every brake
-        # and the window where they were rather than slamming them shut on a
+        # and the window where they were instead of slamming them shut on a
         # missing number. An unbounded turn is the same reading for the same
         # reason: nothing is running out, so nothing should close.
         if self._cost_limit is None or call.usd <= 0:
@@ -1459,7 +1459,7 @@ class BudgetMiddleware(AgentMiddleware):
         extra = [HumanMessage(self.pointer(spend))]
         if spend.closed:
             # Only reachable with a ceiling set -- an unbounded turn never runs
-            # its window down -- but the format is guarded rather than assumed,
+            # its window down -- but the format is guarded, not assumed,
             # since a caller could hand back a _Spend from a bounded run.
             log.info(
                 "budget: reads closed with %s of the $%g cap spent",
@@ -1487,7 +1487,7 @@ class BudgetMiddleware(AgentMiddleware):
         return self._refuse(request) or await handler(request)
 
 
-# Tag on the re-ask reminders this middleware injects. No longer load-bearing
+# Tag on the re-ask reminders this middleware injects. No longer needed
 # for the bound (the re-ask count is an UntrackedValue counter, below) -- kept
 # so a reminder is identifiable in logs/checkpoints and a test can assert it was
 # injected, the same self-tagging scheme GroundingReminderMiddleware uses.
@@ -1588,7 +1588,7 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
             #
             # The bound is its own, and tighter than max_reasks. That budget is
             # sized for nudging a model that is still answering (callers set it
-            # in the hundreds, against the call cap); this one rides a provider
+            # in the hundreds, against the call cap); this one handles a provider
             # fault where each round also spends _UNPARSABLE_RETRIES in-place
             # attempts, so the same number would be that many times the calls
             # on a failure no amount of asking has ever fixed.
@@ -1613,7 +1613,7 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
             # be told to send less, and a response that arrived with nothing in
             # it has nothing to be told. _DropEmptyResponses strips the empty
             # AIMessage from the outgoing request, so a bare jump re-sends the
-            # prefix unchanged rather than replaying the failure back at the
+            # prefix unchanged instead of replaying the failure back at the
             # model.
             if kind == _DROPPED_CALL:
                 out["messages"] = [
@@ -1664,7 +1664,7 @@ class _TimeBudgetState(AgentState):
 class TimeBudgetMiddleware(AgentMiddleware):
     """Steer a long-running turn toward converging via escalating wrap-up nudges at
     given wall-clock elapsed times -- the CallBudgetMiddleware pattern keyed on
-    seconds rather than model-call count.
+    seconds instead of model-call count.
 
     The failure this guards against: an expensive tool-using turn hitting the
     orchestrator's hard per-turn timeout, which kills the turn and discards all the
@@ -1738,7 +1738,7 @@ _GROUNDING_REMINDER_TOKENS = 200_000
 class GroundingReminderMiddleware(AgentMiddleware):
     """Insert a standing rule into the conversation once per `interval` tokens of
     context growth, so a long thread keeps a recent copy near the working tail
-    rather than only at the (increasingly buried) system prompt. Defaults to the
+    instead of only at the (increasingly buried) system prompt. Defaults to the
     grounding rule; `reminder`/`src` make it reusable for any such rule.
 
     Writes the reminder into graph state via the messages reducer -- a tail append,
@@ -1771,7 +1771,7 @@ class GroundingReminderMiddleware(AgentMiddleware):
         # base_middleware's grounding reminder plus an application reminder
         # (the harness appends one per `reminders` entry) failed the whole
         # graph at compile time. src is already the per-instance identity
-        # (_is_reminder keys on it), so the name rides the same uniqueness.
+        # (_is_reminder keys on it), so the name carries the same uniqueness.
         return f"GroundingReminderMiddleware({self._src})"
 
     def _is_reminder(self, m) -> bool:
@@ -1891,7 +1891,7 @@ class _SkipOnSummaryFailure(SummarizationMiddleware):
 
     async def _acreate_summary(self, messages_to_summarize):
         # The parent body, minus the try/except that swallows a failure into a
-        # fake summary. Reimplemented (rather than sniffing the parent's error
+        # fake summary. Reimplemented (instead of sniffing the parent's error
         # string) so a genuine failure propagates for the hook to catch.
         if not messages_to_summarize:
             return "No previous conversation history."
@@ -1956,7 +1956,7 @@ def _session_for(request, fallback: str) -> str:
 
 def _with_header(settings: dict | None, key: str, header: str, value: str) -> dict:
     """model_settings with `header` added under settings[key] (a dict of
-    headers), merged rather than assigned: neither the settings nor the headers
+    headers), merged, not assigned: neither the settings nor the headers
     already there are ours to drop."""
     settings = settings or {}
     return {**settings, key: {**(settings.get(key) or {}), header: value}}
@@ -1971,12 +1971,12 @@ class _GeminiVertexSession(AgentMiddleware):
     ~400k context flipping between normal hit rates and runs of "0 cached"
     within one pass, both directions, at full input rates on every miss.
 
-    The header rides `http_options`, the per-call hook langchain-google-genai
-    exposes: it pops that bind kwarg and merges it into the request's own
-    HttpOptions, whose headers the google-genai client merges into the wire
-    request. Gated on the Vertex backend, since the Developer API has no such
-    routing key; and the legacy ChatVertexAI stack is not covered -- it fixes
-    its metadata at construction and takes no per-call header.
+    The header is passed through `http_options`, the per-call hook
+    langchain-google-genai exposes: it pops that bind kwarg and merges it into
+    the request's own HttpOptions, whose headers the google-genai client merges
+    into the wire request. Gated on the Vertex backend, since the Developer API
+    has no such routing key; and the legacy ChatVertexAI stack is not covered --
+    it fixes its metadata at construction and takes no per-call header.
     """
 
     def __init__(self) -> None:
@@ -2184,7 +2184,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
         A shorter history than last seen means the boundary indexes messages
         that no longer exist -- summarization compacted them, or a fresh run is
         reusing this graph (review). Either way the old mark is meaningless, so
-        start the key over rather than tag an arbitrary point. Eviction just
+        start the key over instead of tagging an arbitrary point. Eviction just
         drops the entry: there is nothing server-side to delete, unlike
         _GrowingPrefixCache, so a lost entry costs one re-write and no leak.
         """
@@ -2217,7 +2217,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
         math.inf when no cap was configured. The brake exists to refuse an
         advance no later call can read back; with no cap there is no horizon to
         compare against, and returning 0 instead would suppress advancement
-        permanently rather than merely mistime it -- disabling history caching
+        permanently instead of merely mistiming it -- disabling history caching
         outright for every caller that does not pass max_calls.
         """
         state = getattr(request, "state", None) or {}
@@ -2244,7 +2244,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
         if target == 0:
             # No message in the conversation can carry a mark that survives
             # serialization, so there is nowhere to record a span we would
-            # actually send. Warn once per stretch: every shape we have seen
+            # actually send. Warn once per stretch: every history we have seen
             # ends on a tool result or user text, both markable, so this means
             # something new is in the history.
             if st.why != _NO_SAFE_MARK:
@@ -2295,7 +2295,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
         )
         if where is None:
             # _advance should have prevented this. Leave the history alone
-            # rather than emit a mark we know will be dropped.
+            # instead of emitting a mark we know will be dropped.
             return messages
         if where is _MARK_IN_KWARGS:
             marked = msg.model_copy(
@@ -2523,7 +2523,7 @@ def _recache_pays(prefix_tokens: int, delta: int, calls_since: int, calls_left: 
     cost of never re-caching at all.
 
     The horizon check is the same trade over the calls actually left in the turn
-    rather than the steady state: creation costs B now to save (1-r)*delta on
+    instead of the steady state: creation costs B now to save (1-r)*delta on
     each remaining call, so near a turn's end a re-cache can never repay and is
     pure loss.
     """
@@ -2637,7 +2637,7 @@ def _mark_placement(msg, prev=None, nxt=None):
         # A tool result is formatted into a tool_result block that takes the
         # mark from additional_kwargs (:480-484) -- unless the content already
         # IS tool_result blocks, which takes an earlier branch (:458-468) that
-        # never looks at additional_kwargs. The mark rides inside the block, so
+        # never looks at additional_kwargs. The mark sits inside the block, so
         # it survives the merge into a neighbouring user turn.
         already_formatted = (
             isinstance(content, list)
@@ -2683,7 +2683,7 @@ def _last_markable(messages: list) -> int:
     says where to cut.
 
     So this does not reuse _last_step_boundary. That function
-    encodes Gemini's wire restrictions, and the shape it selects for a tail of
+    encodes Gemini's wire restrictions, and the cut it selects for a tail of
     [..., AI(tool_use), Tool] is the cut BETWEEN the call and its result -- the
     one message that can never hold a mark. On a turn that makes one tool call
     at a time, which is what a review turn does from start to finish, it
@@ -2712,7 +2712,7 @@ def _last_markable(messages: list) -> int:
 
 def _last_step_boundary(messages: list) -> int:
     """Largest slice point p where caching messages[:p] ends the prefix on a
-    wire shape Gemini accepts (_GrowingPrefixCache).
+    boundary Gemini accepts on the wire (_GrowingPrefixCache).
 
     An AIMessage holding a function call (its ToolMessage then opens the tail,
     which the tool-first guard in model.py makes sendable) or plain user text.
@@ -2755,7 +2755,7 @@ async def _cache_create_rest(endpoint, model_id, prefix, oai_tools, ttl_minutes)
     The SDK client cannot be used here: it forces TLS (and, on a corp box, mTLS
     via a device-cert provider), so it cannot reach the plaintext loopback seam
     the chat client uses. The API itself is ordinary REST on the same host, so
-    the blocker is the client rather than the endpoint -- we build the request
+    the blocker is the client, not the endpoint -- we build the request
     proto locally (no network) and post it ourselves.
 
     Returns the bare id, not the resource path. ChatVertexAI wraps whatever it is
@@ -2810,9 +2810,9 @@ def _genai_client():
     """google-genai client mirroring ChatGoogleGenerativeAI's backend choice:
     a set GOOGLE_CLOUD_PROJECT selects Vertex over ADC (prod), else the
     Developer API via GOOGLE_API_KEY -- the local-verification path, running
-    the identical client code against the other backend. The sandbox proxy
-    rides base_url with a placeholder credential (the proxy attaches the real
-    bearer; see model.proxy_placeholder_credentials).
+    the identical client code against the other backend. The sandbox proxy is
+    reached through base_url with a placeholder credential (the proxy attaches
+    the real bearer; see model.proxy_placeholder_credentials).
 
     The async transport is pinned to httpx: genai prefers aiohttp whenever it
     is importable, and newer releases run client-cert (mTLS) discovery on that
@@ -2981,7 +2981,7 @@ class _GrowingPrefixCache(AgentMiddleware):
       available from the first call, sending the full history as the tail.
     - A long tool-using turn or a long conversation grows the cached prefix as
       history accrues, re-caching at rest-points where the prefix ends on a
-      shape every model accepts (see _last_step_boundary); the tail then opens
+      boundary every model accepts (see _last_step_boundary); the tail then opens
       on the tool response answering the cached function call. When to grow is
       a cost decision, not a fixed interval -- see _recache_pays.
 
@@ -3070,7 +3070,7 @@ class _GrowingPrefixCache(AgentMiddleware):
         with them unset -- which lands on the same branch as a graph built
         without either middleware. All of those mean "no count to go on", and the
         safe reading is the full cap: assuming zero calls left would permanently
-        suppress re-caching rather than merely mistime it.
+        suppress re-caching instead of merely mistiming it.
         """
         if (left := request.state.get(CALLS_LEFT_KEY)) is not None:
             return left
@@ -3214,8 +3214,8 @@ class _GrowingPrefixCache(AgentMiddleware):
                         return await handler(request)
                     if _is_transient(e):
                         raise
-                    # A permanent error that may be the cached prefix rather than
-                    # the request. A model can reject a cached prefix on its shape
+                    # A permanent error that may be caused by the cached prefix, not
+                    # the request. A model can reject a cached prefix on its form
                     # alone, in wording that names neither the cache nor its id
                     # ("Requests ending with a model turn are not supported"), and
                     # the tail cannot be what it describes -- a model call is only
@@ -3223,7 +3223,7 @@ class _GrowingPrefixCache(AgentMiddleware):
                     # cannot separate the two, so decide it by experiment: resend
                     # once without the cache. Succeeding proves the prefix was at
                     # fault (drop it, back off, and let the turn continue uncached
-                    # rather than die); failing proves the request was, and the
+                    # instead of dying); failing proves the request was, and the
                     # original error stands. Gated to permanent errors because a
                     # transient one is the retry middleware's to handle, and a
                     # full uncached resend is the wrong answer to an overload.

@@ -189,7 +189,7 @@ def test_model_providers_rejects_typo_and_missing_factory(registry):
 
 def test_model_providers_builtin_prefix_names_the_section(registry):
     # register_provider's ValueError becomes a SystemExit naming the section, so
-    # the operator gets the line to edit rather than a traceback.
+    # the operator gets the line to edit instead of a traceback.
     with pytest.raises(SystemExit, match=r"\[model_providers.anthropic\]"):
         load_common({"model_providers": {"anthropic": {"factory": "m:f"}}})
 
@@ -212,7 +212,7 @@ def test_model_providers_bad_factory_shape_fails_at_parse(registry):
 
 def test_a_string_entry_stays_a_bare_id():
     # Most entries have nothing to say beyond which model; the string form is
-    # not a legacy shape being tolerated.
+    # not a legacy form being tolerated.
     cfg = load_common({"models": {"default": "prov:m"}})
     assert cfg.model_profiles["default"] == ModelProfile(key="default", id="prov:m")
     assert cfg.model_profiles["default"].call_kwargs == {}
@@ -235,7 +235,7 @@ def test_a_table_entry_carries_the_effort_level():
     )
     assert cfg.model_profiles["review"].effort == "xhigh"
     assert cfg.model_profiles["verify"].call_kwargs == {"effort": "low"}
-    # Two keys on one id is the point of the type, not duplication.
+    # Two keys on one id is normal for the type, not duplication.
     assert cfg.model_profiles["review"].id == cfg.model_profiles["verify"].id
 
 
@@ -342,8 +342,8 @@ def test_enabling_the_explicit_vertex_cache_is_said_at_load(caplog):
 
 
 def test_refuse_unpriced_names_every_unlisted_model_under_a_budget():
-    """A dollar bound on the placeholder rate is an arbitrary number wearing a
-    dollar sign. Every offender at once, so an operator fixing a roster is not
+    """A dollar bound on the placeholder rate is an arbitrary number presented as
+    dollars. Every offender at once, so an operator fixing a roster is not
     told about them one restart at a time."""
     import pytest
     from airc_core.config import refuse_unpriced

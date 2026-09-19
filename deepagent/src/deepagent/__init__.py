@@ -4,8 +4,7 @@
 """deepagent: a reusable runtime for an in-process coding agent.
 
 Import the turn engine, the tools, the caching/accounting, and the robustness;
-bring your own state machine, job spec, prompts, and verdict schemas. See
-DESIGN.md for the package/application boundary and how to build a new app.
+bring your own state machine, job spec, prompts, and verdict schemas.
 """
 
 from .harness import (
@@ -37,7 +36,7 @@ def __getattr__(name: str):
     # lets a consumer that wants a Journal, a Report or a LoopCaps take
     # the protocol and the data types without paying for an implementation it
     # never builds. A missing langgraph install now fails when the harness is
-    # first constructed rather than at import; that is still daemon startup.
+    # first constructed instead of at import; that is still daemon startup.
     if name == "LangGraphHarness":
         from .langgraph_harness import LangGraphHarness
 

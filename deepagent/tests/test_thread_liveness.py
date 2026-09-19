@@ -27,7 +27,7 @@ from deepagent import REPORT_TOOL_NAME, LangGraphHarness, Report
 
 class _Scripted(GenericFakeChatModel):
     """Reports once if asked to, then only ever answers in plain text -- the
-    ghost-turn shape that leaves structured_response holding the old report."""
+    ghost turn that leaves structured_response holding the old report."""
 
     def __init__(self, report_first: bool):
         super().__init__(messages=iter([]))
@@ -124,7 +124,7 @@ async def test_a_restart_does_not_inherit_the_pre_crash_verdict(tmp_path):
     assert run2.result is None, "a turn that made no report has no verdict"
     assert run2.exit_code == 1  # the loop's dead-turn path, not a false success
     # ...and the thread it resumed was recognized as live, so the turn is the
-    # short continue prompt rather than the whole job re-sent into a thread that
+    # short continue prompt instead of the whole job re-sent into a thread that
     # already holds it.
     assert "THE WHOLE ORIGINAL PROMPT" not in m2.turns[0]
     assert "Continue from where you left off" in m2.turns[0]

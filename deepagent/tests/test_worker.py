@@ -88,5 +88,5 @@ async def test_the_step_budget_crosses_into_the_box(tmp_path):
         w.run_agent_loop = orig
     assert seen["caps"].max_usd == 12.5
     # And the default stays "no cap", so a spec written before the field existed
-    # keeps running unbounded rather than being abandoned by a zero.
+    # keeps running unbounded instead of being abandoned by a zero.
     assert LoopSpec(**(spec.model_dump() | {"max_usd": None})).max_usd is None

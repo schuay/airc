@@ -16,7 +16,7 @@ personas, and its config block. This module publishes the *interface* half of
 that -- the factory signatures the room calls -- as a runtime-checkable Protocol
 plus a compatibility version, so an external plugin codes against a typed
 contract instead of matching an undocumented convention by reading source, and a
-stale plugin fails loudly at load rather than mysteriously at first use.
+stale plugin fails loudly at load instead of mysteriously at first use.
 
 Required (a module without all three is rejected at load):
 - build_subscribers(cfg, room, store, toolset) -> list[Subscriber]
@@ -31,7 +31,7 @@ Optional (duck-typed; absent means the room's default behavior):
   supplies, so its personas travel with it instead of relying on the service
   cwd. Takes the loaded Config when it declares the parameter (a compatible
   addition, dispatched by signature like build_local_tools' `room`), for a
-  plugin whose personas come from a configured source rather than its package.
+  plugin whose personas come from a configured source instead of its package.
 - parse_config(cfg) -> object  -- validate and type the plugin's own [airc]
   sub-table (carried on cfg.plugin_config), returning the config object its
   subscribers read. This lets core drop the domain config fields.
@@ -42,7 +42,7 @@ Optional (duck-typed; absent means the room's default behavior):
   setup stays one command. Returned text is written verbatim, so it must be
   valid TOML *after* core's half: core already opens [airc], and TOML forbids
   declaring a table twice, so contribute [airc.<name>] sub-tables (plus any
-  top-level sections in _KNOWN_TOPLEVEL) rather than reopening [airc].
+  top-level sections in _KNOWN_TOPLEVEL) instead of reopening [airc].
 - build_local_tools(cfg, *, room=None) -> dict[str, list[BaseTool]]  -- local (non-MCP)
   langchain tools the plugin contributes, keyed by tool_group name. The room
   grants a persona the tools under a group iff that group is in the persona's
@@ -51,7 +51,7 @@ Optional (duck-typed; absent means the room's default behavior):
   dict (not in the [tool_groups] config), so a persona may name one without it
   being a configured MCP group. Used for tools that need in-process wiring an MCP
   server cannot get (e.g. the grocery memory tools jailed to an akbase path).
-  `room` is passed by keyword for a tool that must post rather than only compute
+  `room` is passed by keyword for a tool that must post and not only compute
   -- e.g. one whose integrity property is that the room, not the model's prose,
   puts the text in the thread. Keyword-optional: an older plugin
   declaring `build_local_tools(cfg)` keeps working, so this stays a compatible
@@ -95,7 +95,7 @@ from typing import Protocol, runtime_checkable
 
 # Bumped on an incompatible change to a required factory signature. Integer, so
 # the check is a simple equality (there is one contract at a time); a plugin
-# built against a different number is refused with a clear message rather than
+# built against a different number is refused with a clear message instead of
 # blowing up on a renamed/removed argument deep in startup.
 PLUGIN_API_VERSION = 1
 

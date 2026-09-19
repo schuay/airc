@@ -112,7 +112,7 @@ class _ScriptedHarness:
     run_once does -- unconditionally, even on a dead turn -- so the liveness
     tests exercise the production event pattern. A turn that "advances" also
     emits a work event (TOOL_START); a dead turn emits only the bookkeeping.
-    A liveness signal that keyed on raw journal length rather than work events
+    A liveness signal that keyed on raw journal length instead of work events
     would see every turn as alive here and never abandon (the P0)."""
 
     # (AgentResult | None, advances_journal), optionally + finish_reason,
@@ -263,7 +263,7 @@ async def test_interjection_reaches_the_next_turn(tmp_path):
 
 
 async def test_interjection_on_the_first_turn(tmp_path):
-    # News already waiting when the goal starts rides turn 0, whose resume
+    # News already waiting when the goal starts goes on turn 0, whose resume
     # prompt is empty -- otherwise a comment that landed between steps would sit
     # unseen until the second turn.
     harness = MockHarness(results=[AgentResult(disposition=Disposition.COMPLETE)])
@@ -300,7 +300,7 @@ async def test_no_interjection_leaves_prompts_untouched(tmp_path):
 async def test_attempts_ledger_records_every_turn(tmp_path):
     # The ledger is what a resume rests on when a checkpoint is missing, and
     # what the next attempt reads instead of re-deriving six attempts of
-    # context. It must record CONTINUE turns too -- those are precisely the
+    # context. It must record CONTINUE turns too -- those are the
     # attempts a crash would otherwise lose.
     from deepagent.loop import ATTEMPTS_FILE
 

@@ -61,7 +61,7 @@ def _setup_logging(verbose: bool) -> Path:
 def _configured_model_ids(cfg, personas) -> dict[str, str]:
     # Every [models] entry, not just the two roles the room itself reads: the
     # suite shares one file, and a typo under a key only the processor or
-    # icompleteu names should fail at the startup that parses it rather than at
+    # icompleteu names should fail at the startup that parses it and not at
     # that daemon's first call.
     ids = {f"models.{k}": p.id for k, p in cfg.model_profiles.items()}
     ids.setdefault("models.default", cfg.default_model)
@@ -271,7 +271,7 @@ def _load_plugin(cfg):
 
     The imported module is validated against the plugin contract (the three
     required factories + a compatible API version), so a misconfigured or stale
-    plugin fails at startup with a clear message rather than deep in the wiring."""
+    plugin fails at startup with a clear message instead of deep in the wiring."""
     if not cfg.plugin_module:
         return None
     import importlib
@@ -286,7 +286,7 @@ def _load_plugin(cfg):
 def _plugin_config_template(module_name: str | None) -> str | None:
     """The plugin's own starter-config sections, for --init-config --plugin.
 
-    Imported directly rather than through _load_plugin: --init-config runs
+    Imported directly, not through _load_plugin: --init-config runs
     before a config exists, so there is nothing to read plugin_module from, and
     scaffolding a file is not a reason to enforce the full plugin contract. A
     plugin that ships no config_template() simply contributes nothing."""
@@ -320,7 +320,7 @@ def _resolve_agents_dir(args: argparse.Namespace, plugin, cfg=None) -> Path:
 
     `cfg` is passed to the hook when it takes one, by the same signature
     inspection _call_local_tools uses and for the same compatibility reason. A
-    plugin whose personas come from a configured source rather than from its own
+    plugin whose personas come from a configured source and not from its own
     package -- the coding app resolves them out of a pinned project pack -- has
     no other way to reach the config: this runs before any plugin config is
     parsed, because personas have to exist before anything else is built."""
@@ -354,7 +354,7 @@ def _call_local_tools(plugin, cfg, room) -> dict:
 
     `room` is a compatible addition to the hook (see plugin.py), so a plugin
     written against build_local_tools(cfg) must keep contributing its tools.
-    Dispatch by inspecting the signature rather than calling with the keyword and
+    Dispatch by inspecting the signature instead of calling with the keyword and
     catching TypeError: the fallback would also swallow a TypeError raised inside
     the hook's own body, silently reporting "this plugin ships no local tools"
     for what is really a crash in it -- and would run the body twice.
@@ -365,7 +365,7 @@ def _call_local_tools(plugin, cfg, room) -> dict:
     except (TypeError, ValueError):
         # A builtin or C-implemented callable has no introspectable signature.
         # Not expected for a plugin module function; fall back to the old form
-        # rather than refusing to load any local tools at all.
+        # instead of refusing to load any local tools at all.
         return hook(cfg)
     # **kwargs counts: it is the forward-compat idiom, so a plugin that wrote it
     # to receive exactly this kind of later addition must actually receive it.

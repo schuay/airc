@@ -5,7 +5,7 @@
 
 Kept apart from usage.py because a callback subclasses the framework's
 handler, and the value it produces has to stay importable without the
-framework (it rides the wire spec).
+framework (it is part of the wire spec).
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ class UsageCollector(BaseCallbackHandler):
 
     Model calls in an invocation are sequential, so plain accumulation is
     safe. A call that errors fires start but not end and books nothing, which
-    matches the providers: a failed request is not billed. Request shape is
+    matches the providers: a failed request is not billed. Request details are
     keyed by run_id to pair start with end, and dropped on error so a retry
     does not inherit it.
     """

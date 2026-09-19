@@ -42,7 +42,7 @@ _SEARCH_TIMEOUT_S = 10.0
 
 def _thread_from_config(config: RunnableConfig | None) -> int | None:
     """The caller's thread id (see turn_context), or None when the turn carries
-    no identity -- which widens the search to the whole db rather than scoping it
+    no identity -- which widens the search to the whole db instead of scoping it
     to a space, the same as a console thread that has no space."""
     return turn_context(config)[0]
 
@@ -131,7 +131,7 @@ def _search(
 
         # Bound the scan: each match gets whatever remains of the global budget,
         # and once it is spent every later row returns 0 immediately, so the query
-        # finishes fast with partial results rather than pinning a worker.
+        # finishes fast with partial results instead of pinning a worker.
         deadline = time.monotonic() + _SEARCH_TIMEOUT_S
         timed_out = False
 

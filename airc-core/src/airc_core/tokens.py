@@ -4,7 +4,7 @@
 """Shared token-usage ledger for the daemon suite.
 
 One SQLite file every component writes to (persona turns, triage, commit
-review, ...), so the suite's spend is a single query rather than a sum across
+review, ...), so the suite's spend is a single query instead of a sum across
 per-component stores. WAL plus a busy timeout make concurrent writers from
 separate processes survivable: a brief wait, not an instant "database is
 locked".
@@ -156,7 +156,7 @@ class TokenLog:
         """Whether the ledger is actually being kept.
 
         The rest of TokenLog fails soft: a disabled log's queries all return 0,
-        which is right for a report (say nothing rather than crash) and wrong
+        which is right for a report (say nothing, do not crash) and wrong
         for one reader, the window cap, which would conclude nothing was spent
         at the moment nobody can see the spending.
         """
@@ -395,7 +395,7 @@ class SpendWindows:
     re-checked or killed -- cutting a review off mid-fan-out throws away what it
     spent and reports clean, which is indistinguishable from a good commit.
 
-    The windows roll rather than aligning to a calendar: a calendar week permits
+    The windows roll instead of aligning to a calendar: a calendar week permits
     the whole cap on Sunday night and the whole cap again on Monday morning,
     where a rolling window bounds continuously, with no
     timezone or DST question. What rolling costs is that it never visibly
@@ -418,7 +418,7 @@ class SpendWindows:
             ("weekly", WEEK_S, weekly_usd_cap),
         )
         # Which bound is announced: a cap name, "ledger", or None for open. The
-        # latch is keyed on this rather than on the reason text, which carries
+        # latch is keyed on this, not on the reason text, which carries
         # the spent amount and so changes on nearly every poll while bound --
         # in-flight work keeps booking rows and old rows keep rolling out.
         self._bound: str | None = None

@@ -472,7 +472,7 @@ def test_reap_locks_keeps_held_locks(tmp_path, monkeypatch):
 
 
 async def test_run_structured_turn_serializes_per_persona(tmp_path):
-    # Structured turns of one persona share a LangGraph thread id on purpose (the
+    # Structured turns of one persona share a LangGraph thread id (the
     # growing prefix cache accumulates across the stream), so concurrent runs
     # would share cache state and contaminate each other's context. The runner
     # must serialize them per persona.
@@ -519,7 +519,7 @@ async def test_a_routed_turn_carries_the_message_that_triggered_it(
     tmp_path, monkeypatch
 ):
     # Provenance: a tool asking "did a human ask for this" should read the
-    # message that woke the turn rather than scan the thread for one that looks
+    # message that woke the turn instead of scanning the thread for one that looks
     # like it. The scan is what makes two open requests in one thread resolve to
     # whichever is newest, regardless of which one this turn is answering.
     store, room, runner, orch = make_env(tmp_path, monkeypatch, agents=("perf",))

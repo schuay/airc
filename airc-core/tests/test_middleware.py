@@ -124,7 +124,7 @@ def test_is_transient_decides_on_structured_code_when_present():
     from google.genai import errors as generr
 
     # The finding-7 regression: digits inside a request id or token count no
-    # longer launder a permanent 400 into a transient, whatever the text says.
+    # longer turn a permanent 400 into a transient, whatever the text says.
     dump = "model turn not supported; request_id=4297bd11 prompt_tokens=8503"
     assert not _is_transient(gexc.InvalidArgument(dump))
     assert not _is_transient(generr.APIError(400, {"error": {"message": dump}}))
@@ -485,7 +485,7 @@ async def _gemini_session_of(model=None, **kw):
 
 async def test_gemini_on_vertex_session_id_is_keyed_on_the_thread():
     """Stable across turns of one conversation, distinct between two. The
-    header rides http_options, the per-call hook the genai model exposes."""
+    header is passed through http_options, the per-call hook the genai model exposes."""
     assert await _gemini_session_of(thread_id="thread-a") == await _gemini_session_of(
         thread_id="thread-a"
     )
@@ -587,7 +587,7 @@ async def test_claude_and_gemini_can_share_one_deployment():
 #
 # The static mark covers system+tools only, ~10% of a long prompt. These pin the
 # second, advancing mark: where it lands, and that it moves on the payback rule
-# rather than on every call (moving it every call re-buys the whole prefix).
+# instead of on every call (moving it every call re-buys the whole prefix).
 
 _CC = {"type": "ephemeral", "ttl": "5m"}
 
@@ -624,7 +624,7 @@ async def test_the_mark_lands_on_the_opening_message():
 
 
 async def test_the_mark_closes_the_newest_tool_result():
-    """The review shape: an assistant turn with nothing but a tool call, then
+    """The review case: an assistant turn with nothing but a tool call, then
     its result, and the model is called again. The mark belongs on the result.
 
     This is the regression. The old rule asked _last_step_boundary for the
@@ -715,9 +715,9 @@ def _wire_marks(messages):
     return walk(formatted, "")
 
 
-# Every assistant shape we have seen or could see. The [thinking, tool_use] one
+# Every assistant message form we have seen or could see. The [thinking, tool_use] one
 # is what Claude actually returns with extended thinking on -- and is exactly
-# the shape whose last block is a tool_use. The empty-content one is what
+# the form whose last block is a tool_use. The empty-content one is what
 # Gemini returns for every tool call, so it is not hypothetical either.
 _ASSISTANT_SHAPES = {
     "str content": "calling t",
@@ -776,7 +776,7 @@ def test_a_single_tool_call_per_turn_still_advances():
     AI(tool_use) -> Tool -> AI(tool_use) -> Tool with no text preamble, and the
     boundary has to keep moving through it.
 
-    _last_step_boundary returns the largest cut and no other. On this shape that
+    _last_step_boundary returns the largest cut and no other. On this history that
     cut always falls between a tool call and its result, on an assistant message
     carrying only a tool_use block -- the one thing that cannot hold a mark. The
     observed consequence was a mark frozen at 3/4 for an entire twelve-call
@@ -833,7 +833,7 @@ async def test_the_mark_walks_back_past_a_tail_that_cannot_carry_it():
     """A tool result already in tool_result form takes a formatter branch that
     never reads additional_kwargs, and the user turn after it is merged into
     that same message. Neither can hold a mark, so the boundary settles on the
-    assistant turn before them rather than giving up on the conversation."""
+    assistant turn before them instead of giving up on the conversation."""
     from airc_core.agent import _AnthropicVertexCaching
 
     mw = _AnthropicVertexCaching()
@@ -883,8 +883,8 @@ async def test_either_the_mark_ships_or_the_boundary_did_not_move(shape):
 
 async def test_an_advance_that_does_not_grow_the_span_is_reported(caplog):
     """The self-check. Moving the mark forward must enlarge the cached span; if
-    it does not, the mark was lost on the way out. Comparing spans rather than
-    testing create == 0 avoids crying wolf when an advance lands on a span that
+    it does not, the mark was lost on the way out. Comparing spans instead of
+    testing create == 0 avoids a false alarm when an advance lands on a span that
     was already cached."""
     from airc_core.agent import _AnthropicVertexCaching
 
@@ -1112,7 +1112,7 @@ async def test_empty_candidate_retries_then_succeeds(monkeypatch):
     from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
-    # A zero-part STOP (the silent-dead-turn shape) is a flake, not an answer:
+    # A zero-part STOP (the silent dead turn) is a flake, not an answer:
     # re-rolled through the same backoff as a 429, and the retry's real reply
     # is what the turn returns.
     model, graph = _candidate_agent([_EMPTY_STOP, {"content": "the answer"}])
@@ -1173,7 +1173,7 @@ async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypat
 async def _retry_over_empty(responses):
     """Compose ModelRetryMiddleware over _EmptyCandidateRetry the way
     base_middleware nests them, and return (per inner call) the _empty_retry
-    count the cache would key its step-aside on and the request's message count
+    count the cache would key its cache bypass on and the request's message count
     (so a mutated retry is visible). Exercised at the middleware level, not
     through a graph: langgraph runs nodes in a copied context, so a contextvar
     set inside the node is invisible to the caller. What matters is propagation
@@ -1195,7 +1195,7 @@ async def _retry_over_empty(responses):
 
     async def inner(req):
         # Stands in for the growing cache: records the count it would key its
-        # step-aside on at the moment it is asked to serve the call, and the
+        # cache bypass on at the moment it is asked to serve the call, and the
         # request length (the nudge _EmptyCandidateRetry appends grows it).
         seen.append((agent._empty_retry.get(), len(req.messages)))
         return type("R", (), {"result": [AIMessage(**box.pop(0))]})()
@@ -1209,9 +1209,9 @@ async def _retry_over_empty(responses):
 
 
 async def test_a_repeated_empty_is_retried_once_uncached_with_a_nudge():
-    # The count the cache keys its step-aside on, and the mutation. The first
+    # The count the cache keys its cache bypass on, and the mutation. The first
     # call sees _empty_retry 0 (serve cached) on the original 1-message request;
-    # the retry sees 1 (step aside, so the cache stops serving the prefix that
+    # the retry sees 1 (bypass, so the cache stops serving the prefix that
     # may be producing the empty) on a request grown by the nudge. Bounded to
     # those two calls: no sixth identical resend.
     assert await _retry_over_empty([_EMPTY_STOP] * 3) == [(0, 1), (1, 2)]
@@ -1221,7 +1221,7 @@ async def test_a_non_empty_response_resets_the_retry_counter():
     from airc_core import agent
 
     # One empty then a real reply: the episode is over, so a later empty in the
-    # same turn starts fresh against a warm cache rather than stepping aside
+    # same turn starts fresh against a warm cache instead of bypassing the cache
     # immediately.
     seen = await _retry_over_empty([_EMPTY_STOP, {"content": "the answer"}])
     assert seen == [(0, 1), (1, 2)]
@@ -1235,7 +1235,7 @@ async def test_an_empty_candidate_is_never_handed_back_to_the_retry_layer():
     # the provider's finish_reason, so a reason naming an overload or an
     # unavailable region would match the string-based transient test and
     # re-drive the whole two-call episode per outer attempt -- 14 model calls
-    # and the full backoff ladder, worse than the wedge this path prevents.
+    # and the full backoff ladder, worse than the failure this path prevents.
     for reason in ("STOP", "MODEL_OVERLOADED", "unavailable in region", "429 quota"):
         exc = agent.EmptyCandidateError(f"empty candidate (finish_reason={reason})")
         assert not agent._is_retryable(exc), reason
@@ -1564,7 +1564,7 @@ def _verdict_agent(scripted, max_reasks=3, with_governors=False):
     @tool
     def read(x: str) -> str:
         """A read tool, so the graph exits on a no-tool-call turn (as the real
-        review graph does) rather than always retrying a missing structured
+        review graph does) instead of always retrying a missing structured
         output (the no-tools model_to_model edge)."""
         return x
 
@@ -1771,7 +1771,7 @@ def test_persisted_nudge_goes_to_state_not_the_request():
     (msg,) = out["messages"]
     assert msg.content == "converge now"
     # Tagged so a re-entered threshold is recognisable, and keyed on the
-    # threshold rather than the text.
+    # threshold, not the text.
     assert msg.additional_kwargs["lc_stage"] == 2
     # Off a threshold: nothing written.
     assert mw.before_model({"model_calls": 3, "messages": []}, None) is None
@@ -1799,7 +1799,7 @@ def test_a_threshold_already_in_history_is_not_appended_twice():
 
 
 def test_the_same_text_at_a_later_threshold_still_fires():
-    # The schedule repeats one nudge at several counts on purpose. Deduping on
+    # The schedule may repeat one nudge at several counts. Deduping on
     # content instead of on the threshold would drop every repeat after the
     # first -- the exact bug that makes a schedule look like it fires once.
     mw = CallBudgetMiddleware([(2, "finish now"), (5, "finish now")], persist=True)
@@ -1876,7 +1876,7 @@ async def test_a_reask_closed_turn_gets_the_notice_and_refusals():
 
     await mw.awrap_model_call(_ClosedReq(answer_calls=5, reasks=1), handler)
     assert "notice" in seen["msgs"]
-    # And a read issued from that call is refused rather than run.
+    # And a read issued from that call is refused instead of run.
     refused = mw._refuse(
         SimpleNamespace(
             state={"answer_calls": 6, "reasks": 1},
@@ -2004,7 +2004,7 @@ def test_a_partially_parsed_call_is_still_a_truncation():
 
 
 def test_the_shape_says_which_branch_matched():
-    """The whole point of the diagnostic: separate a call langchain recorded as
+    """The diagnostic's job: separate a call langchain recorded as
     bad from a stop reason with no call behind it at all."""
     from airc_core.agent import _response_shape
 
@@ -2180,7 +2180,7 @@ async def test_a_shape_change_mid_retry_switches_what_the_next_attempt_sends(
 ):
     """An empty response can come back truncated on the resend. The attempt
     after it must carry the nudge, which it only does if the kind is recomputed
-    rather than fixed when the loop started."""
+    instead of fixed when the loop started."""
     from airc_core import agent
 
     monkeypatch.setattr(agent, "_UNPARSABLE_RETRY_DELAY", 0)
@@ -2228,7 +2228,7 @@ async def test_a_second_truncation_gets_a_second_in_place_attempt(monkeypatch):
 
 
 async def test_the_in_place_attempts_are_bounded_and_do_not_raise(monkeypatch):
-    """Exhausted, it hands the broken response back rather than raising:
+    """Exhausted, it hands the broken response back instead of raising:
     EmptyCandidateError would mark a recoverable call a dead turn, and
     RequireStructuredResultMiddleware re-asks from here."""
     from airc_core import agent
@@ -2248,7 +2248,7 @@ async def test_the_in_place_attempts_are_bounded_and_do_not_raise(monkeypatch):
 
 
 async def test_vertex_cache_serves_cached_on_unparsable_retry_and_uncached_on_empty():
-    """_RETRY_EMPTY steps aside from the cached prefix; _RETRY_UNPARSABLE keeps
+    """_RETRY_EMPTY bypasses the cached prefix; _RETRY_UNPARSABLE keeps
     serving from st.name while skipping seen_len and recache bookkeeping."""
     from airc_core import agent
 
@@ -2280,7 +2280,7 @@ async def test_vertex_cache_serves_cached_on_unparsable_retry_and_uncached_on_em
         seen_models.append(getattr(r, "model", None))
         return SimpleNamespace(result=[AIMessage("ok")])
 
-    # Empty candidate retry (_RETRY_EMPTY): steps aside, serves uncached.
+    # Empty candidate retry (_RETRY_EMPTY): bypasses the cache, serves uncached.
     agent._empty_retry.set(agent._RETRY_EMPTY)
     try:
         await mw.awrap_model_call(req, handler)

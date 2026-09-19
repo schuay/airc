@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS agent_seen (
 -- the thread's tip. A scrubbed thread's messages are redacted to empty text, so
 -- injecting them would feed a persona a wall of blank transcript lines; the floor
 -- makes get_agent_seen report at least this id and the turn sees only genuinely
--- new messages. A floor rather than an UPDATE of agent_seen because a persona
+-- new messages. A floor instead of an UPDATE of agent_seen because a persona
 -- that never took a turn on the thread has NO row -- it would read 0 and replay
 -- the whole redacted history, which is exactly the failure this prevents. A
 -- missing row is floor 0 (never scrubbed).
@@ -87,10 +87,10 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     space TEXT NOT NULL,
     chat_thread TEXT NOT NULL,
     thread_id INTEGER NOT NULL,
-    -- Whether the linked chat thread lives in a DM rather than a shared space:
+    -- Whether the linked chat thread lives in a DM, not a shared space:
     -- 1 DM, 0 space, NULL unknown. Written only by a transport that positively
     -- knows (the inbound event is the one place DM-ness is visible), NULL
-    -- otherwise -- including every pre-migration row. Nullable on purpose:
+    -- otherwise -- including every pre-migration row. NULL is meaningful:
     -- retention grants the longer space window only on an explicit 0, so an
     -- unknown can never over-retain DM content, only under-retain space
     -- content (the compliant direction).
@@ -210,12 +210,12 @@ CREATE TABLE IF NOT EXISTS timers (
     fire_at REAL NOT NULL,
     note TEXT NOT NULL
 );
--- Thread-scoped durable state a PLUGIN owns, with core blind to its shape. The
+-- Thread-scoped durable state a PLUGIN owns, with core blind to its schema. The
 -- namespace is the plugin's own (e.g. "icu_task_proposals"), key its own id, and
 -- json its own payload -- so a plugin gets mutable, thread-queryable state in
 -- the same connection and ordering domain as `messages` without a domain table
 -- in core's schema. (pending_bugs/handover_jobs above predate the core/plugin
--- split and are the shape this exists to stop adding to.) One _DROP_TABLES entry
+-- split and are the pattern this exists to stop adding to.) One _DROP_TABLES entry
 -- in airc-prune then covers every plugin's state, present and future, so a
 -- plugin adding state needs no core change at all. Not an unconditional
 -- retention guarantee: prune only selects threads still holding unredacted
@@ -471,7 +471,7 @@ class Store:
     def get_agent_seen(self, thread_id: int, agent: str) -> int:
         """This agent's seen offset, never below the thread's scrub floor.
 
-        The floor is what makes a retention sweep safe: the sweep redacts old
+        The floor makes a retention sweep safe: the sweep redacts old
         messages to empty text, and a persona whose offset predates that (or which
         has no row at all, reading 0) would otherwise be handed the whole scrubbed
         history as blank transcript lines. MAX of the two covers both cases in one
@@ -667,7 +667,7 @@ class Store:
         """Increment the thread's perf regression/improvement counter and return the
         headline row, or None when there is no headline. Unlike tag/badge this
         accumulates -- a CL moves many line items -- so the marker recomputes from
-        the running counts rather than locking on the first."""
+        the running counts instead of locking on the first."""
         col = "perf_improve" if direction == "improvement" else "perf_regress"
         row = self._db.execute(
             f"UPDATE chat_headlines SET {col} = {col} + 1"
@@ -691,7 +691,7 @@ class Store:
         attempt did not produce a verified repro. One bucket move is allowed:
         'info' upgrades to a severity when a failed repro is later re-run and
         verifies (the finding was counted on the failure, so the count moves
-        rather than double-counting); a severity never moves, so a later
+        instead of double-counting); a severity never moves, so a later
         failure cannot downgrade a verified repro.
 
         Returns True when a counter actually changed. Advisory only: the chat
@@ -881,7 +881,7 @@ class Store:
     def mark_result_delivered(self, job_id: str) -> None:
         """Record that a result reached the room, after the post succeeded.
 
-        Recorded after rather than claimed before: a post that raises is retried
+        Recorded after, not claimed before: a post that raises is retried
         by the caller, and a claim taken up front would make that retry skip the
         very post it is retrying. The residual window (crash between post and
         this write) duplicates one message, which is the lesser failure and far
@@ -1051,7 +1051,7 @@ class Store:
     ) -> None:
         """Persist a pending timer under the scheduler-assigned id. INSERT OR
         REPLACE so a reused-file edge (a seq colliding with a stale row) resolves
-        to the live timer rather than raising."""
+        to the live timer instead of raising."""
         self._db.execute(
             "INSERT OR REPLACE INTO timers (seq, thread_id, agent, fire_at, note)"
             " VALUES (?, ?, ?, ?, ?)",
@@ -1114,12 +1114,12 @@ class Store:
     # Core stores and returns the payload as opaque JSON text: it never parses
     # it, so the schema inside stays entirely with the plugin that wrote it.
     # Encoding is the caller's too -- a plugin serializes its own model (pydantic
-    # or otherwise) rather than having core guess at a dict.
+    # or otherwise) instead of having core guess at a dict.
 
     def put_plugin_state(
         self, namespace: str, key: str, thread_id: int, json: str
     ) -> None:
-        """Insert or replace one row. Upsert rather than insert-only because the
+        """Insert or replace one row. Upsert, not insert-only, because the
         natural use is a small mutable record (a proposal marked submitted), and
         read-modify-write through the owning plugin is the only writer."""
         self._db.execute(
@@ -1159,11 +1159,11 @@ class Store:
     ) -> list[tuple[str, int, str]]:
         """(key, thread_id, json) for rows written before `older_than`, oldest
         first. The thread-scoped listing above answers "what is in this thread";
-        this answers "what is overdue", which is the shape a plugin polling for
+        this answers "what is overdue", which is the query a plugin polling for
         something it is still waiting on needs -- it holds no thread to ask about
         until it finds the row.
 
-        `older_than` is an absolute epoch cutoff rather than an age, so the
+        `older_than` is an absolute epoch cutoff, not an age, so the
         caller's clock arithmetic is visible at its own call site.
         """
         rows = self._db.execute(
@@ -1176,7 +1176,7 @@ class Store:
     def drop_plugin_state(self, namespace: str, key: str) -> None:
         """Forget one row. The plugin's own lifecycle, not prune's: a record that
         has served its purpose (a job that finally reported) should go when it
-        does, rather than waiting for the thread it belongs to to be swept."""
+        does, instead of waiting for the thread it belongs to to be swept."""
         self._db.execute(
             "DELETE FROM plugin_state WHERE namespace = ? AND key = ?",
             (namespace, key),

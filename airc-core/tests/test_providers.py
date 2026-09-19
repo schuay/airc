@@ -56,7 +56,7 @@ def test_the_drop_is_driven_by_the_table(caplog):
         model_mod._drop_unsupported_kwargs(kwargs, "google_anthropic_vertex:m")
     assert kwargs == {"max_tokens": 8}
     assert "does not accept" in caplog.text
-    # The note from the table rides along, since a dropped sampling kwarg means
+    # The note from the table is included, since a dropped sampling kwarg means
     # a pass that wanted variance is not getting it.
     assert "no replacement" in caplog.text
 

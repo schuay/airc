@@ -20,7 +20,7 @@ three tools share a single policy.
 MAX_SHELL_OUTPUT = 2_000
 # Hard ceiling on bytes buffered from a child before we kill it. Bounds memory
 # against unbounded producers (`yes`, `cat /dev/zero`); we keep the head and drop
-# the rest rather than read-and-discard forever.
+# the rest instead of reading and discarding forever.
 MAX_SHELL_CAPTURE = 400_000
 
 # read_file: bytes returned per call, plus the default line window. The byte cap

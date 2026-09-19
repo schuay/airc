@@ -8,7 +8,7 @@ Store, real Room.post), not by hand-crafted INSERTs: a hand-built row cannot
 catch a schema or kind-value drift, which is exactly the failure mode a sweep
 keyed on `kind` has.
 
-Two of these are load-bearing and were each shown to fail with their guard
+Two of these guard real failures and were each shown to fail with their guard
 removed (see the comments on test_scrubbed_thread_injects_no_blank_lines and
 test_system_messages_survive_scrub).
 """
@@ -81,7 +81,7 @@ def test_parse_duration(text, seconds):
 @pytest.mark.parametrize("bad", ["30", "30m", "d30", "", "-1d", "30 d"])
 def test_parse_duration_rejects_ambiguous(bad):
     # A bare number is the dangerous one: seconds-vs-days silently purges
-    # everything. Refuse rather than guess.
+    # everything. Refuse instead of guessing.
     with pytest.raises(Exception):
         parse_duration(bad)
 
@@ -210,7 +210,7 @@ async def test_classification_survives_a_store_without_is_dm(store):
     room = Room(store)
     await room.post(t.id, "alice", MessageKind.HUMAN, "hi")
     store.link_chat_thread("spaces/A", "spaces/A/threads/T", t.id, is_dm=False)
-    # Rebuild chat_threads at the pre-is_dm shape, keeping the row.
+    # Rebuild chat_threads at the pre-is_dm schema, keeping the row.
     store._db.execute("DROP TABLE chat_threads")
     store._db.execute(
         "CREATE TABLE chat_threads (space TEXT NOT NULL, chat_thread TEXT"
@@ -242,7 +242,7 @@ async def test_link_upsert_preserves_is_dm_on_unknowing_relink(store):
 
 
 async def test_system_messages_survive_scrub(store):
-    """LOAD-BEARING. Verified to fail when the `kind != 'system'` guard is
+    """Verified to fail when the `kind != 'system'` guard is
     dropped from redact_threads' UPDATE (the digest is blanked too, leaving a
     thread with no intelligible record at all)."""
     t = store.create_thread("commit thread")
@@ -297,7 +297,7 @@ async def test_hard_mode_deletes_rows_but_keeps_system(store):
 
 
 async def test_dedup_keys_survive_so_a_late_result_still_routes(store):
-    """The reason the shape is redaction. An icompleteu result can arrive days
+    """The reason the sweep redacts. An icompleteu result can arrive days
     after the thread aged out; with commit_threads intact it routes into the
     existing thread instead of announcing the commit a second time."""
     t = store.create_thread("commit")
@@ -371,7 +371,7 @@ async def test_title_blanked_when_no_signal_at_all(store):
 
 
 async def test_titles_survive_a_store_missing_commit_threads(store):
-    """The live-store shape that motivated this: an older schema with no
+    """The live-store schema that motivated this: an older schema with no
     commit_threads table at all must still keep announced titles (via the SYSTEM
     message), not fall back to blanking everything."""
     t = store.create_thread("[v8] Fix a thing")
@@ -443,7 +443,7 @@ async def test_plugin_state_of_another_thread_survives_the_sweep(store):
 
 
 async def test_scrubbed_thread_injects_no_blank_lines(store):
-    """LOAD-BEARING. Verified to fail when the thread_seen_floor write is removed
+    """Verified to fail when the thread_seen_floor write is removed
     from redact_threads: the persona's offset stays 0, every redacted message is
     "unseen", and build_turn_content hands the model a wall of "[] " lines.
 
@@ -542,7 +542,7 @@ async def test_live_threads_from_unterminated_icompleteu_job(store, tmp_path):
 
 
 async def test_corrupt_job_state_does_not_fail_the_sweep(store, tmp_path):
-    """Best-effort by design: this check reaches into another component's
+    """Best-effort: this check reaches into another component's
     on-disk layout, and redaction (not the exclusion) is what makes a late
     result safe."""
     root = tmp_path / "control"
@@ -557,7 +557,7 @@ async def test_corrupt_job_state_does_not_fail_the_sweep(store, tmp_path):
 
 def _ckpt_db(path):
     db = sqlite3.connect(str(path))
-    # The real schema's shape for the two columns this touches; the saver creates
+    # The real schema for the two columns this touches; the saver creates
     # the full table itself at runtime.
     db.execute("CREATE TABLE checkpoints (thread_id TEXT, checkpoint BLOB)")
     db.execute("CREATE TABLE writes (thread_id TEXT, value BLOB)")

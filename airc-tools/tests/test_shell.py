@@ -102,7 +102,7 @@ async def test_timeout_kills_fast():
 
 
 async def test_timeout_carries_the_hint_either_way():
-    # The hint is the whole point of the short default: a timeout the agent
+    # The hint is why the default is short: a timeout the agent
     # cannot classify just gets retried longer. It has to ride along even when
     # the command died silent (the hang case), where there is no partial output
     # to append it to.

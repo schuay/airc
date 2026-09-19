@@ -83,7 +83,7 @@ DATA_DIR = user_data_path("airc")
 # happily; handover is suite
 # policy read by airc and the processor; the sibling-daemon namespaces
 # ([watchers.*]/[processors.*]/[icompleteu.*]) live in this same file and are
-# known-not-ours, so they are permitted here rather than flagged. [airc] and
+# known-not-ours, so they are permitted here, not flagged. [airc] and
 # [transport] are the room's own. The keys INSIDE [airc] are validated
 # separately: core consumes its own and the app plugin validates the remainder
 # (a domain-neutral core cannot know a plugin's key set).
@@ -140,7 +140,7 @@ _CORE_AIRC_KEYS = frozenset(
 )
 
 # Built-in fallback when [models] is absent. Vertex (ADC + [gcp] project)
-# rather than an API key: keys default to the AI Studio free tier, whose
+# instead of an API key: keys default to the AI Studio free tier, whose
 # quota cannot sustain the room.
 DEFAULT_MODEL = "google_vertexai:gemini-2.5-flash"
 
@@ -149,9 +149,9 @@ DEFAULT_MODEL = "google_vertexai:gemini-2.5-flash"
 # so this string never needs to know what any app configures. Kept in sync with
 # the loader below; every section here is optional at load time.
 TEMPLATE_CONFIG = """\
-# airc suite configuration -- ONE file read by every component. Top-level
-# sections are SHARED (every component reads them and they MUST agree -- stating
-# them once is the point); per-component sections are namespaced ([airc.*] for
+# airc suite configuration -- one file read by every component. Top-level
+# sections are shared (every component reads them and they must agree, so they
+# are stated once); per-component sections are namespaced ([airc.*] for
 # the room, and whatever namespaces the app's own daemons use) so it is obvious
 # who owns each, and each ignores the others'. All sections optional; see the
 # README for details.
@@ -188,7 +188,7 @@ filter  = "google_vertexai:gemini-2.5-flash"   # coordinator (routing) + triage
 #   id     = "google_anthropic_vertex:claude-opus-5"
 #   effort = "low"
 #
-# The effort rides the KEY, and a persona's `model` in agent.toml names a key
+# The effort lives on the key, and a persona's `model` in agent.toml names a key
 # (or a literal id, which carries no knobs), so this is also how a chat persona
 # is set to think harder or cheaper: put it on `default` for the personas that
 # declare no model of their own.
@@ -305,7 +305,7 @@ turn_timeout     = 900     # hard per-turn deadline in seconds
 # errors at startup if any is missing. access_token may instead come from
 # $MATRIX_ACCESS_TOKEN (the file wins when set), so a deployment can keep the
 # secret out of the config file. Threads are off by default (a flat room is the
-# widest-supported shape); use_threads maps airc's thread_id onto an m.thread
+# widest-supported form); use_threads maps airc's thread_id onto an m.thread
 # relation for clients that render them.
 # [matrix]
 # homeserver   = "https://matrix.example.org"
@@ -330,9 +330,9 @@ class MatrixConfig:
     rooms it should serve (room_ids); it never auto-accepts invites, so it cannot
     be pulled into a stranger's room. homeserver/user_id/access_token are
     required -- an incomplete [matrix] section is an operator error the loader
-    rejects at startup rather than booting a transport that cannot authenticate.
+    rejects at startup instead of booting a transport that cannot authenticate.
 
-    use_threads is off by default: a flat room is the shape every Matrix client
+    use_threads is off by default: a flat room is what every Matrix client
     renders, and threads are unevenly supported. When on, the transport maps a
     room thread_id onto an m.thread relation so a thread-aware client groups the
     conversation; the fields stay generic so the mapping is the transport's alone.
@@ -358,7 +358,7 @@ class OrchestratorConfig:
     soft_turn_budget: int = 8
     # Streak past which the coordinator is told only a decisive contribution
     # may continue. Not a hard cutoff: discussions peter out via escalating
-    # pressure rather than stopping mid-point. Always >= soft_turn_budget.
+    # pressure instead of stopping mid-point. Always >= soft_turn_budget.
     max_turns: int = 24
     # Max agents allowed to respond to a single message via the coordinator.
     max_responders: int = 2
@@ -424,7 +424,7 @@ class Config:
     #: Every [models] entry, keyed as written. The room reads two roles by name,
     #: but it is the component that validates the suite file at startup, and a
     #: malformed id under a key only the processor reads should still fail here
-    #: rather than at that daemon's first review.
+    #: and not at that daemon's first review.
     model_profiles: dict[str, ModelProfile] = field(default_factory=dict)
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     tool_groups: dict[str, list[str]] = field(
@@ -542,7 +542,7 @@ class Config:
         value (no `model` in agent.toml) is the default role. A real id passes
         through untouched; the colon makes the alias set unambiguous.
 
-        The whole entry rather than its id, because the depth a role was given is
+        The whole entry, not its id, because the depth a role was given is
         part of what it names: the same Opus at `low` and at `xhigh` differ by
         more in cost and behaviour than two sibling checkpoints do. A literal id
         carries no knobs -- there is no entry to take them from, which is why the
@@ -554,7 +554,7 @@ class Config:
         if profile := self.model_profiles.get(role):
             return profile
         # No entry to read: [models] may be absent entirely, or filter may be
-        # riding its fallback to the default id. The id field stays the one of
+        # falling back to the default id. The id field stays the one of
         # record and the knobs stay empty -- a role does not inherit another
         # role's depth, because the reason to name two roles is that they differ.
         return ModelProfile(
@@ -620,7 +620,7 @@ def load_config(path: Path | None = None) -> Config:
     own = raw.get("airc", {})
     if orch := own.get("orchestrator"):
         # turn_budget is the legacy spelling honoured just below, so it is an
-        # accepted alias rather than a field.
+        # accepted alias, not a field.
         reject_unknown_fields(
             orch, OrchestratorConfig, "[airc.orchestrator]", aliases=["turn_budget"]
         )
@@ -645,7 +645,7 @@ def load_config(path: Path | None = None) -> Config:
     # Whatever [airc] keys core does not consume itself belong to the app plugin;
     # carry them through verbatim for the plugin overlay to parse and validate.
     # Core models none of them -- an app's own sections, and any config a plugin
-    # transport needs, are opaque here. That is what keeps this file
+    # transport needs, are opaque here. That keeps this file
     # domain-neutral.
     cfg.plugin_config = {k: v for k, v in own.items() if k not in _CORE_AIRC_KEYS}
     # Transport selection: [transport] kind = "console" | "gchat" | "matrix".
@@ -663,7 +663,7 @@ def load_config(path: Path | None = None) -> Config:
     # namespaced form wins). Only when the section is present -- an absent one
     # leaves matrix=None, and cli.py errors clearly if kind == "matrix" without
     # it. The three connection fields are required: a partial section is an
-    # operator error, caught here rather than as an opaque nio auth failure.
+    # operator error, caught here instead of as an opaque nio auth failure.
     if mx := (own.get("matrix") or raw.get("matrix")):
         reject_unknown_fields(mx, MatrixConfig, "[matrix]")
         # access_token is a secret, so it may come from $MATRIX_ACCESS_TOKEN
@@ -719,7 +719,7 @@ def load_config(path: Path | None = None) -> Config:
         cfg.db_path = Path(db).expanduser()
     # A context cache must outlive the longest single turn or it can expire
     # mid-turn (recoverable, but wasteful). Enforce the documented invariant
-    # rather than trusting two independently-set knobs.
+    # instead of trusting two independently-set knobs.
     min_ttl = math.ceil(cfg.orchestrator.turn_timeout / 60) + 5
     if cfg.cache_ttl_minutes < min_ttl:
         log.warning(

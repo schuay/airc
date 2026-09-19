@@ -3,7 +3,7 @@
 
 """Shared substrate for the airc daemon suite."""
 
-# Resolved per name on first access rather than eagerly, because the substrate is
+# Resolved per name on first access instead of eagerly, because the substrate is
 # shared by components that use very different parts of it. Naming load_common --
 # which every component does, to read the suite file -- used to import the agent
 # middleware, the MCP toolset and the structured-task runner too, roughly 700ms of

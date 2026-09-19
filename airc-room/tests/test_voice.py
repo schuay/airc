@@ -4,7 +4,7 @@
 from airc_room.personas import Persona
 from airc_room.runner import build_system_prompt, voice_body
 
-# A synthetic guide, deliberately not modeled on anyone: the identity line is a
+# A synthetic guide, not modeled on anyone: the identity line is a
 # placeholder with an era predating this project, so the fixture cannot be read
 # as a fingerprint of a real contributor. It carries one of every element
 # voice_body() strips or redacts (frontmatter, H1 title, email, hash token,

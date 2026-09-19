@@ -105,7 +105,7 @@ class HarnessRun:
     empty_candidate: bool = False
     # What this turn cost, agent calls plus the overhead beside them (a ceiling
     # summarization, an explicit cache). The harness already prices it to log
-    # and journal it; handing it back is what lets the loop bound a step in
+    # and journal it; handing it back lets the loop bound a step in
     # dollars without reading anything back off disk. Both parts, matching the
     # rows _job_usage sums, so a step's running total and the job's reported
     # cost are the same arithmetic.

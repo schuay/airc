@@ -112,7 +112,7 @@ def test_totals_by_model(tmp_path):
 
 def test_cache_writes_are_tracked_separately_from_reads(tmp_path):
     # A write is billed ABOVE base input and only pays off via a later read, so
-    # writes-without-reads must be visible rather than folded into input.
+    # writes-without-reads must be visible instead of folded into input.
     t = TokenLog(tmp_path / "tokens.db")
     t.add(_u(1000, 10, 0, "claude", written=900), thread_id=1, agent="a", kind="t")
     t.add(_u(1000, 10, 900, "claude"), thread_id=1, agent="a", kind="t")
@@ -134,7 +134,7 @@ def test_both_write_ttls_land_in_the_one_write_column(tmp_path):
 def test_new_columns_are_added_to_an_existing_ledger(tmp_path):
     # The migration must be additive: a ledger written before a column
     # existed keeps its rows and reports 0 for them. The legacy row is
-    # inserted with raw SQL because add() targets the post-migration shape.
+    # inserted with raw SQL because add() targets the post-migration schema.
     path = tmp_path / "tokens.db"
     old = TokenLog(path)
     for col in ("cache_write_tokens", "usd", "estimated", "reasoning_tokens"):

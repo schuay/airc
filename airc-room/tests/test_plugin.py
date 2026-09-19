@@ -3,7 +3,7 @@
 
 """The plugin contract validation: a loaded plugin must supply the three
 factories and (if it declares one) a compatible API version, else load fails
-loudly at startup rather than mysteriously at first use."""
+loudly at startup instead of mysteriously at first use."""
 
 from types import SimpleNamespace
 

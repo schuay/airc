@@ -63,7 +63,7 @@ def test_tool_result_size_is_logged(caplog):
 
 
 def _content_blocks(text: str) -> list[dict]:
-    """The shape the MCP adapter returns: content_and_artifact content is a list
+    """The form the MCP adapter returns: content_and_artifact content is a list
     of {"type": "text", "text": ...} blocks, never a bare string."""
     return [{"type": "text", "text": text, "id": "lc_x"}]
 
@@ -263,7 +263,7 @@ def test_build_turn_content_leads_with_current_time():
 def test_strip_self_attribution():
     from airc_room.runner import strip_self_attribution
 
-    # The agent's own label, both shapes, leading only.
+    # The agent's own label, both forms, leading only.
     assert strip_self_attribution("[perf] it deopts", "perf") == "it deopts"
     assert strip_self_attribution("perf: it deopts", "perf") == "it deopts"
     assert strip_self_attribution("it deopts", "perf") == "it deopts"

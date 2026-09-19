@@ -69,7 +69,7 @@ def test_vertex_drops_bound_tools_when_serving_from_cache():
     including the structured-output report tool langchain appends at bind time --
     is invisible on every cache-served call. Pinned here because it is an
     upstream behaviour we depend on and cannot see from our own code: were it to
-    change, the workaround in _graph_for becomes dead weight rather than a
+    change, the workaround in _graph_for becomes dead weight, not a
     silent bug.
     """
     pytest.importorskip("langchain_google_vertexai")
@@ -129,7 +129,7 @@ def test_graph_for_compiles_with_application_reminders(tmp_path, monkeypatch):
     """One reminder on the harness plus base_middleware's own grounding reminder.
 
     Both are GroundingReminderMiddleware, and create_agent rejects duplicate
-    middleware names -- which default to the class name -- so this exact shape
+    middleware names -- which default to the class name -- so this exact composition
     raised "Please remove duplicate middleware instances." and killed every
     goal turn at graph build (first seen live starting an icu_task). The
     sibling test above stubs base_middleware to [], which is why it never

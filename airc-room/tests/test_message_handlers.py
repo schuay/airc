@@ -4,7 +4,7 @@
 """Plugin message handlers: the room's push seam for things a persona should not
 have to be woken up to answer.
 
-What is guarded here is the seam's properties rather than any one handler:
+What is guarded here is the seam's properties, not any one handler:
 consuming stops orchestration and nothing else, a broken handler cannot silence
 the room, and a replayed message reaches the chain -- which is the whole reason
 the hook sits in the worker loop instead of in room.post.
@@ -56,7 +56,7 @@ async def running(orch):
 
     Posting before run() would put a message in the inbox AND leave it above the
     watermark, so it arrives twice -- an artefact of the test, not the room: cli
-    creates the orchestrator task before any transport or watcher, precisely so
+    creates the orchestrator task before any transport or watcher, so
     recovery completes before anything can deliver. Tests that want the replay
     path use add_message instead, which never touches the inbox.
     """

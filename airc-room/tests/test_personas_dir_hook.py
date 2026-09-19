@@ -5,7 +5,7 @@
 
 Persona resolution runs before any plugin config is parsed, because personas
 have to exist before anything else is built. A plugin whose personas come from a
-configured source rather than from its own package -- the coding app resolves
+configured source and not from its own package -- the coding app resolves
 them out of a pinned project pack -- therefore has no other window onto the
 config than the one this hook opens.
 """
@@ -58,8 +58,8 @@ def test_the_hook_receives_the_config_when_it_takes_one(tmp_path, monkeypatch):
 
 
 def test_a_kwargs_hook_receives_it_too(tmp_path, monkeypatch):
-    # **kwargs is the forward-compat idiom, so a plugin that wrote it precisely
-    # to receive a later addition must not be the one shape that misses it.
+    # **kwargs is the forward-compat idiom, so a plugin that wrote it
+    # to receive a later addition must not be the one form that misses it.
     monkeypatch.chdir(tmp_path)
     cfg = Config()
     cfg.raw = {"prompt_pack": {"agents": str(tmp_path / "packagents")}}

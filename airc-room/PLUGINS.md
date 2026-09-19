@@ -13,16 +13,16 @@ It is **not** a framework -- the room, orchestrator, and turn loop stay concrete
 code. This doc specifies the interface half: the factories core calls.
 
 The reference implementation is `airc_coding.app` (the V8 app). A new plugin
-mirrors its shape.
+mirrors its structure.
 
 ## Loading and validation
 
 The room imports `cfg.plugin_module` and calls `airc_room.plugin.validate_plugin`
 on it before use. A module missing a required factory, or declaring an
-incompatible API version, fails at startup with a clear message rather than deep
+incompatible API version, fails at startup with a clear message instead of deep
 in the wiring.
 
-Declare the API version you build against as a LITERAL:
+Declare the API version you build against as a literal:
 
 ```python
 PLUGIN_API_VERSION = 1  # the core contract version this plugin targets
@@ -31,10 +31,10 @@ PLUGIN_API_VERSION = 1  # the core contract version this plugin targets
 `airc_room.plugin.PLUGIN_API_VERSION` is an integer core bumps on an
 incompatible change to a required signature. `validate_plugin` compares the
 number your plugin declares against core's and rejects a mismatch. Pin a literal:
-do NOT `from airc_room.plugin import PLUGIN_API_VERSION` and re-export it -- that
+do not `from airc_room.plugin import PLUGIN_API_VERSION` and re-export it -- that
 resolves to whatever the *installed* core is at import time, so the number always
-matches itself and the check can never fire. The literal is the whole point: it
-freezes the contract version you actually coded against, so a core that has moved
+matches itself and the check can never fire. The literal
+freezes the contract version you coded against, so a core that has moved
 on rejects your stale plugin loudly instead of calling a changed signature.
 
 A plugin that declares no version at all is tolerated but forgoes the check.
@@ -85,7 +85,7 @@ def personas_dir() -> Path | None:
 def build_local_tools(cfg, *, room=None) -> dict[str, list]:
     """Local (non-MCP) langchain tools this plugin contributes, keyed by
     tool_group name. The room grants a persona a group's tools iff the group is in
-    its tool_groups -- the SAME gate MCP tools use, so a persona's grants live in
+    its tool_groups -- the same gate MCP tools use, so a persona's grants live in
     one place (its agent.toml) regardless of tool kind. These groups are
     plugin-owned and separate from the [tool_groups] MCP config, so a persona may
     list one without it being a configured MCP group. Use for tools needing
@@ -93,9 +93,9 @@ def build_local_tools(cfg, *, room=None) -> dict[str, list]:
     which close over an akbase path and a jail. Absent means the plugin ships no
     local tools.
 
-    `room` is for a tool that must POST, not just compute: the coding app's
+    `room` is for a tool that must post, not just compute: the coding app's
     task-proposal tool posts the spec itself so what a human reads is what was
-    stored, rather than the model's paraphrase of it. Keyword-optional, so a
+    stored, not the model's paraphrase of it. Keyword-optional, so a
     plugin declaring the older build_local_tools(cfg) keeps working unchanged --
     the room inspects the signature and passes `room` only to a hook that accepts
     it, by name or through **kwargs."""

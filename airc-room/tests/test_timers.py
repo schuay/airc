@@ -29,7 +29,7 @@ def _cfg(thread_id=7, agent="perf", generation=0):
     """A turn config built the way the runner builds it. Tests must never hand-
     write this dict: the composite thread_id is the runner's private checkpoint
     key, and tests that spelled it out by hand are exactly why a change to its
-    shape went unnoticed while every timer wake was being dropped in prod."""
+    format went unnoticed while every timer wake was being dropped in prod."""
     return {"configurable": turn_config(thread_id, agent, generation)}
 
 
@@ -67,7 +67,7 @@ def test_turn_trigger_reads_the_message_that_caused_the_turn():
 
 def test_turn_trigger_is_none_when_no_message_caused_the_turn():
     # A timer wake is driven by a note, not a message; a structured turn belongs
-    # to no thread at all. Both are ordinary, so None is an answer rather than a
+    # to no thread at all. Both are ordinary, so None is an answer, not a
     # fault -- the tool reading it decides what to do without one.
     assert turn_trigger(_cfg(7, "perf")) is None
     assert turn_trigger({"configurable": {}}) is None
@@ -76,7 +76,7 @@ def test_turn_trigger_is_none_when_no_message_caused_the_turn():
 
 
 def test_a_triggerless_turn_still_has_an_identity():
-    # The reason the trigger is read separately rather than as a third element
+    # The reason the trigger is read separately and not as a third element
     # of turn_context: folding it into that all-or-nothing check would make
     # every timer wake read as "no identity" and silently disable every local
     # tool on it.
@@ -111,7 +111,7 @@ async def test_run_turn_builds_a_config_its_own_tools_can_read(tmp_path, monkeyp
     here checks one side against a fixture, so the two halves could drift apart
     (the runner folded ":g<n>" into the composite id, the parser kept splitting
     on the first colon) with all of them still green. Asserting on the parsed
-    identity rather than on the config's shape is the point -- it stays true
+    identity, not on the config's format, keeps it true
     however the runner chooses to key its checkpoints next.
     """
     from airc_core import UsageCollector

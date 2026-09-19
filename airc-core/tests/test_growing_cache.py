@@ -220,7 +220,7 @@ async def test_horizon_blocks_recache_when_the_turn_is_nearly_over():
 async def test_missing_call_count_falls_back_to_the_full_cap():
     # A graph without CallBudgetMiddleware has no model_calls key; the horizon
     # must not read that as "0 calls left" and disable caching outright. Same
-    # shape as the horizon test above, differing only in the absent key.
+    # setup as the horizon test above, differing only in the absent key.
     mw, state = _mw(tools_tokens=200_000, max_calls=70)
     await _run(mw, _Req(_history(0)))
     msgs = _fat_history(4)
@@ -332,7 +332,7 @@ async def test_transient_create_failure_recovers_after_short_cooldown(monkeypatc
     assert second["model"] == "M:c2"  # served from the rebuilt cache
 
 
-# ── empty-candidate step-aside ───────────────────────────────────────────────
+# ── empty-candidate cache bypass─────────────────────────────────────────────
 
 
 async def test_empty_candidate_retry_serves_uncached():
@@ -355,7 +355,7 @@ async def test_empty_candidate_retry_serves_uncached():
 async def test_one_empty_candidate_flake_does_not_cost_the_cache():
     """_EmptyCandidateRetry over the real cache: one flake, then a normal turn.
 
-    Driven through both middlewares rather than by setting _empty_retry by
+    Driven through both middlewares instead of by setting _empty_retry by
     hand, because the cost being guarded against comes from how the two
     compose -- a hand-set counter cannot see a mismatch between what the retry
     sets and what the cache keys on. A single flake must not tear down a warm
@@ -392,7 +392,7 @@ async def test_one_empty_candidate_flake_does_not_cost_the_cache():
 
 async def test_window_guard_serves_uncached_when_prefix_plus_tail_too_big():
     # A prefix near the cap plus a large tail would exceed the window: the cache
-    # must step aside and send the full request uncached for that call.
+    # must be bypassed and the full request sent uncached for that call.
     mw, _ = _mw(tools_tokens=500_000)  # prefix ~500k, under the 0.6*1M cap
     await _run(mw, _Req(_history(0)))  # creates cache (prefix_tokens ~500k)
     big_tail = [*_history(0), HumanMessage("x" * 1_600_000)]  # ~400k-token tail
@@ -418,8 +418,8 @@ async def test_window_guard_does_not_double_count_the_prefix():
         },
     )
     seen = await _run(mw, _Req([*_history(0), tail_msg]))
-    # ~550k total is under the 0.9M window, so the cache must serve it -- not step
-    # aside to BASE as the double-counted 500k+550k would have forced.
+    # ~550k total is under the 0.9M window, so the cache must serve it, not be
+    # bypassed to BASE as the double-counted 500k+550k would have forced.
     assert seen["model"] != "BASE"
 
 
@@ -620,7 +620,7 @@ async def test_growing_cache_fns_create_and_delete_seed_globals(monkeypatch):
 
     # Both paths run on ADC, whatever it resolves to: the seeding never supplies
     # a credential of its own, so a None here is the seam staying out of the way
-    # rather than a token that failed to mint.
+    # not a token that failed to mint.
 
 
 # -- genai-stack cache create/delete ------------------------------------------
@@ -661,7 +661,7 @@ async def test_genai_cache_create_builds_config_and_returns_full_name(monkeypatc
     cfg = captured["config"]
     assert cfg.ttl == "900s"
     assert cfg.system_instruction is not None
-    # The prefix ends on the model's function call (the growing-cache shape).
+    # The prefix ends on the model's function call (the growing-cache case).
     assert cfg.contents[-1].role == "model"
     assert cfg.contents[-1].parts[-1].function_call.name == "look"
     assert cfg.tools[0].function_declarations[0].name == "look"
@@ -675,7 +675,7 @@ async def test_genai_cache_create_builds_config_and_returns_full_name(monkeypatc
 
 async def test_genai_cache_ops_outlive_the_client_they_were_built_from():
     # genai.Client.__del__ closes the transport, and its sub-clients hold the api
-    # client rather than the Client -- so a `_genai_client().aio.caches.X(...)`
+    # client and not the Client -- so a `_genai_client().aio.caches.X(...)`
     # temporary is collected while the coroutine is still being built, and the
     # request goes out on a closed transport. The stub mirrors that ownership: the
     # caches object reaches the transport, nothing reaches the client. Prod ran
@@ -742,7 +742,7 @@ async def _serve_then(mw, msgs, cached_exc, uncached_exc=None):
 
 
 async def test_serve_time_rejection_falls_back_and_drops_the_cache():
-    # A model rejecting the cached prefix on its shape says nothing about the
+    # A model rejecting the cached prefix on its form says nothing about the
     # cache: the turn must continue uncached instead of dying.
     mw, state = _mw()
     await mw.awrap_model_call(_Req(_history(0)), _noop)  # cache gen c1
@@ -755,7 +755,7 @@ async def test_serve_time_rejection_falls_back_and_drops_the_cache():
     assert resp == "ok"
     assert state["created"][-1][0] in state["deleted"]  # rejected gen deleted
     assert mw._states[_Req(msgs).runtime.execution_info.thread_id].name is None
-    # Backed off, so the next call does not immediately rebuild the same shape.
+    # Backed off, so the next call does not immediately rebuild the same prefix.
     assert mw._cooldown_until > 0
 
 

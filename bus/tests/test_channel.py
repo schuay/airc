@@ -16,7 +16,7 @@ from bus import BlobStore, Channel, Envelope
 
 def _job(i: int) -> Envelope:
     # A minimal transport envelope standing in for any job message: the channel
-    # only reads message_id/correlation_id, never the payload's shape.
+    # only reads message_id/correlation_id, never the payload's contents.
     return Envelope(
         type="patch.job", payload={"job_id": f"j{i}"}, correlation_id=f"j{i}"
     )
@@ -103,7 +103,7 @@ def test_an_unparseable_claim_is_quarantined_not_raised(tmp_path):
     # A consumer re-lists in-progress/ on every tick, so raising past one bad
     # file wedges the whole daemon: it crash-loops under systemd forever, no job
     # runs, and the first diagnostic (which reads the same directory) is down
-    # too. Both shapes must be survivable -- a torn write, and a well-formed
+    # too. Both cases must be survivable -- a torn write, and a well-formed
     # JSON envelope from a producer whose schema has drifted.
     ch = Channel(tmp_path / "c")
     ch.publish(_job(1))

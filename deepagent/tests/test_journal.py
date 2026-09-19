@@ -49,7 +49,7 @@ def test_progress_counts_only_work_events(tmp_path):
     for kind in (EventKind.TURN, EventKind.USAGE, EventKind.STEP, EventKind.NOTIFY):
         j.emit(kind, agent="draft")
     assert j.count == 4 and j.progress == 0  # bookkeeping/orchestration: not work
-    # Friction rides alongside the REPORT that already counts as progress, so it
+    # Friction accompanies the REPORT that already counts as progress, so it
     # must not add a second progress tick for the same turn.
     j.emit(EventKind.FRICTION, agent="draft", text="build was broken")
     assert j.count == 5 and j.progress == 0

@@ -255,7 +255,7 @@ def test_bump_headline_finding_info_upgrades_to_severity(tmp_path):
     s = make_store(tmp_path)
     s.record_headline(1, "m", "*v8* ▸ thing")
     # A failed repro counts as 'info'; a manual re-run that then verifies moves
-    # the count to the severity bucket rather than double-counting.
+    # the count to the severity bucket instead of double-counting.
     assert s.bump_headline_finding(1, "f1", "info") is True
     assert s.bump_headline_finding(1, "f1", "blocker") is True
     assert _counts(s, 1)["info"] == 0
@@ -379,7 +379,7 @@ def test_pending_bug_enqueue_is_idempotent_and_preserves_attempts(tmp_path):
 
 
 def test_result_delivery_is_recorded_after_the_fact_and_survives_reopen(tmp_path):
-    # Marked after the post rather than claimed before it: a post that raises is
+    # Marked after the post, not claimed before it: a post that raises is
     # retried by the caller, and a claim taken up front would make that retry
     # skip the very post it is retrying.
     s = make_store(tmp_path)
@@ -404,7 +404,7 @@ def test_plugin_state_round_trips_and_upserts(tmp_path):
         t.id,
         '{"submitted": false}',
     )
-    # Mutable by design: single-use flags and other small edits are the point.
+    # Mutable: single-use flags and other small edits are the expected use.
     s.put_plugin_state("icu_task_proposals", "7c3f", t.id, '{"submitted": true}')
     assert s.get_plugin_state("icu_task_proposals", "7c3f") == (
         t.id,
@@ -444,9 +444,9 @@ def test_plugin_state_listing_keeps_insertion_order_across_an_edit(tmp_path):
 
 
 def test_plugin_state_sweep_finds_overdue_rows_and_drop_forgets_them(tmp_path):
-    # The shape a plugin waiting on something needs: it holds no thread to ask
+    # The query a plugin waiting on something needs: it holds no thread to ask
     # about until the sweep hands it one, and the row goes when it has served its
-    # purpose rather than waiting for its thread to be swept.
+    # purpose instead of waiting for its thread to be swept.
     s = make_store(tmp_path)
     t = s.create_thread("x")
     s.put_plugin_state("ns", "old", t.id, "1")

@@ -119,7 +119,7 @@ def test_edit_and_write_fifo_refused(tmp_path, monkeypatch):
 
 def test_write_readonly_returns_error_not_raises(tmp_path):
     # A worktree's third_party deps can symlink into a mirror mounted read-only;
-    # the path is a regular file so the shape guards pass, but write_text raises
+    # the path is a regular file so the type guards pass, but write_text raises
     # OSError. It must come back as the tool's error string, not escape and kill
     # the turn.
     f = tmp_path / "ro.txt"

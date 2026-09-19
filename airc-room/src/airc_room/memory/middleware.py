@@ -31,7 +31,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.channels.untracked_value import UntrackedValue
 
-# Marks our own inserts, so finding the last one is a keyed lookup rather than a
+# Marks our own inserts, so finding the last one is a keyed lookup instead of a
 # search for our wording in message text. Mirrors GroundingReminderMiddleware.
 _SRC = "memory_index"
 
@@ -45,7 +45,7 @@ _CHARS_PER_TOKEN = 4
 # cannot see the index stops consulting memory at all. Sized at half of
 # airc_core's _SUMMARY_KEEP_TOKENS (50k, the tail a compaction keeps), so the
 # newest block is normally inside what compaction preserves and the absence path
-# stays a backstop rather than the common case. If either number moves, this is
+# stays a backstop, not the common case. If either number moves, this is
 # the relationship to re-check -- correctness does not depend on it, only how
 # often a conversation falls back to absence.
 _REMINDER_TOKENS = 25_000
@@ -76,7 +76,7 @@ class MemoryIndexMiddleware(AgentMiddleware):
         # The framing travels with the block: it is a table of contents, and a
         # persona that reads a hook as the fact is the failure MEMORY_RULES warns
         # about. Deterministic in index, so the staleness check below can compare
-        # rendered blocks rather than tracking the raw index separately.
+        # rendered blocks instead of tracking the raw index separately.
         return f"Memory (read a note with memory_read before relying on it):\n{index}"
 
     def _is_block(self, m) -> bool:
