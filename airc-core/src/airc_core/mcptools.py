@@ -6,9 +6,9 @@
 Sessions are opened once at daemon startup and stay alive for the daemon's
 lifetime (the room is a long-running process; stateful servers like v8-utils
 benefit from a persistent subprocess). Nothing reopens one: a server that dies
-mid-life, or never started, stays gone until the daemon restarts. What that
-costs is bounded deliberately -- every failure mode (server-reported error,
-timeout, dead transport) is converted to tool-result text via
+mid-life, or never started, stays gone until the daemon restarts. The cost is
+bounded: every failure mode (server-reported error, timeout, dead transport)
+is converted to tool-result text via
 handle_tool_error, so an unusable server degrades to per-call errors the agent
 can read and work around, never a traceback out of the turn.
 
@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 # Keys stripped from tool schemas: redundant ("title" restates the field name)
 # or unsupported by Gemini ("additionalProperties").
 #
-# NOT "description". Only the schema's TOP-LEVEL description duplicates the tool
+# Not "description". Only the schema's top-level description duplicates the tool
 # definition; a description on a property is the documentation for that argument
 # and exists nowhere else. Stripping it recursively deleted every per-parameter
 # doc a server sent, leaving the model to match prose in the tool description
@@ -55,7 +55,7 @@ _STRIP_KEYS = {"additionalProperties", "$schema", "title"}
 #
 # This is the only size lever that does not fight prefix caching, because it
 # acts before the result enters the cacheable prefix. compact_for_budget in
-# airc_core.agent deliberately refuses to shed until the request would overflow
+# airc_core.agent refuses to shed until the request would overflow
 # (90% of a 1M window), since stripping a message rebuilds the cache -- so
 # nothing downstream bounds the cost of a large result once it is in.
 #
@@ -86,9 +86,9 @@ _SERVER_START_TIMEOUT_S = 60
 
 class _LocalToolError(ToolException):
     """An error raised by this wrapper (timeout, dead transport), as opposed to
-    one the MCP adapter raised for a server-reported isError result. The
-    distinction is what lets _install_error_handler answer for ours and delegate
-    the adapter's back to it."""
+    one the MCP adapter raised for a server-reported isError result.
+    _install_error_handler answers for ours and delegates the adapter's back
+    to it."""
 
 
 def _transport_errors() -> tuple[type[BaseException], ...]:
@@ -206,11 +206,11 @@ def _install_error_handler(tool: BaseTool) -> None:
     documents that as load-bearing and locks it with a test. Overwriting it with
     a bare True -- which this used to do -- collapses those blocks to str().
 
-    But it cannot simply be kept either: that callback RE-RAISES every
+    It cannot be kept unchanged either: that callback re-raises every
     ToolException that is not its own internal type, so the timeout and
-    transport errors raised below would escape again, which is the whole thing
-    capped() exists to prevent. Hence a composed handler: ours answers for the
-    errors we raise, anything else falls through to the adapter's.
+    transport errors raised below would escape again, which capped() exists to
+    prevent. So the handler is composed: ours answers for the errors we raise,
+    anything else falls through to the adapter's.
     """
     prev = getattr(tool, "handle_tool_error", None)
 
@@ -397,10 +397,10 @@ class MCPToolset:
                 )
                 continue
             # A known-but-empty group grants nothing, yet the unknown-group check
-            # above passes over it silently -- the exact way a config that ships
-            # no [tool_groups] block boots every persona and the reviewer
-            # tool-less without a peep. Warn so a mis-deployed config surfaces at
-            # startup instead of as a persona insisting it has no tools.
+            # above passes over it silently, which is how a config that ships no
+            # [tool_groups] block boots every persona and the reviewer tool-less.
+            # Warn so a mis-deployed config surfaces at startup instead of as a
+            # persona insisting it has no tools.
             if not group_patterns:
                 log.warning(
                     "%s references tool group %r, but it is empty"

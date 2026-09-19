@@ -3,27 +3,23 @@
 
 """Place the memory index in a persona's conversation, from the conversation.
 
-The index used to ride the composed turn text, which meant a copy per turn:
-each one lands in a user-role message that the growing prefix cache absorbs as
-ordinary history, so a long thread paid for the same table of contents over and
-over and reached the summarization threshold sooner for it.
+Injecting the index into every turn's text costs a copy per turn: each lands in
+a user-role message the growing prefix cache absorbs as ordinary history, so a
+long thread pays for the same table of contents repeatedly and reaches the
+summarization threshold sooner.
 
-Suppressing the repeat needs an answer to "has this conversation already got the
-index?", and the honest source for that is the conversation. An earlier version
-kept the answer in a side dict on the runner, which was wrong in the case that
-matters: SummarizationMiddleware compacts old history away, and a dict that had
-recorded an injection went on suppressing one whose message no longer existed --
-the index silently gone for the rest of the thread, exactly where a long thread
-needs it. Reading the message list instead makes the check self-correcting.
-Absence IS the trigger, so every way a copy can vanish -- compaction, a fresh
-checkpoint after a generation bump, a turn that crashed before its block was
-checkpointed, a restart -- resolves to the same re-injection with no state to
-reset and nothing to keep in sync.
+Whether the conversation already has the index is read from the message list
+itself. A side record of past injections goes wrong when SummarizationMiddleware
+compacts old history: it keeps suppressing a block whose message no longer
+exists, and the index is gone for the rest of the thread. Reading the messages
+makes the check self-correcting: absence triggers re-injection, so compaction, a
+fresh checkpoint after a generation bump, a turn that crashed before its block
+was checkpointed, and a restart all resolve the same way with no state to reset.
 
-The index itself is NOT computed here: it arrives per turn through the
-memory_index state key, so the git grep stays once per turn where the runner
-already does it, rather than once per model call. The middleware owns placement
-(and the block's framing), the runner owns content.
+The index itself is not computed here: it arrives per turn through the
+memory_index state key, so the git grep runs once per turn in the runner
+instead of once per model call. The middleware owns placement (and the block's
+framing), the runner owns content.
 """
 
 from __future__ import annotations

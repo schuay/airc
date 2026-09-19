@@ -5,19 +5,19 @@
 
 Local (non-MCP) langchain tools, granted to a persona via the reserved "memory"
 tool_group like the room's timer/chat_search tools. They give an agent
-read/search/write/edit/delete over a git repo of markdown memory entries,
-HARD-JAILED to the store root (see jail.py -- an LLM with write access must not
-reach outside it).
+read/search/write/edit/delete over a git repo of markdown memory entries, jailed
+to the store root (see jail.py -- an LLM with write access must not reach
+outside it).
 
-The file bodies (verbatim read, SEARCH/REPLACE edit, size limits) are REUSED from
-airc-tools, not copied: airc_tools.resolve_path returns an absolute path as-is, so
-we pre-resolve a jailed absolute path and hand it straight to the airc-tools
+The file bodies (verbatim read, SEARCH/REPLACE edit, size limits) are reused from
+airc-tools: airc_tools.resolve_path returns an absolute path as-is, so we
+pre-resolve a jailed absolute path and hand it straight to the airc-tools
 primitives. The memory-specific parts are the jail, git-grep recall, and
 auto-commit through the store's schema hook.
 
-Writes AUTO-COMMIT (there is no separate commit tool, and no shared dirty-set --
+Writes auto-commit (there is no separate commit tool, and no shared dirty-set,
 which in a toolset shared across personas would be cross-persona mutable state).
-Each write/edit stages exactly its own path and commits THAT PATH under a
+Each write/edit stages exactly its own path and commits that path under a
 per-store lock, so concurrent persona turns cannot race on the git index and an
 unrelated file staged in the shared checkout cannot fail the hook for everyone
 (see _commit_path). A commit rejected by the store's pre-commit schema hook is
@@ -55,8 +55,8 @@ def _rejection(rel: str, hook_output: str, *, deleting: bool = False) -> str:
     """The tool result for a rejected commit, told from the agent's point of view.
 
     A hook reports per-file errors, and the agent's job is to know whether the
-    complaint is about ITS entry (fix and rewrite) or about some other file (it
-    cannot fix that, and retrying forever is the failure mode we actually saw).
+    complaint is about its entry (fix and rewrite) or about some other file (it
+    cannot fix that, and retrying forever is the observed failure mode).
     Scoping the commit means the hook is normally handed only this path, so the
     mixed case is rare -- but a hook free to validate the whole repo can still
     produce it, and that is exactly when the agent most needs to be told to stop.
@@ -140,16 +140,15 @@ def make_memory_tools(store_root: Path) -> list:
         git failure) with the file left on disk and unstaged so the agent can fix
         and retry.
 
-        The commit is PATHSPEC-SCOPED (`git commit -- <path>`) rather than a plain
+        The commit is pathspec-scoped (`git commit -- <path>`) rather than a plain
         commit of the index, because a store is a shared checkout an operator also
         touches by hand. A plain commit takes everything staged, so one unrelated
-        malformed file sitting in the index fails the hook for EVERY write -- the
+        malformed file sitting in the index fails the hook for every write: the
         agent is handed a rejection naming a file it never wrote, and no amount of
-        fixing its own entry can clear it. That is not hypothetical: a stray
-        frontmatter-less file wedged a live store for a week, blocking every
-        persona write and every compaction. Scoping the commit makes a polluted
-        index structurally unable to wedge the tools; the operator's staged work is
-        left exactly as they left it.
+        fixing its own entry can clear it (observed: a stray frontmatter-less file
+        blocked every persona write and compaction for a week). Scoping the
+        commit means a polluted index cannot block the tools, and the operator's
+        staged work is left as they left it.
 
         `git add` still runs first: the pathspec form commits the worktree state,
         and staging keeps a delete (a write that emptied the file) covered.

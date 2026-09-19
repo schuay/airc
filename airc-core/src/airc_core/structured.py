@@ -57,10 +57,10 @@ class StructuredTaskRunner:
     system prompt and schema, while every invocation starts with fresh message
     state: graph reuse saves setup cost but never turns tasks into a conversation.
 
-    The runner deliberately accepts text rather than arbitrary LangChain
-    messages. A task's capability boundary is that the caller supplies all
-    evidence; accepting prior AI/tool messages would quietly grow this into an
-    agent transcript without the controls deepagent applies to one.
+    The runner accepts text, not arbitrary LangChain messages. The caller
+    supplies all evidence; accepting prior AI/tool messages would quietly grow
+    this into an agent transcript without the controls deepagent applies to
+    one.
     """
 
     def __init__(

@@ -3,12 +3,12 @@
 
 """shell: a stateless `bash -lc` runner.
 
-Stateless on purpose. Each call is a fresh process, so there is no session state
-to demux -- no END-marker plumbing to know when a command finished (the process
-boundary does that), and no surprising cwd/env carryover between calls. The cost,
-no persistent cd/venv, is paid by composing one pipeline per call, which is also
-the whole token-efficiency play: full shell means the model pipes rg/tail/head
-itself instead of us wrapping read/list/grep.
+Stateless: each call is a fresh process, so there is no session state to demux
+(no end-marker plumbing to know when a command finished; the process boundary
+does that) and no surprising cwd/env carryover between calls. The cost, no
+persistent cd/venv, is paid by composing one pipeline per call, which is also
+where the token efficiency comes from: with a full shell the model pipes
+rg/tail/head itself instead of us wrapping read/list/grep.
 """
 
 import asyncio
@@ -25,12 +25,10 @@ from .limits import MAX_SHELL_CAPTURE, MAX_SHELL_OUTPUT, head_tail
 class Confinement(Protocol):
     """Whatever produces an argv prefix that runs a command confined.
 
-    Structural on purpose: all this module ever does with a sandbox is prepend
+    Structural because all this module ever does with a sandbox is prepend
     `wrapper()`, so naming a concrete class here would import a confinement
     implementation into the one module that does not need one. `aisan.sandbox`
-    satisfies it; so does anything else a caller brings. That the implementation
-    now lives in a package airc does not depend on is the protocol earning its
-    keep rather than a loose end.
+    satisfies it; so does anything else a caller brings.
     """
 
     def wrapper(self) -> list[str]: ...
@@ -40,8 +38,8 @@ class Confinement(Protocol):
 # autoninja (and raw ninja fails on the siso state file, then tempts `gn clean`);
 # `gn clean` wipes the build into a slow cold rebuild. Match the program at a
 # command position (start, or after a &&/;/| separator) so autoninja, a
-# `build.ninja` path, or `grep ninja` are untouched. A deliberately simple
-# regex, not a shell parser -- it only sees the agent's own command, never
+# `build.ninja` path, or `grep ninja` are untouched. A simple regex, not a
+# shell parser -- it only sees the agent's own command, never
 # autoninja's internal ninja/siso calls.
 # Anchored at a command position (start, or after a ;/&/| separator) and matched
 # against the whole word, so `autoninja` -- the one sanctioned build entry point
@@ -76,10 +74,10 @@ _BUILD_TRAP_MSG = (
 # the model's context one line per compiled file. This module merges it over
 # os.environ for the unsandboxed child; a sandboxed one starts from --clearenv
 # and gets exactly the env its profile carries, so whoever BUILDS that profile
-# has to merge this dict in -- which is why it is public. Splitting it that way
-# is deliberate: a profile that states what the box's environment is, and then
-# silently receives more of it from the module that runs the command, is a
-# profile nobody can read. (The daemon's own prebuild is handled separately.)
+# has to merge this dict in -- which is why it is public. A profile that states
+# what the box's environment is, and then silently receives more of it from the
+# module that runs the command, is a profile nobody can read. (The daemon's own
+# prebuild is handled separately.)
 DEFANG_ENV = {
     "DEBIAN_FRONTEND": "noninteractive",
     "GIT_PAGER": "cat",
@@ -90,14 +88,14 @@ DEFANG_ENV = {
 
 
 # A timeout is bounded but not free: it costs the caller whatever budget it was
-# given, so the default is deliberately short and the agent raises it per call
+# given, so the default is short and the agent raises it per call
 # for work that is honestly long. That only works if the agent can tell the two
 # cases apart, so the hint turns on the one thing it can read off the output it
 # already has -- was the command still talking when we killed it -- rather than
 # on a rule about hangs it has no way to evaluate. SLOW/HUNG are literal labels
 # to give that decision something to match on.
 #
-# No fix-it flags are spelled out on purpose: named remedies get pasted at the
+# No fix-it flags are spelled out: named remedies get pasted at the
 # next hang whether or not they address it. The cure depends on what is
 # blocking, which only the caller can see.
 #

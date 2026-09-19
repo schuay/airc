@@ -51,8 +51,8 @@ class EventKind(StrEnum):
 
 
 # What counts as the agent doing work this turn, for the reentry loop's liveness
-# signal. Deliberately excludes TURN and USAGE: run_once emits those two
-# UNCONDITIONALLY every turn (at start and end), even on a timeout or an error
+# signal. Excludes TURN and USAGE: run_once emits those two
+# unconditionally every turn (at start and end), even on a timeout or an error
 # that produced no result -- so counting them would make every turn look alive
 # and defeat the dead-turn cap entirely. Orchestration events (STEP/VERIFY/
 # NOTIFY/BUDGET) are written by the machine outside the turn and are excluded

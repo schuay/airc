@@ -3,7 +3,7 @@
 
 """read_file: a verbatim, range-limited, byte-capped read.
 
-Verbatim and gutter-free BY DEFAULT. edit_file matches SEARCH text against the
+Verbatim and gutter-free by default. edit_file matches SEARCH text against the
 file byte-for-byte, so read output must be safe to paste straight into a search
 field. A line-number gutter would have to be stripped perfectly every time or
 matches fail -- and search/replace is content-addressed anyway; it finds the
@@ -13,10 +13,10 @@ header, never in the body.
 `line_numbers=True` opts into a gutter for the other job a read does: reporting
 a location (a stack frame, a review comment, an offset to pass to another tool).
 That used to cost a second call through `rg -n` in the shell, which is a whole
-round trip to learn a number the read already knew. It is opt-in rather than the
-default precisely because the paste-into-SEARCH path is the common one and must
-stay safe when nobody thought about the flag; a numbered read is for reporting,
-and its output is deliberately NOT edit-safe.
+round trip to learn a number the read already knew. It is opt-in because the
+paste-into-SEARCH path is the common one and must stay safe when nobody thought
+about the flag; a numbered read is for reporting, and its output is not
+edit-safe.
 """
 
 from .limits import MAX_READ_BYTES, MAX_READ_LINES, MAX_READ_SCAN, cap_head

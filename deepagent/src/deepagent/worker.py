@@ -9,8 +9,8 @@ reentry loop here -- so every agent turn, its tools, and any d8/gdb/perf run are
 confined by the process boundary, not per shell call. The tools therefore run
 free inside the box, and the job keeps its full tool groups; the confinement is
 the process, not a narrowed surface. This is the only supported way to run a
-turn against untrusted input -- there is no per-call confinement to fall back
-on, by design.
+turn against untrusted input; there is no per-call confinement to fall back
+on.
 
 The contract is exactly the file-contract the loop already uses: a `LoopSpec`
 in (paths, agent, caps), `events.jsonl` appended live under the bound-rw control
@@ -54,17 +54,16 @@ class LoopSpec(BaseModel):
     timeout_s: float = 3600.0  # per turn
     no_result_cap: int = 3
     # The step's dollar budget. It has to cross the file contract: the loop runs
-    # INSIDE the box on the normal path, so a cap left out here would bind the
+    # inside the box on the normal path, so a cap left out here would bind the
     # in-process driver and nothing else -- which is the configuration nobody
     # runs.
     max_usd: float | None = None
     checkpoint_turn: int | None = None  # reflection-turn index; see LoopCaps
     # Absolute path the orchestrator drops out-of-band news into (see
-    # run_agent_loop's `interject`). A FILE rather than a callback because the
-    # worker is a subprocess: the loop runs in the box and the orchestrator does
-    # not, so the only channel between them is the shared mount -- which is the
-    # file contract this whole design rests on, not an exception to it. Read and
-    # then REMOVED between turns, so each interjection is delivered exactly once.
+    # run_agent_loop's `interject`). A file, not a callback, because the worker
+    # is a subprocess: the loop runs in the box and the orchestrator does not, so
+    # the only channel between them is the shared mount. Read and then removed
+    # between turns, so each interjection is delivered exactly once.
     interject_path: str = ""
 
 
@@ -84,7 +83,7 @@ def read_outcome(control_dir: Path) -> AgentResult | None:
 def _file_interjection(path: str):
     """Read-and-consume the interjection file, or None when none is configured.
 
-    Consuming (unlink) is what makes delivery exactly-once: the loop asks every
+    Consuming (unlink) makes delivery exactly-once: the loop asks every
     turn, and a file left in place would repeat the same news until the goal
     ended. A read error is swallowed -- an interjection is an optimization, and
     losing one costs a round, while raising here would kill a turn that was

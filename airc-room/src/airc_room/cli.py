@@ -265,8 +265,8 @@ def _print_token_report(args: argparse.Namespace) -> None:
 
 def _load_plugin(cfg):
     """Import the configured app plugin (cfg.plugin_module), or None for a bare
-    room. Resolving it here -- not importing a plugin package by name -- is what
-    keeps core domain-neutral: a non-coding deploy points plugin_module elsewhere
+    room. Resolving it here instead of importing a plugin package by name keeps
+    core domain-neutral: a non-coding deploy points plugin_module elsewhere
     (or leaves it empty) and never pulls the coding subscribers/handover in.
 
     The imported module is validated against the plugin contract (the three
@@ -315,9 +315,8 @@ def _resolve_agents_dir(args: argparse.Namespace, plugin, cfg=None) -> Path:
     """Where personas load from. Precedence: an explicit --agents-dir; then a
     ./agents in the service cwd (the dev/console path); then the plugin's own
     personas (personas_dir(), so an app supplies its agents/ without staging
-    them here); then ~/.config/airc/agents. Letting the plugin contribute its
-    directory is what frees an out-of-tree app from staging personas into the
-    process cwd.
+    them here); then ~/.config/airc/agents. A plugin contributing its directory
+    frees an out-of-tree app from staging personas into the process cwd.
 
     `cfg` is passed to the hook when it takes one, by the same signature
     inspection _call_local_tools uses and for the same compatibility reason. A
@@ -608,11 +607,11 @@ async def amain(args: argparse.Namespace) -> None:
             plugin.build_follow_ups(cfg, store, agents_dir=agents_dir) if plugin else {}
         )
         # Message handlers observe arriving messages before routing (see
-        # orchestrator.MessageHandler). NOT gated by --no-watch, unlike
+        # orchestrator.MessageHandler). Not gated by --no-watch, unlike
         # subscribers and services: those are the plugin's autonomous work, which
         # --no-watch exists to silence, while a handler only ever answers
-        # something a human just typed in the room. Silencing those would make
-        # --no-watch drop commands on the floor rather than quiet the room.
+        # something a human just typed in the room. Silencing handlers would make
+        # --no-watch drop commands instead of quieting the room.
         message_handlers = (
             plugin.build_message_handlers(cfg, room, store)
             if plugin and hasattr(plugin, "build_message_handlers")
@@ -632,9 +631,9 @@ async def amain(args: argparse.Namespace) -> None:
         # due while the daemon was down). deliver is wired just above, so a
         # due timer has a live path the moment run() ticks.
         scheduler.restore()
-        # The orchestrator must be the FIRST task created: its synchronous
-        # recovery pass then runs before any transport/watcher coroutine,
-        # which is what excludes double-processing of recovered messages.
+        # The orchestrator must be the first task created: its synchronous
+        # recovery pass then runs before any transport/watcher coroutine, so
+        # a recovered message cannot also arrive through the inbox.
         tasks = [asyncio.create_task(orchestrator.run(), name="orchestrator")]
         tasks.append(asyncio.create_task(scheduler.run(), name="timers"))
         tasks.append(asyncio.create_task(_token_log_loop(store, tokens), name="tokens"))

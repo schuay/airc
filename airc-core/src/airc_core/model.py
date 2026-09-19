@@ -40,11 +40,11 @@ from .providers import EFFORT_LEVELS, google_sdk, traits_for
 log = logging.getLogger(__name__)
 
 # Env var naming a loopback endpoint that fronts Vertex for a sandboxed caller.
-# The box holds NO credential at all; a host-side proxy attaches the real one.
+# The box holds no credential at all; a host-side proxy attaches the real one.
 # Set only by the sandbox profile, so every other caller is untouched.
 #
-# This has to live here rather than at the call sites: make_model's callers pass
-# no kwargs, and the endpoint must reach the ChatVertexAI constructor.
+# Read here and not at the call sites because make_model's callers pass no
+# kwargs, and the endpoint must reach the ChatVertexAI constructor.
 _VERTEX_PROXY_ENV = "AISAN_VERTEX_PROXY_ENDPOINT"
 
 # The bearer a sandboxed client sends. Not a secret (S105): the proxy discards
@@ -56,17 +56,17 @@ _PROXY_PLACEHOLDER_TOKEN = "sandbox-proxy-placeholder"  # noqa: S105
 def _proxy_kwargs(endpoint: str) -> dict:
     """Client settings for talking to the sandbox's Vertex proxy.
 
-    Two of these are not free choices:
+    Two settings are forced:
 
     - `rest_asyncio`, not the default. With a custom endpoint langchain skips its
-      "rest" -> "grpc_asyncio" upgrade (_client_utils.py checks the HOSTNAME), and
-      plain "rest" resolves to a SYNCHRONOUS transport class whose methods return
+      "rest" -> "grpc_asyncio" upgrade (_client_utils.py checks the hostname), and
+      plain "rest" resolves to a synchronous transport class whose methods return
       non-awaitables. airc drives models via astream, so that path fails with
       "object ResponseIterator can't be used in 'await' expression".
-    - an aio credential. rest_asyncio validates the credential TYPE, so a
+    - an aio credential. rest_asyncio validates the credential type, so a
       google.auth.credentials instance is rejected outright. It carries no
-      authority: the proxy replaces the header. The box holding a credential that
-      authenticates nothing is the entire point.
+      authority: the proxy replaces the header, and the box is meant to hold
+      only a credential that authenticates nothing.
     """
     from google.auth.aio.credentials import AnonymousCredentials
 
@@ -84,9 +84,9 @@ def _proxy_kwargs(endpoint: str) -> dict:
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Per-attempt gRPC deadline (seconds) on a Vertex generate_content call. The only
-# job of a wall-clock at this layer is reaping a stream that never returns -- the
-# review-level wall-clock is off by default precisely because it drained on
-# backoff sleep, not hangs. Legit calls finish in single-digit minutes and never
+# job of a wall-clock at this layer is reaping a stream that never returns; the
+# review-level wall-clock is off by default because it drained on backoff
+# sleep, not hangs. Legit calls finish in single-digit minutes and never
 # touch it; a deadline error is a transient like any 5xx and flows into the
 # existing retry/redelivery path. With max_retries=1 this is one deadline per
 # logical call.
@@ -140,7 +140,7 @@ class _ProviderSpec:
 #
 # Module state rather than something hung off a config object because make_model
 # is a free function with no cfg in scope, and every one of its call sites
-# reaches it that way. The registry has to live HERE and not behind the room's
+# reaches it that way. The registry has to live here and not behind the room's
 # plugin contract: airc-processors and the coding subscribers import make_model
 # without ever loading the room plugin, so a provider registered there would
 # serve chat and leave commit review on the built-in providers.
@@ -153,27 +153,26 @@ def register_provider(
     """Register an external model provider under `prefix` ("mybackend:...").
 
     `factory` is a "module:attr" path to a callable taking (model_id, **kwargs)
-    and returning a BaseChatModel; it is imported on FIRST USE, not here. Every
+    and returning a BaseChatModel; it is imported on first use, not here. Every
     component calls load_common, but only the ones that build this model need
     its package importable -- a watcher polling gerrit should not die because a
     chat-only backend is missing.
 
     Re-registering the same spec is a no-op: load_common runs once per process
     in most components but several times in icompleteu, always over the same
-    file. A CONFLICTING re-registration raises instead of quietly winning, since
+    file. A conflicting re-registration raises instead of quietly winning, since
     which model got built would then depend on parse order.
     """
     if ":" in prefix or not prefix:
         # split(":", 1)[0] is how a provider is recovered from a model id, so a
-        # prefix holding a colon could never match one -- dead config, not a
-        # subtle bug to leave for later.
+        # prefix holding a colon could never match one.
         raise ValueError(f"provider prefix {prefix!r} must be non-empty and colon-free")
     if prefix in SUPPORTED_PROVIDERS:
         raise ValueError(f"{prefix!r} is a built-in provider; pick another prefix")
-    # Shape now, import later: a factory that is not "module:attr" at all cannot
-    # become one, so there is nothing to gain by discovering it mid-turn. This is
-    # as far as startup validation can go without importing the package, which
-    # would make a chat-only backend a hard dependency of every component.
+    # Only the shape is checked now; the import stays deferred. A factory that is
+    # not "module:attr" at all cannot become one, so there is nothing to gain by
+    # discovering it mid-turn, and importing the package here would make a
+    # chat-only backend a hard dependency of every component.
     split_factory(factory)
     spec = _ProviderSpec(factory, requires_env)
     if (prior := _CUSTOM_PROVIDERS.get(prefix)) and prior != spec:
@@ -190,7 +189,7 @@ def _custom_spec(model_id: str) -> _ProviderSpec | None:
 def split_factory(factory: str) -> tuple[str, str]:
     """("module", "attr") from a "module:attr" path, or raise.
 
-    Shape-only, so config parsing can reject a malformed path at STARTUP without
+    Shape-only, so config parsing can reject a malformed path at startup without
     importing the package -- the import itself stays deferred to first use.
     """
     module, sep, attr = factory.partition(":")
@@ -356,12 +355,12 @@ def _drop_unsupported_kwargs(kwargs: dict, model_id: str) -> None:
     that starts refusing something is a table edit rather than another branch
     here.
 
-    The failure this prevents is not graceful. ChatAnthropicVertex re-emits
+    Without this every call fails: ChatAnthropicVertex re-emits
     `temperature`/`top_p`/`top_k` from its own fields and puts unrecognized
     kwargs (`seed`) in `model_kwargs`; both are splatted into
-    `messages.create(**params)`, so setting any of them fails every call.
+    `messages.create(**params)`.
 
-    They are dropped rather than translated: a rejected parameter has no
+    Dropped instead of translated: a rejected parameter has no
     equivalent on the provider that rejected it, and inventing one would change
     the caller's request into something it did not ask for.
 
@@ -550,9 +549,9 @@ def _install_genai_tool_first_guard() -> None:
 
     Same growing-cache shape as _install_vertex_tool_first_guard, worse
     failure: langchain-google-genai's converter re-emits ToolMessages only
-    paired to the AIMessage whose tool_calls ids match, so a history OPENING
+    paired to the AIMessage whose tool_calls ids match, so a history opening
     on tool responses (their calling AIMessage lives inside the cached
-    prefix) produces a request with the tool results silently MISSING -- no
+    prefix) produces a request with the tool results silently missing -- no
     crash, wrong request. A sentinel AIMessage claiming the leading
     tool_call_ids routes them through that pairing path; dropping the
     sentinel's own model Content from the result leaves the request opening
@@ -606,7 +605,7 @@ def _make_genai_vertex(model_id: str, kwargs: dict):
     code. That fallback is what makes the stack verifiable on a machine
     without Vertex access.
 
-    The sandbox proxy seam is wired but UNVERIFIED on this stack (the genai
+    The sandbox proxy seam is wired but unverified on this stack (the genai
     client is httpx with a configurable base_url, so the rest_asyncio and
     anonymous-credential contortions of the vertexai path should be
     unnecessary); until it is proven, sandboxed deployments stay on
@@ -636,7 +635,7 @@ def _make_genai_vertex(model_id: str, kwargs: dict):
 def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
     """Translate a reasoning-depth level into the provider's own parameter.
 
-    Refuses rather than drops. Every other unsupported kwarg here degrades to a
+    Refuses instead of dropping. Every other unsupported kwarg here degrades to a
     warning because the request still means what it meant without it; effort
     does not. A dropped `low` leaves the model at the API default of `high`,
     two rungs up the ladder from what the file asked for, and the only evidence
@@ -677,8 +676,8 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
         raise ValueError(f"{problem}; {supported_models_hint()}")
     # Before the custom-provider branch below, which owns its kwargs entirely:
     # a level it never asked for must not reach a third-party factory, and a
-    # level silently ignored by one is the failure this whole parameter exists
-    # to make impossible.
+    # level silently ignored by one is the failure this parameter exists to
+    # prevent.
     if effort is not None:
         _apply_effort(kwargs, model_id, effort)
     # A registered external provider owns construction entirely: it gets the full
@@ -724,7 +723,7 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
         # * max_tokens: see _ANTHROPIC_MAX_OUTPUT_TOKENS.
         # * max_retries: this client counts attempts (tenacity stop_after_attempt
         #   over its own decorator, SDK retries pinned to 0), so 1 is no SDK
-        #   retry at all. Deliberate: the decorator retries every APIError, 400s
+        #   retry at all. The decorator retries every APIError, 400s
         #   included, and its default of 3 under ModelRetryMiddleware turns one
         #   logical call into a dozen prefills against an overloaded server. The
         #   middleware is the retry authority; _is_transient knows this SDK's

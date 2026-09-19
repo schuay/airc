@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 # back to reason about whether the goal is reachable at all. This forces that
 # mode switch once, without capping effort -- "one specific new hypothesis" is a
 # valid outcome, so a hard-but-reachable goal gets a sharper attempt, not an
-# early abort. Deliberately generic (achievability, not domain specifics): the
+# early abort. Generic (achievability, not domain specifics): the
 # stage's own system prompt defines what a negative verdict means (for a repro,
 # reproduced=false with evidence).
 _REFLECT = (
@@ -71,9 +71,8 @@ class LoopCaps:
     # cold-build repro and nobody can say which in advance.
     #
     # Bounds one loop invocation, not the whole job: a job with four goal steps
-    # can spend four times this. That is deliberate for now -- it is the cheap
-    # version, and it is enough to stop a single runaway step, which is the
-    # blowup that actually happens.
+    # can spend four times this. Enough to stop a single runaway step, which is
+    # the failure that occurs in practice.
     max_usd: float | None = None
     # Consecutive *dead* turns (no result AND no progress) tolerated before
     # abandoning. A turn that advanced its progress file is alive (e.g. a long
@@ -92,7 +91,7 @@ def _resume_prompt(i: int, caps: LoopCaps, last: bool = False) -> str:
     verdict force. Turn awareness lets the model pace itself against the cap
     instead of being surprised by it.
 
-    `last` is the money saying so rather than the turn count: a step that has
+    `last` is decided by spend, not by the turn count: a step that has
     nearly spent its budget gets the same final-turn demand as one on turn 20,
     so it ends with a verdict instead of being cut off mid-investigation.
     """
@@ -210,13 +209,13 @@ async def run_agent_loop(
     -- a long build still running).
 
     `interject` is consulted BETWEEN turns and its text, when non-empty, is
-    appended to the next turn's prompt. That is the whole mechanism for telling a
-    RUNNING goal something the orchestrator learned after it started (new review
-    comments, say): the turn boundary already exists and already carries a
-    per-turn string, so nothing new couples the caller to a live turn, and the
-    agent is never interrupted mid-edit. The text rides the resume prompt rather
-    than the system prompt on purpose -- the growing-prefix cache covers
-    [system + tools], so mutating the system text re-caches mid-goal.
+    appended to the next turn's prompt. That is how a running goal is told
+    something the orchestrator learned after it started (new review comments,
+    say): the turn boundary already exists and already carries a per-turn
+    string, so nothing new couples the caller to a live turn, and the agent is
+    never interrupted mid-edit. The text goes on the resume prompt and not the
+    system prompt because the growing-prefix cache covers [system + tools], so
+    mutating the system text re-caches mid-goal.
     """
     control_dir.mkdir(parents=True, exist_ok=True)
     # Turn 0 of a loop whose control dir already holds results is a RESUME: the
@@ -360,7 +359,7 @@ async def _forget(harness: Harness, control_dir: Path) -> None:
 
     Every exit from run_agent_loop is terminal for this goal, so the thread's
     only remaining value -- resuming it -- is gone. Both synthesized ABANDONs
-    used to skip this, which is exactly backwards: a goal that abandoned at
+    used to skip this, which is backwards: a goal that abandoned at
     max_iters or after three dead turns has the LARGEST history in the DB.
     Measured on a durable saver, a 240KB conversation occupied ~7MB across its
     checkpoint rows.

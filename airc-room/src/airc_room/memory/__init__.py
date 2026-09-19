@@ -5,11 +5,11 @@
 
 A git repo of markdown entries with frontmatter (one fact each) that the personas
 maintain themselves: they write when a human corrects them or a durable fact
-appears, and recall on later turns. The MECHANISM lives here in core; the store's
-SCHEMA (types, required frontmatter, validator hook, templates) travels with the
+appears, and recall on later turns. The mechanism lives here in core; the store's
+schema (types, required frontmatter, validator hook, templates) travels with the
 store repo, and an app is a thin pointer (config + a persona tool_group + a few
-lines of persona prose). This is what lets a coding room and a grocery room share
-one implementation with different memories.
+lines of persona prose). So a coding room and a grocery room share one
+implementation with different memories.
 
 Public surface:
 - make_memory_tools(root) -- the jailed search/read/write/edit/delete tools
@@ -35,7 +35,7 @@ MEMORY_GROUP = "memory"
 
 # Appended to the system prompt of any memory-enabled persona (like ROOM_RULES).
 # Always-active, so it is cached with the prefix. Generic: an app adds domain
-# specifics in each persona's system.md. The two load-bearing disciplines
+# specifics in each persona's system.md. The two disciplines
 # (search-before-write, read-before-relying) live here because without them the
 # store rots into near-duplicate one-liners or into confidently-recited hooks.
 MEMORY_RULES = """\

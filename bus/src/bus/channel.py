@@ -80,7 +80,7 @@ class Channel:
         so anything still here when a consumer restarts is unfinished work it
         should resume.
 
-        A file that cannot be parsed is QUARANTINED rather than raised past: a
+        A file that cannot be parsed is quarantined instead of raised: a
         consumer re-lists this directory on every tick, so one torn write or one
         envelope from a drifted producer would otherwise abort the listing
         forever -- the whole daemon crash-looping under systemd, and its

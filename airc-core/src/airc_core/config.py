@@ -44,8 +44,8 @@ DEFAULT_ARTIFACTS_DIR = DATA_DIR / "artifacts"
 # and measurement-sensitive, granted to no agent by default. The single source
 # of truth for the suite; components select the groups they grant. Strictly
 # read-only: gerrit_create_comments (posts drafts) and pinpoint_create_job/
-# cancel_job (mutate try jobs) are deliberately NOT matched, hence enumerated
-# patterns rather than gerrit_*/pinpoint_*. d8_trace_index is excluded: it
+# cancel_job (mutate try jobs) are not matched, hence enumerated patterns
+# instead of gerrit_*/pinpoint_*. d8_trace_index is excluded: it
 # reads an arbitrary caller-supplied path.
 # Core ships no tool groups: the substrate is domain-neutral, so the default is
 # empty and every app supplies its own [tool_groups] via config (the coding app's
@@ -69,22 +69,20 @@ def reject_unknown_fields(
 ) -> None:
     """Strict-check `table` against the dataclass that models it.
 
-    The allowed keys ARE `spec`'s field names -- the dataclass is the single
+    The allowed keys are `spec`'s field names: the dataclass is the single
     source of truth, so adding a setting means adding a field and nothing else.
-    Hand-written key sets were the obvious alternative and the wrong one: they
-    restate the fields a few lines below their definition, and the copy drifts
-    silently in the direction that matters (a field added without its key gets
-    rejected in config that legitimately sets it).
+    A hand-written key set restates the fields a few lines below their
+    definition and drifts silently in the direction that matters (a field added
+    without its key gets rejected in config that legitimately sets it).
 
-    `aliases` covers keys a section accepts that are not fields -- deliberate
-    back-compat spellings, e.g. [airc.orchestrator] still honouring the old
-    `turn_budget` for `soft_turn_budget`. Naming them here keeps each one visible
-    as a decision rather than a leftover.
+    `aliases` covers keys a section accepts that are not fields: back-compat
+    spellings, e.g. [airc.orchestrator] still honouring the old `turn_budget`
+    for `soft_turn_budget`. Naming them here keeps each one visible as a
+    decision.
 
     Sections with no dataclass of their own (a flattened one like [caching], whose
     keys land on differently-named fields of a larger config) call reject_unknown
-    with an explicit set instead. There is no source of truth to derive from
-    there, and inventing one would be a worse lie than writing the keys down.
+    with an explicit set instead, since there is no dataclass to derive from.
     """
     known = {f.name for f in fields(spec)} | set(aliases)
     reject_unknown(table, known, where)
@@ -107,9 +105,9 @@ def reject_unknown(
     SystemExit rather than an exception: this runs during startup config parsing,
     where a traceback buries the one line the operator needs.
 
-    Sections that are open by design -- user-named maps like [repos],
-    [tool_groups], [mcp.servers], and role maps like [models] -- do not call this,
-    and each says why at its parse site.
+    Open sections (user-named maps like [repos], [tool_groups], [mcp.servers],
+    and role maps like [models]) do not call this, and each says why at its
+    parse site.
     """
     if unknown := set(table) - set(known):
         raise SystemExit(
@@ -161,15 +159,13 @@ def parse_handover_fields(
 class ModelProfile:
     """One `[models]` entry: which model, and how hard it is told to think.
 
-    A profile rather than a bare id because "the verify model" is a thing a
-    deployment names, and its identity is not just the checkpoint -- the same
-    Opus 5 at `low` and at `xhigh` differ by more in cost and in behaviour than
-    two sibling checkpoints do. With ids alone the only way to say that was to
-    repeat the literal at each call site and set the depth nowhere, which is how
-    the review roster and the verify stage ended up unable to differ.
+    A profile instead of a bare id because a role's identity is not just the
+    checkpoint: the same Opus 5 at `low` and at `xhigh` differ by more in cost
+    and in behaviour than two sibling checkpoints do. With ids alone the depth
+    could be set nowhere.
 
-    Two entries SHARING an id is therefore normal and intended, not duplication
-    to factor out.
+    Two entries sharing an id is therefore normal, not duplication to factor
+    out.
 
     `call_kwargs` is make_model's keyword surface, not the provider's: the
     translation from a level to whatever the provider calls it lives there,
@@ -187,18 +183,17 @@ class ModelProfile:
 
 
 # Knobs a [models] entry may carry besides the id. One name per provider-native
-# parameter; Gemini's thinking_budget is the obvious next one and is deliberately
-# absent until something runs it, since an accepted-but-unused knob reads exactly
-# like an honoured one.
+# parameter; Gemini's thinking_budget is the obvious next one and is absent
+# until something runs it, since an accepted-but-unused knob reads like an
+# honoured one.
 _PROFILE_KEYS = frozenset({"id", "effort"})
 
 
 def _parse_model_profile(key: str, value: object) -> ModelProfile:
     """One [models] entry, as either a bare id or a table.
 
-    The string form stays first-class rather than deprecated: most entries have
-    nothing to say beyond which model, and making them all grow a table would
-    add a line of noise per entry to buy nothing.
+    The string form stays first-class: most entries have nothing to say beyond
+    which model.
     """
     where = f"[models] {key}"
     if isinstance(value, str):
@@ -240,7 +235,7 @@ class CommonConfig:
     the key it needs (`models["default"]`, `models["filter"]`, ...).
 
     `models` holds ids alone and `model_profiles` the full entries, the same set
-    keyed the same way. Both, because readers genuinely want different things:
+    keyed the same way. Both, because readers want different things:
     the sandbox's egress allowlists and the Claude-needs-a-proxy check want every
     model this deploy can reach and nothing else, while a component building a
     graph wants the knobs too. Neither is derivable from the other cheaply enough
@@ -276,8 +271,8 @@ class CommonConfig:
     #: per-component key is how two of them end up with different numbers --
     #: which also sum to a fleet total nobody chose.
     #:
-    #: Read live at each admission, deliberately unlike Limits, which is stamped
-    #: at enqueue so a job's behaviour is fixed at creation. A window cap is a
+    #: Read live at each admission, unlike Limits, which is stamped at enqueue so
+    #: a job's behaviour is fixed at creation. A window cap is a
     #: property of the fleet at the moment work starts, not of the job, so
     #: raising a binding cap takes a config edit and a restart.
     daily_usd_cap: float | None = None
@@ -287,7 +282,7 @@ class CommonConfig:
 def profile_for(common: CommonConfig, key: str, where: str) -> ModelProfile:
     """The [models] entry `key` names, falling back to `default`.
 
-    Resolved as a PROFILE, not an id. `CommonConfig.models` is ids alone, so a
+    Resolved as a profile, not an id. `CommonConfig.models` is ids alone, so a
     component that reads it gets the checkpoint and silently drops every knob
     beside it -- an operator who wrote `effort = "xhigh"` then has a config that
     parses, validates and starts clean while the model runs at the provider
@@ -301,7 +296,7 @@ def profile_for(common: CommonConfig, key: str, where: str) -> ModelProfile:
     load_common fills both. A CommonConfig built by hand -- a test, a one-shot
     driver -- legitimately carries ids alone, and such a caller cannot have
     meant "no model" by it. It carries no knobs either, so that path resolves to
-    a bare profile, which is exactly what it expressed.
+    a bare profile, which is what it expressed.
     """
     for candidate in (key, "default"):
         profile = common.model_profiles.get(candidate)
@@ -338,7 +333,7 @@ def refuse_unpriced(models: Mapping[str, str], what: str) -> None:
     A warning is the right answer for an unlisted model in general (see
     _warn_unpriced): the generic rate exists so an unlisted model is still
     costed rather than dropped from every total, and an estimated row is
-    labelled as one. It is the wrong answer for a BOUND. A budget on the
+    labelled as one. It is the wrong answer for a bound. A budget on the
     placeholder rate reads as a dollar figure the operator chose and behaves as
     an arbitrary one: the placeholder is a round mid-market number, so the same
     "$25 a pass" is a different amount of work on every unlisted model and
@@ -359,9 +354,9 @@ def refuse_unpriced(models: Mapping[str, str], what: str) -> None:
 def _load_model_providers(raw: Mapping, cfg: CommonConfig) -> None:
     """Parse [model_providers] and register each one with airc_core.model.
 
-    Registering as a SIDE EFFECT of parsing, which is the one thing here worth
-    knowing about. The alternative -- return the specs and have each component
-    register -- needs the call added at four entry points (the room, the
+    Registration is a side effect of parsing. The alternative, returning the
+    specs and having each component register, needs the call added at four
+    entry points (the room, the
     processor, the watchers, icompleteu), and a missed one fails asymmetrically:
     the room starts on a config the processor rejects, for the same file. Since
     make_model is a free function with no cfg in scope, module state is where
@@ -369,7 +364,7 @@ def _load_model_providers(raw: Mapping, cfg: CommonConfig) -> None:
     every component already passes through.
 
     The table is user-named ([model_providers.<prefix>]), so the section itself
-    is open; each SPEC is strict, for the reason reject_unknown states -- a
+    is open; each spec is strict, for the reason reject_unknown states -- a
     misspelled requires_env silently means "no credential check" and reads back
     as if it were honoured.
     """
@@ -410,11 +405,10 @@ def load_common(raw: Mapping) -> CommonConfig:
     hands the same mapping here and to its own overlay parser.
     """
     cfg = CommonConfig()
-    # [models] is deliberately OPEN: it is a role map, and a persona's `model =`
-    # may name any role in it (resolve_model). Only default/filter are read here,
-    # but constraining the table would reject a role a persona legitimately uses.
-    # Each ENTRY is strict, for the usual reason -- a misspelled knob reads back
-    # as an honoured one.
+    # [models] is open: it is a role map, and a persona's `model =` may name any
+    # role in it (resolve_model). Only default/filter are read here, but
+    # constraining the table would reject a role a persona legitimately uses.
+    # Each entry is strict: a misspelled knob would read back as an honoured one.
     cfg.model_profiles = {
         k: _parse_model_profile(k, v) for k, v in raw.get("models", {}).items()
     }
@@ -464,7 +458,7 @@ def load_common(raw: Mapping) -> CommonConfig:
             v = raw[key]
             setattr(cfg, key, None if v is None else float(v))
     if cfg.daily_usd_cap is not None or cfg.weekly_usd_cap is not None:
-        # Worse here than at a pass: a window cap sums EVERY model's rows, so one
+        # Worse here than at a pass: a window cap sums every model's rows, so one
         # mis-priced model puts a placeholder number into the total that stalls
         # every capped stream in the suite.
         refuse_unpriced(cfg.models, "daily_usd_cap/weekly_usd_cap")

@@ -54,21 +54,21 @@ from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, _k
 
 log = logging.getLogger(__name__)
 
-# The context-window size assumed for every model. Every budget and cache
-# threshold below is a fraction of this. We deliberately assume 1M (Gemini, and
-# Claude's 1M tier) rather than deriving it per model: the shedders are
-# safe-biased and the growing cache measures the real prefix exactly after the
-# first cached call, so the slack absorbs the difference for the models we run.
+# The context-window size assumed for every model; every budget and cache
+# threshold below is a fraction of it. 1M (Gemini, and Claude's 1M tier) is
+# assumed for all models instead of derived per model: the pruners err toward
+# pruning early, and the growing cache measures the real prefix after the first
+# cached call, so the slack covers the models we run.
 CONTEXT_WINDOW = 1_000_000
 
 
 # How long to stop attempting cache creation after a failure. A permanent
-# problem (IAM, disabled API, size floor) degrades to uncached for a long window
-# instead of retrying inline on every turn. A transient failure (prefill
-# overload, 429/503) is the storm the cache exists to relieve, so it backs off
-# only briefly: the next turn rebuilds the cache as soon as the overload clears,
-# rather than running uncached -- and feeding the overload with full re-prefills
-# -- for many minutes. See _recache.
+# problem (IAM, disabled API, size floor) backs off for a long window instead of
+# retrying inline on every turn. A transient failure (prefill overload, 429/503)
+# is the overload the cache relieves, so it backs off only briefly: the next
+# turn rebuilds the cache as soon as the overload clears instead of running
+# uncached, and re-sending full prefills into the overload, for many minutes.
+# See _recache.
 _CACHE_FAIL_COOLDOWN_S = 15 * 60
 _CACHE_TRANSIENT_COOLDOWN_S = 30
 
@@ -76,14 +76,14 @@ _CACHE_TRANSIENT_COOLDOWN_S = 30
 def _is_cache_gone(e: Exception, name: str | None = None) -> bool:
     """A cached_content reference the server will not honor: deleted
     ("CachedContent not found", 404) or TTL-lapsed ("Cache content <id> is
-    expired.", 400 INVALID_ARGUMENT). Either way the fix is recreate-and-retry,
-    not fail the turn.
+    expired.", 400 INVALID_ARGUMENT). Either way the fix is to recreate and
+    retry rather than fail the turn.
 
     When the cache id is known it is the most reliable signal -- the server
     quotes it in the error, so a match is wording-independent. Otherwise fall
     back to matching the deleted/expired wording (all the 404 form provides).
     A bare status code is not enough: 400 INVALID_ARGUMENT also covers unrelated
-    request errors (e.g. a missing thought_signature), which must NOT be treated
+    request errors (e.g. a missing thought_signature), which must not be treated
     as a cache miss and silently retried.
     """
     s = str(e)
@@ -97,12 +97,12 @@ def _response_cache_stats(response) -> tuple[int, int]:
     """(cache_read, cache_creation) as the model reported them; (0, 0) if
     unavailable.
 
-    Their SUM is the measured size of the cached prefix: a call that reads the
+    Their sum is the measured size of the cached prefix: a call that reads the
     prefix reports it under cache_read, a call that writes it reports it under
     cache_creation, and a call that reads a shorter prefix while extending it
     splits the same span across both. So read+create names the span either way,
-    which is what lets the Anthropic breakpoint be placed from measurement
-    rather than from a chars-per-token estimate.
+    and the Anthropic breakpoint can be placed from a measurement instead of a
+    chars-per-token estimate.
     """
     mr = getattr(response, "model_response", response)  # unwrap ExtendedModelResponse
     msgs = getattr(mr, "result", None)
@@ -134,7 +134,7 @@ _SHORT_ERROR_CAUSE_CHARS = 160
 
 
 def _clip(text: str, limit: int) -> str:
-    # Marked, so a cut clause cannot read as the complete reason.
+    # The marker keeps a cut clause from reading as the complete reason.
     return text if len(text) <= limit else text[:limit] + "..."
 
 
@@ -142,21 +142,18 @@ def _short_error(exc: Exception) -> str:
     """A one-line reason for a model/cache error, for logs.
 
     Vertex wraps failures in multi-kilobyte RPC dumps (nested original error,
-    stack, source-location trace). The signal is the status and a short cause;
-    this pulls those out so a transient overload does not print a 3k-char block
-    on every occurrence. Falls back to a truncated first line.
+    stack, source-location trace). This keeps the status and a short cause so a
+    transient overload does not print a 3k-char block on every occurrence, and
+    falls back to a truncated first line.
 
-    The cause is not decoration. A bare status triages a transient fine -- every
-    RESOURCE_EXHAUSTED is the same blip -- but on a 400 the reason IS the bug,
-    and every path that reports one (cache create, a lost review pass, a
-    re-dispatch) logs through here. Dropping it left a permanent INVALID_ARGUMENT
-    recorded as the word "INVALID_ARGUMENT" and nothing else, which no amount of
-    log reading can diagnose. The dump is part of the server's status string
-    itself, so no field selection avoids it: the cap bounds the line, and the
-    reason survives because the server puts it first. .message is preferred
-    over str() only because google-api-core's str() prepends the numeric code,
-    which the status name already conveys; the cause chain is consulted for
-    the same reason _is_transient consults it (the genai stack wraps)."""
+    The cause must survive: a bare status is enough to triage a transient, but
+    on a 400 the reason is the bug, and every path that reports one (cache
+    create, a lost review pass, a re-dispatch) logs through here. The dump is
+    part of the server's status string, so no field selection avoids it; the
+    cap bounds the line and the server puts the reason first. .message is
+    preferred over str() because google-api-core's str() prepends the numeric
+    code, which the status name already conveys. The cause chain is consulted
+    for the same reason _is_transient consults it: the genai stack wraps."""
     s = " ".join(str(exc).split())
     message = getattr(exc, "message", "") or getattr(exc.__cause__, "message", "")
     cause = _clip(" ".join(str(message or s).split()), _SHORT_ERROR_CAUSE_CHARS)
@@ -180,22 +177,21 @@ def _is_transient(exc: Exception) -> bool:
     """Is this a retry-worthy provider blip, as opposed to a permanent error?
 
     A structured status wins when the exception carries one: google-api-core
-    sets .code and google.genai .code/.status_code to the HTTP status, and a
-    number decides cleanly. The old substring pass over the full error text
-    matched "429"/"503" inside request ids and token counts, laundering a
-    permanent 400 into a transient -- prod burned _MAX_REVIEW_ATTEMPTS
-    redeliveries re-spending a whole review on exactly that. 504 is in the
-    set deliberately: a deadline reaping a hung stream is a transient like
-    any 5xx (see _VERTEX_CALL_TIMEOUT_S). 529 is Anthropic's overloaded_error,
-    which the anthropic SDK raises with that status, so the structured branch
-    has to know it; the "overloaded" word below is never reached for it.
+    sets .code and google.genai .code/.status_code to the HTTP status. Matching
+    "429"/"503" as substrings of the full error text is not safe: they occur
+    inside request ids and token counts, which turned a permanent 400 into a
+    transient and re-spent whole reviews on it. 504 is in the set because a
+    deadline reaping a hung stream is a transient like any 5xx (see
+    _VERTEX_CALL_TIMEOUT_S). 529 is Anthropic's overloaded_error, raised by the
+    anthropic SDK with that status, so the "overloaded" word below is never
+    reached for it.
 
     Word matching remains only as the fallback for text-only exceptions
-    (provider wording varies), with the bare digit strings gone. The anthropic
-    SDK's timeout and connection errors carry no status and land here. The
-    cause chain is consulted because langchain-google-genai re-raises API
-    errors as a plain ChatGoogleGenerativeAIError with the structured original
-    chained underneath -- on that stack the wrapper is the common case."""
+    (provider wording varies). The anthropic SDK's timeout and connection
+    errors carry no status and land here. The cause chain is consulted because
+    langchain-google-genai re-raises API errors as a plain
+    ChatGoogleGenerativeAIError with the structured original chained
+    underneath; on that stack the wrapper is the common case."""
     for e in (exc, exc.__cause__):
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
         if isinstance(code, int):
@@ -218,16 +214,15 @@ def _is_transient(exc: Exception) -> bool:
 
 
 # The transient-retry policy, shared by the agent-turn middleware and the bare
-# retry helper below so airc has one definition of "how to retry a transient
-# model error". Backoff 5+15+45+60+60+60 = ~4min worst case per model call. Early
-# retries stay fast (5s, 15s) for the common per-minute 429 blip; the extra
-# attempts at the 60s cap add runway for a sustained Gemini overload episode
-# (commonly 5-15min). Cheap against icompleteu's 7200s turn timeout; a real but
-# accepted bite out of the room's 900s one, where a fully exhausted retry costs
-# ~28% of the turn and the turn then ends in the orchestrator's timeout notice
-# rather than a reply. Sized for the harness because that is where a lost turn
-# costs a whole job; the room degrades to a missed reply either way.
-# Empty candidates do not use this ladder at all: _EmptyCandidateRetry retries
+# retry helper below, so airc has one definition of how to retry a transient
+# model error. Backoff 5+15+45+60+60+60 = ~4min worst case per model call. The
+# early retries stay fast (5s, 15s) for the common per-minute 429 blip; the
+# attempts at the 60s cap cover a sustained Gemini overload episode (commonly
+# 5-15min). That is cheap against icompleteu's 7200s turn timeout. Against the
+# room's 900s one a fully exhausted retry costs ~28% of the turn, and the turn
+# then ends in the orchestrator's timeout notice instead of a reply; accepted,
+# because a lost harness turn costs a whole job while the room only misses a
+# reply. Empty candidates do not use this ladder: _EmptyCandidateRetry retries
 # them itself, once, and raises a non-retryable error (see _is_retryable).
 _RETRY_MAX = 6
 _RETRY_INITIAL_DELAY = 5.0
@@ -238,7 +233,7 @@ _RETRY_MAX_DELAY = 60.0
 # Set by _EmptyCandidateRetry for the duration of its one mutated retry, read by
 # the cache middlewares (nested inside it) and by CallBudgetMiddleware /
 # FinalAnswerMiddleware to suppress a second nudge or notice. Two non-zero values:
-# _RETRY_EMPTY (1) steps aside from the Vertex cached content resource because a
+# _RETRY_EMPTY (1) bypasses the Vertex cached content resource because a
 # zero-part STOP candidate is deterministic on cached prefixes; _RETRY_UNPARSABLE (2)
 # keeps serving from the cache because a truncated tool-call stream is a transient
 # output flake, while still suppressing cache-mark advancement and duplicate
@@ -250,13 +245,13 @@ _empty_retry: contextvars.ContextVar[int] = contextvars.ContextVar(
 )
 
 # In-place attempts on an unparsable tool call, and the wait before a repeat one
-# (the first is immediate: the common shape is a one-off wire truncation). Two,
-# so an agent with no graph-level re-ask -- the room, which does not use
-# RequireStructuredResultMiddleware -- gets a second chance before its turn dies
+# (the first is immediate: the common case is a one-off truncation on the wire).
+# Two, so an agent with no graph-level re-ask (the room, which does not use
+# RequireStructuredResultMiddleware) gets a second chance before its turn dies
 # silently. Cheap: _RETRY_UNPARSABLE keeps the cached prefix, so an attempt buys
-# only output tokens. Kept small deliberately: these calls never re-enter
+# only output tokens. Kept small because these calls never re-enter
 # before_model, so they are invisible to the call and time budgets, and the
-# graph-level re-ask (not more of the same request) is the real escape hatch.
+# graph-level re-ask is the real escape hatch.
 _UNPARSABLE_RETRIES = 2
 _UNPARSABLE_RETRY_DELAY = 2.0
 
@@ -271,32 +266,31 @@ _MAX_UNPARSABLE_REASKS = 6
 class EmptyCandidateError(Exception):
     """A model call returned a zero-part candidate: no text and no tool calls.
 
-    Gemini's known bug: returns finish_reason=STOP with zero parts -- reads as a
-    benign end-of-turn but carries nothing (the silent-dead-turn shape). Raised
-    by _EmptyCandidateRetry AFTER its own single mutated retry (drop the cached
-    prefix + append a nudge) also comes back empty, so the empty is deterministic
-    rather than a one-off flake. Not retryable by ModelRetryMiddleware (see
-    _is_retryable): an identical resend would reproduce it. on_failure="error"
-    re-raises; the harness catches it by type and surfaces a named diagnostic
-    instead of a generic traceback.
+    Gemini's known bug: it returns finish_reason=STOP with zero parts, which
+    reads as a benign end-of-turn but carries nothing, so the turn dies
+    silently. Raised by _EmptyCandidateRetry after its own single mutated retry
+    (drop the cached prefix + append a nudge) also comes back empty, so the
+    empty is deterministic rather than a one-off flake. Not retryable by
+    ModelRetryMiddleware (see _is_retryable): an identical resend would
+    reproduce it. on_failure="error" re-raises; the harness catches it by type
+    and surfaces a named diagnostic instead of a generic traceback.
     """
 
 
 def _is_retryable(exc: Exception) -> bool:
     """Retry policy for ModelRetryMiddleware: transient provider errors (429/503/
-    overloaded) only. A zero-part empty candidate is NOT retried here --
+    overloaded) only. A zero-part empty candidate is not retried here:
     _EmptyCandidateRetry owns that path and mutates the request on its single
     retry (drop the cached prefix + append a nudge), because an identical resend
     reproduces the deterministic empty (observed: 6 identical calls, 0 output
     tokens). _is_transient falls back to string matching (provider-dependent
-    wording) for the bare retrying() helper which never sees empty candidates
+    wording) for the bare retrying() helper, which never sees empty candidates
     (single-shot calls, no ToolStrategy).
 
-    The type check is what enforces that, and it has to come first: the raise
-    embeds the provider's finish_reason in the message, so a reason reading
-    MODEL_OVERLOADED or naming an unavailable region would match _is_transient
-    and hand the empty back to the retry layer -- 14 model calls and the full
-    backoff ladder, worse than the wedge this path exists to prevent."""
+    The type check must come first: the raise embeds the provider's
+    finish_reason in the message, so a reason reading MODEL_OVERLOADED or
+    naming an unavailable region would match _is_transient and hand the empty
+    back to the retry layer for 14 model calls and the full backoff ladder."""
     if isinstance(exc, EmptyCandidateError):
         return False
     return _is_transient(exc)
@@ -351,7 +345,7 @@ _MAX_KEPT_RESULT_CHARS = 240_000
 def prune_to_recent_tool_results(messages: list, keep: int) -> list | None:
     """Elide every tool result except the most recent `keep`, by recency.
 
-    The hard-threshold backstop's shedder: when a long tool-using turn would
+    Used by the hard-threshold backstop: when a long tool-using turn would
     overflow the window, keep only the most recent result and stub the rest, so
     the turn can still complete with a final reply. Returns the pruned list, or
     None if nothing changed. Only the model request is pruned; the checkpoint is
@@ -407,7 +401,7 @@ def truncate_oversized_tool_results(messages: list, max_chars: int) -> list | No
 # prefix cache is never poisoned by a preemptive strip.
 _HARD_FRACTION = 0.90
 # Rough chars-per-token. Overestimates slightly for English prose, so the
-# token estimate runs a touch high -- pruning a little early is the safe bias.
+# token estimate runs a touch high and pruning errs toward early.
 _CHARS_PER_TOKEN = 4
 
 _TERMINATE_NUDGE = (
@@ -458,11 +452,11 @@ def compact_for_budget(messages: list, window: int) -> tuple[list, bool]:
     Returns (messages, drop_tools). With prefix caching on, a re-sent tool result
     behind the cache boundary is a cheap cache_read, and stripping mutates the
     cacheable prefix (forcing a cache rebuild and converting cache_reads into a
-    miss) -- so we do NOT shed preemptively. Only at the hard threshold, where the
-    request would 400, do we shed down to the last tool result, truncate an
+    miss), so this does not shed preemptively. Only at the hard threshold, where
+    the request would 400, does it shed down to the last tool result, truncate an
     oversized survivor, and signal the caller to drop tools so the turn wraps up
-    with a final reply. By this point the growing cache has stepped aside per its
-    own window guard, so the shed is not fighting a live cache. Below the
+    with a final reply. By then the growing cache's own window guard has already
+    switched it off, so the shed does not fight a live cache. Below the
     threshold the request is returned intact; the return value is a pure function
     of the inputs.
     """
@@ -540,13 +534,13 @@ class _DropEmptyResponses(AgentMiddleware):
     sits mid-history, where aafter_model -- which only inspects the last
     message -- cannot reach it).
 
-    Overlaps _EmptyCandidateRetry, deliberately, and the two halves differ in
-    how live they are. The retry raises on an empty candidate before it can
-    reach state, so aafter_model now only fires on a path that bypasses the
-    wrap -- a cheap belt, kept. awrap_model_call is NOT redundant: the room
-    checkpoints to durable SQLite, so threads poisoned before either middleware
-    existed still carry mid-history empties, and this is the only thing that
-    keeps them off the wire.
+    Overlaps _EmptyCandidateRetry, and the two hooks differ in how live they
+    are. The retry raises on an empty candidate before it reaches state, so
+    aafter_model only fires on a path that bypasses the wrap; it is cheap and
+    kept. awrap_model_call is still needed: the room checkpoints to durable
+    SQLite, so threads poisoned before either middleware existed still carry
+    mid-history empties, and this is the only thing that keeps them off the
+    wire.
     """
 
     async def awrap_model_call(self, request, handler):
@@ -565,38 +559,36 @@ class _DropEmptyResponses(AgentMiddleware):
 class _EmptyCandidateRetry(AgentMiddleware):
     """Retry a provider-side empty candidate once, mutated, then surface it.
 
-    Gemini's known bug: returns a zero-part response (finish_reason=STOP or
+    Gemini's known bug: a zero-part response (finish_reason=STOP or
     SAFETY/RECITATION, but no content and no tool calls) that reads as a benign
-    end-of-turn but carries nothing -- the silent-dead-turn shape. Without this,
-    the empty AIMessage sails through (or is scrubbed by _DropEmptyResponses)
-    and the turn ends with no report, scored as a dead turn by the reentry loop.
-    The retry happens HERE rather than through ModelRetryMiddleware's backoff,
-    because that layer resends the identical request and a deterministic
-    zero-part candidate reproduces on identical input (observed: 6 identical
-    calls, 0 output tokens). When the mutated retry is also empty the turn
-    errors visibly (the harness names the empty candidate) instead of going
-    silent.
+    end-of-turn but carries nothing. Without this, the empty AIMessage passes
+    through (or is scrubbed by _DropEmptyResponses) and the turn ends with no
+    report, scored as a dead turn by the reentry loop. The retry happens here
+    and not through ModelRetryMiddleware's backoff because that layer resends
+    the identical request, and a deterministic zero-part candidate reproduces
+    on identical input (observed: 6 identical calls, 0 output tokens). When the
+    mutated retry is also empty the turn errors visibly (the harness names the
+    empty candidate) instead of going silent.
 
-    Detection scope: empty candidate (0 parts: no text AND no tool calls) and
-    STOP-with-no-content only -- the flake family. A SAFETY/RECITATION block
-    WITH content is a genuine refusal, not a flake; not retried here. Nor is a
-    tool call the provider truncated, which reads as zero-part to a check on
-    content and tool_calls alone: that has its own retry and its own wording
-    (see _unparsable_tool_call and _retry_unparsable).
+    Detection scope: an empty candidate (0 parts: no text and no tool calls)
+    and STOP with no content. A SAFETY/RECITATION block with content is a
+    genuine refusal, not a flake, and is not retried here. Nor is a tool call
+    the provider truncated, which looks zero-part to a check on content and
+    tool_calls alone: that has its own retry and its own wording (see
+    _unparsable_tool_call and _retry_unparsable).
 
-    Note there is no legitimately-empty reply to churn on: an agent with nothing
-    to say answers with a sentinel (the room's NOTHING_TO_ADD) or calls its
-    report tool, both non-empty. A zero-part candidate is always the bug.
+    There is no legitimately empty reply to confuse this with: an agent with
+    nothing to say answers with a sentinel (the room's NOTHING_TO_ADD) or calls
+    its report tool, both non-empty. A zero-part candidate is always the bug.
 
     Sits in front of _DropEmptyResponses, which stays for the request-scrubbing
     half its docstring describes (durable checkpoints poisoned before either
     middleware existed).
 
-    Placement: listed AFTER ModelRetryMiddleware in base_middleware, so a raise
-    propagates up to it. EmptyCandidateError is NOT retryable (see _is_retryable):
-    this middleware owns the empty retry, because ModelRetryMiddleware would
-    resend the identical request and a deterministic zero-part candidate
-    reproduces on identical input.
+    Placement: listed after ModelRetryMiddleware in base_middleware, so a raise
+    propagates up to it. EmptyCandidateError is not retryable (see
+    _is_retryable), since ModelRetryMiddleware would resend the identical
+    request.
     """
 
     async def awrap_model_call(self, request, handler):
@@ -612,14 +604,14 @@ class _EmptyCandidateRetry(AgentMiddleware):
             if _empty_retry.get():
                 _empty_retry.set(0)
             return resp
-        # Still empty. Do NOT raise for an identical retry -- the cache (nested
+        # Still empty. Do not raise for an identical retry: the cache (nested
         # inside) would re-read the same prefix and the model would reproduce the
         # zero-part candidate. Mutate, once: set _empty_retry so the growing
-        # cache steps aside for this one call (a poisoned prefix can only
+        # cache is bypassed for this one call (a poisoned prefix can only
         # reproduce the empty) and append a nudge that forces output, in case
-        # the poison is in the message history. Bounded: one mutated retry, then
-        # surface. Raises EmptyCandidateError (not retryable) so it propagates
-        # to the harness as a named dead turn.
+        # the poison is in the message history. One mutated retry, then surface:
+        # EmptyCandidateError is not retryable, so it propagates to the harness
+        # as a named dead turn.
         _empty_retry.set(_RETRY_EMPTY)
         log.warning(
             "empty candidate (finish_reason=%s); retrying once uncached with a"
@@ -639,29 +631,28 @@ class _EmptyCandidateRetry(AgentMiddleware):
 
     async def _retry_unparsable(self, request, handler, resp):
         """Re-call the model on an unparsable response, in place and bounded,
-        then hand the response back rather than raising.
+        then hand the response back instead of raising.
 
-        What the attempt sends depends on which shape came back.
+        What the attempt sends depends on which kind came back.
 
-        _DROPPED_CALL gets the nudge. The model emitted a call, the arguments
-        did not arrive whole, and "send the same call with less in it" is both
-        true and actionable against the common cause, a large structured result
-        truncated mid-string.
+        _DROPPED_CALL gets the nudge. The model emitted a call and the
+        arguments did not arrive whole; asking for the same call with less in
+        it addresses the common cause, a large structured result truncated
+        mid-string.
 
         _EMPTY_TOOL_STOP gets the request unchanged. Nothing arrived, so there
         is nothing to correct, and the nudge would assert a truncation that did
         not happen and ask a reviewer to shrink reads it never made. A bare
-        resend is not a weaker correction than a nudged one here: the Messages
-        API is stateless and the empty response never goes back on the wire, so
-        either way the next attempt is a fresh sample of the same prefix, not a
-        continuation. Nor does the mutation buy determinism-breaking the way it
-        does for an empty candidate -- Anthropic removed temperature, top_p,
-        top_k and seed, and _drop_anthropic_sampling strips them, so an
-        identical request already resamples.
+        resend is as good as a nudged one here: the Messages API is stateless
+        and the empty response never goes back on the wire, so the next attempt
+        is a fresh sample of the same prefix either way. The mutation also does
+        not break determinism the way it does for an empty candidate: Anthropic
+        removed temperature, top_p, top_k and seed, and _drop_anthropic_sampling
+        strips them, so an identical request already resamples.
 
         Not EmptyCandidateError: that names a different failure, _is_retryable
         rejects it by type, and its consumer logs a dead turn. An unparsable
-        response is not a dead turn -- if every attempt fails,
+        response is not a dead turn; if every attempt fails,
         RequireStructuredResultMiddleware re-asks without charging the prose
         re-ask budget.
 
@@ -682,8 +673,8 @@ class _EmptyCandidateRetry(AgentMiddleware):
         try:
             for attempt in range(1, _UNPARSABLE_RETRIES + 1):
                 log.warning(
-                    # Every shape is informative: a retry that comes back
-                    # identical says the request, not the wire, decides this.
+                    # Log the kind on every attempt: a retry that comes back
+                    # identical points at the request, not the wire.
                     "unparsable[%s] attempt %d/%d (%s): %s",
                     kind,
                     attempt,
@@ -698,8 +689,7 @@ class _EmptyCandidateRetry(AgentMiddleware):
                 resp = await handler(nudged if kind == _DROPPED_CALL else request)
                 if (bad := _first_unparsable_tool_call(resp)) is None:
                     # Logged so the recovery rate can be counted from the log
-                    # rather than reconstructed by pairing warnings; it is the
-                    # measurement that says whether re-calling works at all.
+                    # instead of reconstructed by pairing warnings.
                     log.info(
                         "unparsable[%s] recovered on attempt %d/%d: %s",
                         kind,
@@ -708,8 +698,8 @@ class _EmptyCandidateRetry(AgentMiddleware):
                         _response_shape(resp, None),
                     )
                     return resp
-                # Recomputed: a resend can come back the other shape, and the
-                # next attempt should send what that shape calls for.
+                # Recomputed: a resend can come back the other kind, and the
+                # next attempt should send what that kind calls for.
                 kind = _unparsable_kind(bad)
         finally:
             _empty_retry.set(0)
@@ -723,17 +713,16 @@ class _EmptyCandidateRetry(AgentMiddleware):
         return resp
 
 
-# The one-shot nudge appended on a _DROPPED_CALL, and on that shape only. Names
-# the actual failure: the zero-part nudge below tells the model its response was
-# empty, which for this failure is false and unactionable -- it emitted a call,
-# the arguments just did not arrive whole. Asking for a smaller one matters
-# because the common shape is a large structured result truncated mid-string,
+# The one-shot nudge appended on a _DROPPED_CALL, and on that kind only. It
+# names the actual failure: the zero-part nudge below tells the model its
+# response was empty, which here is false and unactionable, since it emitted a
+# call whose arguments did not arrive whole. Asking for a smaller one matters
+# because the common cause is a large structured result truncated mid-string,
 # which an identical retry can reproduce for the same reason.
 #
-# _EMPTY_TOOL_STOP does not get it. There the premise is false the other way --
-# nothing arrived, so nothing was truncated -- and the instruction is worse than
-# useless: a reviewer told to send less reads less, which costs review depth
-# silently, with no error and no sign in the verdict.
+# _EMPTY_TOOL_STOP does not get it: nothing arrived, so nothing was truncated,
+# and a reviewer told to send less reads less, which silently costs review
+# depth with no error and no sign in the verdict.
 _UNPARSABLE_TOOL_CALL_NUDGE = HumanMessage(
     "Your previous tool call could not be parsed: the arguments arrived"
     " truncated or malformed, so the call was dropped and nothing ran. Emit it"
@@ -762,25 +751,24 @@ _EMPTY_NUDGE = HumanMessage(
 _TOOL_CALL_STOP_REASONS = frozenset({"tool_use", "malformed_function_call"})
 
 
-# The two shapes _unparsable_kind separates. They share a detection site and
-# nothing else: one is a call that arrived in pieces, the other is a response
-# that arrived with no pieces at all, and the cure differs (see
-# _EmptyCandidateRetry._retry_unparsable).
+# The two kinds _unparsable_kind separates: a call that arrived truncated, and
+# a response that arrived with no parts at all. They share a detection site;
+# the cure differs (see _EmptyCandidateRetry._retry_unparsable).
 _DROPPED_CALL = "dropped-call"
 _EMPTY_TOOL_STOP = "empty-tool-stop"
 
 
 def _unparsable_kind(msg: AIMessage) -> str | None:
-    """Which unparsable shape msg is, or None if it is a healthy message.
+    """Which unparsable kind msg is, or None if it is a healthy message.
 
     _DROPPED_CALL: langchain recorded a call in invalid_tool_calls, which is
     where it puts one whose arguments would not parse. A non-empty list is
     proof there were parts and that they were cut short.
 
     _EMPTY_TOOL_STOP: the provider's stop reason says it was emitting a tool
-    call, and neither a parsed nor a recorded-invalid call is behind it. The
-    observed shape on Claude is content=[], tool_calls=[], invalid=[],
-    stop_reason="tool_use", with output tokens billed -- the provider says it
+    call, and neither a parsed nor a recorded-invalid call is behind it.
+    Observed on Claude: content=[], tool_calls=[], invalid=[],
+    stop_reason="tool_use", with output tokens billed. The provider says it
     sent a call and sent nothing.
 
     The stop reason counts only when nothing parsed. Anthropic ends every
@@ -816,15 +804,14 @@ def _usage_shape(msg) -> str:
     rate), so paying for them on a failure path costs nothing worth avoiding.
 
     reasoning is the count this exists for. On an empty response it separates
-    tokens billed for thinking -- the reading in which the model produced only
-    reasoning and the provider sent none of it -- from tokens that were
-    something else and went missing. Note it reads 0 on an adapter that
-    attaches no output details, which is not the same as a call that did not
-    think.
+    tokens billed for thinking (the model produced only reasoning and the
+    provider sent none of it) from tokens that were something else and went
+    missing. It reads 0 on an adapter that attaches no output details, which
+    is not the same as a call that did not think.
 
     The model id comes from the message because the response is all this has;
     a bare name misses the provider traits table and takes its defaults, which
-    is the right reading for a provider that counts thinking inside output.
+    is right for a provider that counts thinking inside output.
     """
     meta = getattr(msg, "response_metadata", None) or {}
     usage = Usage.of_call(
@@ -919,14 +906,11 @@ def _empty_ai_message(resp):
     not empty by this definition. resp.result is the message list the model
     returned; a non-AI response (e.g. a structured-output object) has none.
 
-    A truncated tool call reads as zero-part to a check that looks only at
-    content and tool_calls -- empty content, and nothing in tool_calls because
-    the arguments did not parse -- so it is excluded explicitly. Treating one as
-    the zero-part flake told the model its response had been empty (it had not),
-    dropped the cached prefix to defeat a determinism that was never the cause,
-    and ended in EmptyCandidateError, which _is_retryable rejects BY TYPE. A
-    truncation is exactly the transient an ordinary retry fixes, so that
-    misdiagnosis converted a recoverable call into a dead turn."""
+    A truncated tool call also looks zero-part to a check on content and
+    tool_calls alone (empty content, and nothing in tool_calls because the
+    arguments did not parse), so it is excluded explicitly. Treated as the
+    zero-part flake it ends in EmptyCandidateError, which _is_retryable rejects
+    by type, turning a transient an ordinary retry fixes into a dead turn."""
     for msg in getattr(resp, "result", ()) or ():
         if not isinstance(msg, AIMessage):
             continue
@@ -964,12 +948,12 @@ def _finish_reason(msg: AIMessage) -> str:
 # Marks a persisted call-budget nudge in the message history, so a threshold
 # re-entered without the count advancing does not append a second copy. Mirrors
 # GroundingReminderMiddleware's lc_source tagging; the companion lc_stage carries
-# the threshold, because one nudge text fires at several counts by design.
+# the threshold, because a schedule may fire one nudge text at several counts.
 _CALL_BUDGET_SRC = "call-budget"
 
 
 class _CallBudgetState(AgentState):
-    # UntrackedValue: per-turn (per graph invocation), NEVER checkpointed -- so on
+    # UntrackedValue: per-turn (per graph invocation), never checkpointed, so on
     # a checkpointed persona graph the count resets each turn instead of
     # accumulating across the conversation's lifetime.
     model_calls: NotRequired[Annotated[int, UntrackedValue]]
@@ -987,26 +971,25 @@ class CallBudgetMiddleware(AgentMiddleware):
     it insistent (e.g. "produce your result now"), so the run rarely ends with
     nothing to show.
 
-    Where a nudge lives is the caller's choice, and it is the difference between
-    a one-call impulse and a standing instruction:
+    Where a nudge lives is the caller's choice:
 
     - Ephemeral (default): appended to that one model request and never to graph
-      state, so on a CHECKPOINTED persona graph it cannot bake "stop using tools"
-      into every future turn. The cost is that the model sees it on exactly one
-      call -- the next call's messages are rebuilt from state, which never held
-      it. Fine for an instruction whose whole compliance is a single call ("write
-      your reply now"); useless for one that means to govern a span ("stop
-      widening the search"), which is present for 1 of the ~45 calls it addresses.
-    - persist=True: written into state via the messages reducer as a TAIL append
+      state, so on a checkpointed persona graph it cannot bake "stop using tools"
+      into every future turn. The model sees it on exactly one call, since the
+      next call's messages are rebuilt from state, which never held it. Fine for
+      an instruction a single call can satisfy ("write your reply now"); useless
+      for one meant to govern a span ("stop widening the search"), which is then
+      present for 1 of the ~45 calls it addresses.
+    - persist=True: written into state via the messages reducer as a tail append
       (never a mid-history insert, which would rewrite and poison the cached
       prefix), so it settles into the growing prefix and costs a cache read
-      thereafter. Only for a graph with NO checkpointer, where one turn is the
+      thereafter. Only for a graph with no checkpointer, where one turn is the
       whole run and there is no later turn to poison.
 
     `progress` is the complement to a persisted schedule: a caller-supplied
-    formatter over the completed-call count, appended ephemerally on EVERY call,
-    so the tail always carries the current position and nothing stale. Deliberately
-    not persisted -- only the latest value means anything, and persisting would
+    formatter over the completed-call count, appended ephemerally on every call,
+    so the tail always carries the current position and nothing stale. Not
+    persisted: only the latest value means anything, and persisting would
     accumulate one wrong counter per call.
     """
 
@@ -1040,9 +1023,9 @@ class CallBudgetMiddleware(AgentMiddleware):
             return None
         n = state.get("model_calls", 0)
         nudge = self._stages.get(n)
-        # Keyed on the THRESHOLD, not the text: a schedule fires the same prose
-        # at several counts on purpose (a re-ask 20 calls later), so deduping by
-        # content would silently drop every repeat after the first.
+        # Keyed on the threshold, not the text: a schedule may fire the same prose
+        # at several counts (a re-ask 20 calls later), so deduping by content
+        # would silently drop every repeat after the first.
         if nudge is None or any(
             m.additional_kwargs.get("lc_stage") == n
             for m in state["messages"]
@@ -1070,7 +1053,7 @@ class CallBudgetMiddleware(AgentMiddleware):
         # state.model_calls is the count of calls already completed this turn.
         n = request.state.get("model_calls", 0)
         # after_model increments model_calls, but an EmptyCandidateError raised
-        # innermore skips it -- the count freezes and this threshold re-fires on
+        # further in skips it, so the count freezes and this threshold re-fires on
         # every retry of the same call (observed: the 45-call nudge appended to
         # each of 7 empty-candidate retries, none of which the model answered).
         # A retry is the same call, so append nothing: _EmptyCandidateRetry
@@ -1116,21 +1099,21 @@ class FinalAnswerMiddleware(AgentMiddleware):
     close_after_reasks arms the same mechanism on the other no-verdict path,
     where the budget is not the problem: see _closed.
 
-    Refusing at execution rather than withdrawing the tools from the request is
-    deliberate: the tool list is the first thing in the cached prefix, and
-    changing it re-bills the whole context on every call of the window. A
-    refusal is an ordinary tool result appended at the tail, so the window
-    costs a cached read per call, which is why it can be three calls rather
-    than one -- a model that spends its first closed call on a read it is then
-    refused still has two to hand in.
+    Tools are refused at execution instead of withdrawn from the request
+    because the tool list is the first thing in the cached prefix, and changing
+    it re-bills the whole context on every call of the window. A refusal is an
+    ordinary tool result appended at the tail, so the window costs a cached
+    read per call, which is why it can be three calls instead of one: a model
+    that spends its first closed call on a read it is then refused still has
+    two to hand in.
 
     The count is this middleware's own, per turn like CallBudgetMiddleware's,
     so the window does not depend on which other governors are in the stack.
     `max_calls` must equal ModelCallLimitMiddleware's run cap, or the window
-    ends somewhere other than where the cap does -- and it is None on a stack
-    whose turn ends on a dollar limit instead, where BudgetMiddleware owns the
-    window and keys it to the money. close_after_reasks is the other arm and is
-    about a different failure, so it survives that move.
+    ends somewhere other than where the cap does. It is None on a stack whose
+    turn ends on a dollar limit instead, where BudgetMiddleware owns the window
+    and keys it to the money. close_after_reasks addresses a different failure
+    and is unaffected by that.
     """
 
     state_schema = _FinalAnswerState
@@ -1154,13 +1137,13 @@ class FinalAnswerMiddleware(AgentMiddleware):
     def _closed(self, completed: int, state=None) -> bool:
         """Whether the model call made after `completed` calls has its tools shut.
 
-        Two ways in. The window at the end of the budget is the original: the
+        Two conditions close them. The window at the end of the budget: the
         turn is about to be cut off, so leave nothing to do but report.
 
-        close_after_reasks is the other, and it is about a different failure.
+        close_after_reasks covers a different failure.
         RequireStructuredResultMiddleware re-asks a turn that ended in prose, but
-        a re-ask lands while every read tool is still open -- and the model is
-        bound tool_choice="any" over ALL of them, so it can satisfy the constraint
+        a re-ask lands while every read tool is still open, and the model is
+        bound tool_choice="any" over all of them, so it can satisfy the constraint
         with another read and never produce the verdict. That is not a terminal
         plain-text turn, so the re-ask does not fire again and the pass wanders on
         to the cap. Because REASKS_KEY increments when a re-ask is issued,
@@ -1219,17 +1202,18 @@ class FinalAnswerMiddleware(AgentMiddleware):
 # invocation, never carried across the turns of a checkpointed conversation.
 BUDGET_KEY = "budget"
 # Calls left in the turn as the two cache brakes read it: remaining dollars over
-# what the last call cost. Its own key rather than a field of _Spend, because a
-# brake reads a scalar and knows nothing about this middleware -- it falls back
+# what the last call cost. A key of its own instead of a field of _Spend: a
+# brake reads a scalar and knows nothing about this middleware, and falls back
 # to `cap - model_calls` when no budget middleware is in the stack (the room and
 # the harness, until they migrate).
 CALLS_LEFT_KEY = "calls_left"
 
-# The zero-cache tripwire. A large prompt served with NOTHING read from cache
-# is a provider-side eviction, not a client decision: at these sizes nothing on
-# our side rewrites the prefix (the grounding reminder is a tail append, the
-# ceiling actions fire far higher), so a run of them means the cache is simply
-# not being served and every call is being billed at the full input rate.
+# Detector for a provider that stopped serving the prompt cache. A large prompt
+# served with nothing read from cache is a provider-side eviction, not a client
+# decision: at these sizes nothing on our side rewrites the prefix (the
+# grounding reminder is a tail append, the ceiling actions fire far higher), so
+# a run of them means the cache is not being served and every call is billed at
+# the full input rate.
 #
 # Observed 2026-09: Gemini 3.1 Pro passes at ~400k flipping between normal hit
 # rates and runs of "0 cached" within one pass, both directions, at up to $1.60
@@ -1244,12 +1228,12 @@ _ZERO_CACHE_TRIPS = 3
 class CacheLossTrip(Exception):
     """A turn abandoned because the provider stopped serving its prompt cache.
 
-    Its own type, and deliberately not folded into the cost limit: under the
-    symptom a 25 USD limit is about fifteen calls, so the limit alone lets every
-    affected pass burn most of its budget and then report "out of budget" for
-    what is a provider fault. A caller that can stop doing expensive work --
-    airc-processors exits the service on it -- needs to tell the two endings
-    apart by type, not by reading a message.
+    Its own type, separate from the cost limit: under the symptom a 25 USD
+    limit is about fifteen calls, so the limit alone lets every affected pass
+    burn most of its budget and then report "out of budget" for what is a
+    provider fault. A caller that can stop doing expensive work (airc-processors
+    exits the service on it) needs to tell the two endings apart by type, not
+    by reading a message.
     """
 
 
@@ -1296,7 +1280,7 @@ class BudgetMiddleware(AgentMiddleware):
     within one, so a call cap buys a cheap short turn or an expensive long one
     and the operator cannot say which in advance.
 
-    Two numbers, answering different questions. `cost_limit` (USD) is the most
+    Two numbers answer different questions. `cost_limit` (USD) is the most
     a turn may ever cost: it ends the turn, keys the read-closing window, and is
     what "calls left" is measured against. `context_target` (prompt tokens) is
     where a typical turn should be wrapping up; it appears in the pointer and
@@ -1335,8 +1319,8 @@ class BudgetMiddleware(AgentMiddleware):
     The per-turn usage here is the agent's own calls only. Spend an invocation
     causes beside them -- a ceiling summarization on the filter model, an
     explicit cache creation -- reaches the ledger through the collector and is
-    deliberately not charged against the turn's limit: the limit governs what
-    the model does, and neither of those is the model's decision.
+    not charged against the turn's limit: the limit governs what the model
+    does, and neither of those is the model's decision.
     """
 
     state_schema = _BudgetState
@@ -1354,19 +1338,18 @@ class BudgetMiddleware(AgentMiddleware):
         zero_cache_trips: int = _ZERO_CACHE_TRIPS,
     ) -> None:
         super().__init__()
-        # 0 is "no ceiling", and it is spelled as its own state rather than as
+        # 0 means no ceiling and is held as None from here down instead of as
         # a very large number: the read-closing window and the pointer both
         # divide by the limit, and a stand-in like 1e9 would leave them quoting
-        # 0% of a cap forever instead of dropping the clause. Negative is a
-        # typo. Held as None from here down so no arithmetic site can reach the
-        # unbounded case by accident.
+        # 0% of a cap forever instead of dropping the clause. None also keeps
+        # every arithmetic site from reaching the unbounded case by accident.
+        # Negative is a typo.
         if cost_limit < 0:
             raise ValueError(
                 f"cost_limit must be zero (no ceiling) or positive, got {cost_limit!r}"
             )
-        # 0 is legitimate and means "no target": it drives nothing yet, and the
-        # pointer simply does not mention a target the operator has not chosen.
-        # Negative is a typo.
+        # 0 means no target: it drives nothing yet, and the pointer does not
+        # mention a target the operator has not chosen. Negative is a typo.
         if context_target < 0:
             raise ValueError(
                 f"context_target must be zero (no target) or positive, got"
@@ -1412,10 +1395,10 @@ class BudgetMiddleware(AgentMiddleware):
         if (msg := _last_ai(state.get("messages") or [])) is not None:
             spend = self._advance(spend, msg)
         if spend.zero_cache_run >= self._zero_cache_trips:
-            # Raised rather than ended with a jump: a turn that ends returns a
-            # verdict-shaped nothing, which every caller reads as "the model had
-            # nothing to report". This is not a verdict about the work, and the
-            # caller has to be able to stop rather than take the next unit.
+            # Raised instead of ending the turn with a jump: an ended turn returns
+            # no verdict, which every caller reads as "the model had nothing to
+            # report". This is a provider fault, not a verdict about the work, and
+            # the caller has to be able to stop instead of taking the next unit.
             raise CacheLossTrip(
                 f"prompt cache not served: {spend.zero_cache_run} calls in a row"
                 f" at or above {_k(self._zero_cache_floor)} input with 0 read"
@@ -1445,16 +1428,15 @@ class BudgetMiddleware(AgentMiddleware):
         return self.before_model(state, runtime)
 
     def pointer(self, spend: _Spend) -> str:
-        """The position line riding every request: what has been spent against
-        the ceiling, and how much has been read against the target. Data, not
-        pressure -- the nudges do the steering, and this is on the tail of every
-        call of the turn. "Of cap", because the cap is a ceiling, not a target.
+        """The position line appended to every request: what has been spent
+        against the ceiling, and how much has been read against the target. It
+        informs; the nudges do the steering. "Of cap", because the cap is a
+        ceiling, not a target.
 
-        With no context target set the clause is dropped rather than rendered
+        With no context target set the clause is dropped instead of rendered
         against a zero, and with no cost ceiling the spend is reported without a
-        percentage. This is prose the model reads on every call of the turn, so
-        "context 410k of 0 target" is not a cosmetic problem: it is a sentence
-        that means nothing being asserted to the model a hundred times.
+        percentage. The model reads this on every call of the turn, so "context
+        410k of 0 target" would assert a meaningless sentence a hundred times.
         """
         u = spend.usage
         line = f"{u.cost()} spent"
@@ -1520,17 +1502,13 @@ REASKS_KEY = "reasks"
 
 
 class _RequireResultState(AgentState):
-    # UntrackedValue: per-turn (per graph invocation), NEVER checkpointed -- so the
+    # UntrackedValue: per-turn (per graph invocation), never checkpointed, so the
     # re-ask count resets each turn instead of accumulating across a stage-loop's
     # resumed turns on a shared thread. Verified to persist across a jump_to's
-    # supersteps WITHIN one ainvoke (so the bound holds within the turn it guards),
-    # which is the property the re-ask cap needs. Replacing the earlier scheme
-    # (counting marker HumanMessages in the checkpointed messages channel): that
-    # accumulated across turns on a shared thread, exhausting the budget for the
-    # job's lifetime, and a per-turn reset via RemoveMessage risked a silent
-    # prefix/tail mismatch in the growing cache (a deleted marker landing in the
-    # cached prefix with no length change to trip the shrink guard). The counter
-    # never touches the messages channel, so it cannot interact with caching.
+    # supersteps within one ainvoke, which is the property the re-ask cap needs.
+    # The counter never touches the messages channel, so it cannot interact with
+    # caching; counting marker messages would, since deleting a marker from the
+    # cached prefix leaves no length change for the shrink guard to see.
     reasks: NotRequired[Annotated[int, UntrackedValue]]
     unparsable_reasks: NotRequired[Annotated[int, UntrackedValue]]
 
@@ -1547,14 +1525,14 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
 
     The failure this guards against: with ToolStrategy the loop exits the instant
     a model turn has no tool calls (the classic agent stop condition), so a model
-    that writes its conclusion as prose -- rather than CALLING the result tool --
-    ends the run with structured_response unset. The caller then sees None and,
-    for a review verifier, that reads as "no verdict" and the finding it was
-    checking is dropped. The observed shape is a short turn (a handful of calls,
-    well under the call cap) that simply answers in prose; the call-budget nudges,
-    which only fire near the cap, never see it.
+    that writes its conclusion as prose instead of calling the result tool ends
+    the run with structured_response unset. The caller then sees None and, for a
+    review verifier, that reads as "no verdict" and the finding it was checking
+    is dropped. The observed case is a short turn (a handful of calls, well
+    under the call cap) that answers in prose; the call-budget nudges, which
+    only fire near the cap, never see it.
 
-    On such a terminal, this re-asks: it appends a corrective message (a TAIL
+    On such a terminal, this re-asks: it appends a corrective message (a tail
     append via the messages reducer, cache-friendly like the grounding reminder)
     and jumps back to the model via the framework's jump_to mechanism. The bound
     is a per-turn UntrackedValue counter (reasks) -- resets each turn (ainvoke),
@@ -1677,7 +1655,7 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
 
 
 class _TimeBudgetState(AgentState):
-    # UntrackedValue: per-turn (per graph invocation), NEVER checkpointed -- so the
+    # UntrackedValue: per-turn (per graph invocation), never checkpointed, so the
     # turn-start stamp resets each turn instead of pinning the first turn's clock
     # for the whole conversation's lifetime.
     turn_start: NotRequired[Annotated[float, UntrackedValue]]
@@ -1698,9 +1676,9 @@ class TimeBudgetMiddleware(AgentMiddleware):
     (ephemeral) and never to graph state, so on a checkpointed persona graph it does
     not bake "stop using tools" into every future turn. Elapsed is measured only
     between model calls, so a single slow call or tool cannot be interrupted -- that
-    remains the backstop timeout's job. Repeating the current stage's nudge on each
-    call past its threshold is intended: sustained pressure to converge, at the cost
-    of one ephemeral message per call.
+    remains the backstop timeout's job. The current stage's nudge repeats on each
+    call past its threshold, for sustained pressure to converge, at the cost of one
+    ephemeral message per call.
     """
 
     state_schema = _TimeBudgetState
@@ -1763,7 +1741,7 @@ class GroundingReminderMiddleware(AgentMiddleware):
     rather than only at the (increasingly buried) system prompt. Defaults to the
     grounding rule; `reminder`/`src` make it reusable for any such rule.
 
-    Writes the reminder into graph state via the messages reducer -- a TAIL append,
+    Writes the reminder into graph state via the messages reducer -- a tail append,
     never a mid-history insert (which would rewrite and poison the cached prefix).
     So it settles into the growing prefix cache like any other message and costs a
     cache-read, not a full re-send, thereafter. Self-tracked: it measures tokens
@@ -1845,7 +1823,7 @@ def _seed_vertex_cache_globals() -> str:
       - `_location`: must match the model's serving region (default us-central1).
       - `_project`: avoids lazy normalization that triggers an otherwise-needless
         Cloud Resource Manager `projects.get` call.
-    Credentials are deliberately NOT seeded. Under the sandbox proxy
+    Credentials are not seeded. Under the sandbox proxy
     (`AISAN_VERTEX_PROXY_ENDPOINT`) the box holds none: the cached-content client
     is a different stack from the chat client and insists on TLS, so it cannot
     use the plaintext loopback seam at all. The caller drives that path over REST
@@ -1861,7 +1839,7 @@ def _seed_vertex_cache_globals() -> str:
     return location
 
 
-# Summarization fires here, deliberately BELOW the shed's _HARD_FRACTION, and keeps
+# Summarization fires here, below the shed's _HARD_FRACTION, and keeps
 # the recent tail verbatim while compacting the rest. The two ceilings count on
 # different bases -- the shed on the provider-exact input (system + tool schemas +
 # messages, via the usage_metadata floor), summarization on a message-token
@@ -2043,10 +2021,10 @@ class _GeminiVertexSession(AgentMiddleware):
 class _AnthropicPrefix:
     """Per-conversation state for the advancing history breakpoint.
 
-    Deliberately thinner than _PrefixState: an Anthropic breakpoint is a mark in
-    a request we were sending anyway, not a server-side object, so there is no
-    name to hold, no model to rebind, and nothing to delete on eviction -- an
-    abandoned entry simply ages out at the TTL.
+    Thinner than _PrefixState: an Anthropic breakpoint is a mark in a request we
+    were sending anyway, not a server-side object, so there is no name to hold,
+    no model to rebind, and nothing to delete on eviction. An abandoned entry
+    ages out at the TTL.
     """
 
     # messages[:boundary] sits behind the history mark. 0 = no history mark yet,
@@ -2066,24 +2044,23 @@ class _AnthropicPrefix:
 
 class _AnthropicVertexCaching(AgentMiddleware):
     """Prompt caching for Claude on Vertex: two cache_control marks plus a
-    session affinity header. The header is not optional decoration -- a mark
-    with no affinity writes an entry the next turn may not find, and affinity
-    with nothing tagged has nothing to read.
+    session affinity header. Both are needed: a mark without affinity writes an
+    entry the next turn may not find, and affinity without a mark has nothing
+    to read.
 
-    The two marks are not redundant, and neither subsumes the other:
+    Neither mark subsumes the other:
 
-    * a STATIC mark closing system+tools. Identical across every conversation
-      this agent runs, so a brand-new conversation hits it on its FIRST call.
+    * a static mark closing system+tools. Identical across every conversation
+      this agent runs, so a brand-new conversation hits it on its first call.
       Review keys one thread per claim, so this is the only mark those
       short-lived threads can ever read from.
-    * an ADVANCING mark closing history, moved forward when it pays. Private to
+    * an advancing mark closing history, moved forward when it pays. Private to
       one conversation, and the one that matters on long flows, where history
       is ~90% of the prompt.
 
     An advancing mark alone would cover the static span too (a cached span is
     always a prefix of the request), but only for a conversation that already
-    has history -- which is exactly the case the static mark is not needed for.
-
+    has history, which is the case where the static mark is not needed.
 
     Separate from AnthropicPromptCachingMiddleware because that one gates on
     isinstance(model, ChatAnthropic), which ChatAnthropicVertex is not, so
@@ -2111,12 +2088,11 @@ class _AnthropicVertexCaching(AgentMiddleware):
       the request only, and _advance stands down while it is in play.
     * Which part of that message carries the mark is _mark_placement's
       decision, and _advance refuses to advance onto a message it cannot place
-      one on. The two must agree: the first version of this chose the placement
-      independently, always tagging the last content block, which on a
-      tool-calling AIMessage is the tool_use -- discarded in serialization. The
-      state then recorded a cached span that was never sent. _record's span
-      check is the backstop.
-    * No model_settings["cache_control"]. That tags the LAST content block, i.e.
+      one on. The two must agree, or the state records a cached span that was
+      never sent: a mark on a tool-calling AIMessage's last content block, the
+      tool_use, is discarded in serialization. _record's span check is the
+      backstop.
+    * No model_settings["cache_control"]. That tags the last content block, i.e.
       that same nudge. Measured to change nothing.
 
     When to advance is a cost decision, not an interval -- see _advance_pays.
@@ -2125,7 +2101,6 @@ class _AnthropicVertexCaching(AgentMiddleware):
     prefix is still cached and is read at the read rate. So there is no prefix
     to re-buy, the EOQ cadence _recache_pays solves for does not apply, and the
     mark advances whenever the turn has another call to read it back.
-
 
     No token floor: Anthropic declines to cache prefixes under ~1024 tokens
     without erroring, so a floor here would duplicate a server-side rule.
@@ -2225,7 +2200,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
         return st
 
     def _calls_left(self, request) -> float:
-        """Model calls left in this turn, THIS ONE INCLUDED, for the end-of-turn
+        """Model calls left in this turn, this one included, for the end-of-turn
         brake in _advance_pays.
 
         BudgetMiddleware publishes it directly under CALLS_LEFT_KEY when a turn
@@ -2262,7 +2237,7 @@ class _AnthropicVertexCaching(AgentMiddleware):
             # state, so the tail is not where the next call's history will be.
             # A mark placed into it would cache a prefix nothing else shares.
             # The existing mark still ships: unlike the Vertex cache there is no
-            # stored prefix to step around, only a billing annotation.
+            # stored prefix to bypass, only a billing annotation.
             st.why = "empty retry"
             return
         target = _last_markable(messages)
@@ -2290,8 +2265,8 @@ class _AnthropicVertexCaching(AgentMiddleware):
             # re-buy: the first placement is free and unconditional.
             st.boundary, st.calls_since, st.why = target, 0, "first"
             return
-        # Chars, not the provider count, because the delta is the part NOT yet
-        # cached -- no usage report covers it.
+        # Measured in chars: the delta is the part not yet cached, so no
+        # usage report covers it.
         delta = (
             sum(len(str(m.content)) for m in messages[st.boundary : target])
             // _CHARS_PER_TOKEN
@@ -2306,11 +2281,10 @@ class _AnthropicVertexCaching(AgentMiddleware):
         Copied, never mutated: the list is graph state and the mark belongs to
         this request only (request.override is per call).
 
-        Where the mark goes is _mark_placement's call, not ours, and _advance
-        has already refused to move the boundary onto a message it returns None
-        for. Both sides asking the same function is the point: when the choice
-        of placement and the decision to advance disagreed, the state recorded
-        spans that were never sent.
+        Where the mark goes is _mark_placement's call, and _advance has already
+        refused to move the boundary onto a message it returns None for. Both
+        sides ask the same function so placement and the decision to advance
+        cannot disagree; disagreement records spans that were never sent.
         """
         i = boundary - 1
         msg = messages[i]
@@ -2353,17 +2327,9 @@ class _AnthropicVertexCaching(AgentMiddleware):
         read+create is the exact cached span; the check below compares it
         across an advance.
 
-        Debug, not info. This line was info on a call that advanced the mark,
-        as the instrument for B -- whether creation bills the whole span or
-        only the delta -- on the reasoning that advances were rare enough for
-        the noise to be worth it. Neither premise holds now. B is settled
-        against the provider's own token meter (cache_write_input came in ~47x
-        under what a full re-bill of the span would have required, so creation
-        bills the delta), and since the mark stopped stalling every call
-        advances, which made this one info line per model call.
-
-        The warning below stays: it is the detector for the mark silently not
-        reaching the wire, and that is not something to find in a debug log.
+        Debug level, because the mark advances on nearly every call and this
+        would otherwise be one info line per model call. The warning below
+        stays a warning: it detects the mark silently not reaching the wire.
         """
         read, create = _response_cache_stats(response)
         advanced = st.calls_since == 0
@@ -2383,13 +2349,13 @@ class _AnthropicVertexCaching(AgentMiddleware):
             # We moved the mark and the provider's measured span did not grow.
             # That is impossible if the mark arrived: a later cut point covers
             # strictly more. So it was dropped somewhere between here and the
-            # wire -- which is exactly how the tool_use placement bug looked,
-            # silently, for a full day (span pinned at the system+tools size
-            # across every call while the boundary advanced past it).
+            # wire, which is how a mark on a discarded tool_use block presents:
+            # span pinned at the system+tools size across every call while the
+            # boundary advanced past it.
             #
-            # Deliberately compares the span rather than testing create == 0:
-            # an advance onto a span that happens to be cached already returns
-            # read=span, create=0 and is perfectly healthy.
+            # Compares the span instead of testing create == 0: an advance onto
+            # a span that happens to be cached already returns read=span,
+            # create=0 and is healthy.
             log.warning(
                 "anthropic cache: advanced to %d/%d but the cached span is"
                 " still %d -- the mark is not reaching the wire.",
@@ -2488,11 +2454,11 @@ def base_middleware(
             backoff_factor=_RETRY_BACKOFF_FACTOR,
             max_delay=_RETRY_MAX_DELAY,
         ),
-        # After ModelRetryMiddleware (innermore) so it wraps the cache, whose
-        # step-aside its retry depends on. It owns the empty-candidate retry
-        # itself (one mutated call, uncached + nudged); the raise that follows
-        # is NOT retryable, so the retry layer passes it straight through to
-        # the harness rather than resending.
+        # After ModelRetryMiddleware (further in) so it wraps the cache, whose
+        # bypass its retry depends on. It owns the empty-candidate retry itself
+        # (one mutated call, uncached + nudged); the raise that follows is not
+        # retryable, so the retry layer passes it straight through to the
+        # harness instead of resending.
         _EmptyCandidateRetry(),
         # One caching middleware per Anthropic transport: upstream's gates on
         # ChatAnthropic, ours on ChatAnthropicVertex. At most one fires.
@@ -2510,7 +2476,7 @@ def base_middleware(
 
 
 # Vertex bills cache creation at the full input rate and cached reads at a
-# fraction of it, so a re-cache re-buys the ENTIRE prefix to move only the tail
+# fraction of it, so a re-cache re-buys the entire prefix to move only the tail
 # behind the boundary. The Gemini models this was tuned on priced reads at 10%
 # of input.
 #
@@ -2521,7 +2487,7 @@ def base_middleware(
 # input) at _GrowingPrefixCache construction and check the horizon rule below
 # against the listed rates; load_common warns when a config would enable it.
 _CACHE_READ_RATIO = 0.1
-# The cache serves its FULL prefix (ContextBudget cannot shed inside an immutable
+# The cache serves its full prefix (ContextBudget cannot shed inside an immutable
 # cache), so cap the cached prefix, and serve uncached if prefix+tail would
 # exceed a larger fraction -- otherwise the re-inflated prefix plus a recent tail
 # ContextBudget refuses to shed could exceed the window. The total cap leaves
@@ -2574,9 +2540,9 @@ def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
     """Whether to move an Anthropic breakpoint onto `delta` new tokens.
     Returns (due, reason) -- reason for the log.
 
-    Deliberately not _recache_pays. That rule solves for a cache whose creation
-    re-bills the whole prefix, which is what a Vertex cachedContents create
-    does. Anthropic does not: measured against claude-opus-5, moving the mark
+    Not _recache_pays: that rule solves for a cache whose creation re-bills the
+    whole prefix, which is what a Vertex cachedContents create does. Anthropic
+    does not: measured against claude-opus-5, moving the mark
     one step forward reported read=21230 -- the previous span, still cached and
     served at the read rate -- and create=10856, the new part alone. Reproduced
     over three runs, and again with the mark jumped two steps at once (read
@@ -2597,14 +2563,8 @@ def _advance_pays(delta: int, calls_left: float) -> tuple[bool, str]:
     reaches at most 20 positions back (a run of tool_use blocks is one
     position, a run of tool_result blocks another). Advancing every call keeps
     the jump at a step or two, far inside that. A rule that let the mark lag
-    for many steps would fall off the lookback and re-bill the whole span --
+    for many steps would fall off the lookback and re-bill the whole span,
     the very cost this rule assumes away.
-
-    This was the one number _AnthropicVertexCaching assumed rather than knew.
-    Assuming the worse branch was the right call while it was unmeasured -- the
-    error was one-sided -- but it cost most of the benefit: on the reviewed
-    commit the rule held the mark for eleven calls after the first placement
-    while a re-cache had been due since roughly the eighth.
     """
     if delta <= 0:
         return False, "no growth"
@@ -2626,10 +2586,10 @@ _NO_SAFE_MARK = "no safe mark"
 # verified against _anthropic_utils._format_message_anthropic:
 #   text  :193-200 (only when non-empty -- an empty text block is dropped)
 #   thinking / redacted_thinking / reasoning  :203-235
-# Deliberately not a catch-all. Unknown block types do reach the wire intact
-# (:257), but "we have not checked this one" is exactly the reasoning that hid
-# the tool_use bug for a day, so an unrecognized block counts as unsafe and the
-# boundary waits for a step we can vouch for.
+# Not a catch-all. Unknown block types do reach the wire intact (:257), but
+# only verified block types count as safe: an unrecognized block holds the
+# boundary back until a step we have checked, the same way an unchecked
+# tool_use block silently dropped the mark.
 _MARKABLE_BLOCKS = ("thinking", "redacted_thinking", "reasoning")
 
 
@@ -2662,14 +2622,13 @@ def _mark_placement(msg, prev=None, nxt=None):
     and `nxt` are the messages either side of it; a user-role neighbour decides
     one of the cases below.
 
-    This exists because the mark is a passenger inside the request body, and
+    This exists because the mark travels inside the request body, and
     langchain_google_vertexai rewrites that body on the way out: it drops keys
     it does not recognize, skips empty text blocks, merges runs of user-role
-    messages, and -- the one that bit us -- discards any tool_use block whose id
-    matches a tool_call and rebuilds it from the tool_call instead. See the TODO
-    above.
+    messages, and discards any tool_use block whose id matches a tool_call,
+    rebuilding it from the tool_call instead. See the TODO above.
 
-    Callers must consult this BEFORE recording that the boundary moved: the
+    Callers must consult this before recording that the boundary moved: the
     decision to advance and the ability to mark have to be taken together, or
     the state claims a cached span that was never sent.
     """
@@ -2701,7 +2660,7 @@ def _mark_placement(msg, prev=None, nxt=None):
             # HumanMessages. Whichever side the run continues on, this message
             # cannot carry the mark; a tool result or assistant text next to the
             # run still can, and a mark inside a content block survives the
-            # merge, which is why the list branch below needs no such check.
+            # merge, so the list branch below does not need this check.
             return None
         # additional_kwargs is only read for string content (:159-168), and
         # only an actual text block can carry the mark, so empty content has
@@ -2723,7 +2682,7 @@ def _last_markable(messages: list) -> int:
     rest point: the prefix is re-sent in full on every call and the mark only
     says where to cut.
 
-    So this deliberately does NOT reuse _last_step_boundary. That function
+    So this does not reuse _last_step_boundary. That function
     encodes Gemini's wire restrictions, and the shape it selects for a tail of
     [..., AI(tool_use), Tool] is the cut BETWEEN the call and its result -- the
     one message that can never hold a mark. On a turn that makes one tool call
@@ -2734,14 +2693,14 @@ def _last_markable(messages: list) -> int:
     against claude-opus-5 over three runs: a mark in a final ToolMessage's
     additional_kwargs writes the prefix (create 21230, read 0) and the next call
     reads it back whole (read 21230, create 0). A mark placed the old way, on
-    the assistant turn's tool_use block, wrote nothing at all (create 0) -- the
-    control that says these numbers measure the mark and not the weather.
+    the assistant turn's tool_use block, wrote nothing at all (create 0), the
+    control showing these numbers measure the mark.
 
     Marking the final message is safe because the list is append-only from here:
     every middleware that adds a message does it through the state reducer, so
     the message keeps its index next call. The exception is _EMPTY_NUDGE, which
-    _EmptyCandidateRetry overrides into the request alone; _advance stands down
-    for that call rather than encoding the exception here.
+    _EmptyCandidateRetry overrides into the request alone; _advance skips that
+    call instead of encoding the exception here.
     """
     for p in range(len(messages), 0, -1):
         prev = messages[p - 2] if p > 1 else None
@@ -2799,12 +2758,12 @@ async def _cache_create_rest(endpoint, model_id, prefix, oai_tools, ttl_minutes)
     the blocker is the client rather than the endpoint -- we build the request
     proto locally (no network) and post it ourselves.
 
-    Returns the BARE id, not the resource path. ChatVertexAI wraps whatever it is
+    Returns the bare id, not the resource path. ChatVertexAI wraps whatever it is
     given as projects/<p>/locations/<l>/cachedContents/<value>, and the create
-    response names the project by NUMBER while the model is built with the
-    project NAME -- so returning the full path yields a doubled, mixed-identity
-    name and a 400. The SDK hides this by exposing name.split("/")[-1]; this must
-    do the same.
+    response names the project by number while the model is built with the
+    project name, so returning the full path yields a doubled name with both
+    identities and a 400. The SDK hides this by exposing name.split("/")[-1];
+    this must do the same.
     """
     import aiohttp
     from google.protobuf.json_format import MessageToDict
@@ -2890,8 +2849,8 @@ async def _genai_cache_create(model_id, prefix, tools, ttl_minutes) -> str:
     Much less machinery than the vertexai path: the langchain-google-genai
     converter emits google.genai types directly (no proto hand-assembly, no
     aiplatform initializer globals to seed) and the client is natively async.
-    Returns the FULL resource name: ChatGoogleGenerativeAI passes
-    cached_content through verbatim, so the bare-id dance _cache_create_rest
+    Returns the full resource name: ChatGoogleGenerativeAI passes
+    cached_content through verbatim, so the bare-id handling _cache_create_rest
     documents does not apply here.
     """
     from google.genai import types
@@ -2923,10 +2882,10 @@ async def _genai_cache_create(model_id, prefix, tools, ttl_minutes) -> str:
 
 
 async def _genai_cache_delete(name: str) -> None:
-    # By bare id, letting the client rebuild the path under ITS project NAME:
-    # create returns a name carrying the project NUMBER, and the sandbox
+    # By bare id, letting the client rebuild the path under its project name:
+    # create returns a name carrying the project number, and the sandbox
     # proxy's allowlist is anchored to the configured name, so a number-path
-    # delete would be refused in the box. The same mixed-identity dance
+    # delete would be refused in the box. The same name/number mismatch
     # _cache_create_rest documents, at the other end of the lifecycle.
     client = _genai_client()  # a local for the await; see _genai_cache_create
     await client.aio.caches.delete(name=name.rsplit("/", 1)[-1])
@@ -2995,8 +2954,8 @@ class _PrefixState:
     model: object | None = None
     boundary: int = 0
     prefix_tokens: int = 0
-    # Calls this generation has served -- the k in the payback rule, so a cache
-    # earns its keep by being read, not by the history happening to grow.
+    # Calls this generation has served -- the k in the payback rule, so a
+    # re-cache is justified by reads, not by the history happening to grow.
     calls_since: int = 0
     seen_len: int = 0
 
@@ -3034,10 +2993,9 @@ class _GrowingPrefixCache(AgentMiddleware):
     -- a run keyed to None instead (a direct, serial CommitReview) is safe only
     because nothing else shares that key. The message list shrinking detects a
     fresh run reusing a key. An LRU bound + delete-on-evict caps live caches;
-    reactive recovery
-    (_is_cache_gone) rebuilds a cache that vanished/expired between turns; an
-    instance-level cooldown backs off a permanent create failure. One
-    cached_content per request, so this is the sole cache overlay (no _PersonaCache).
+    reactive recovery (_is_cache_gone) rebuilds a cache that vanished/expired
+    between turns; an instance-level cooldown backs off a permanent create
+    failure. One cached_content per request, so this is the sole cache overlay.
     """
 
     def __init__(
@@ -3083,11 +3041,10 @@ class _GrowingPrefixCache(AgentMiddleware):
         try:
             await self._delete(name)
         except Exception as e:
-            # WARNING, not debug: a delete that fails leaks a cached_content
-            # (billable, and -- if it were poisoned -- able to be re-read). The
-            # empty-candidate step-aside logs "dropping" before this; pairing a
-            # failed delete with a visible warning is how an operator tells a
-            # busted delete from a successful one at default log level.
+            # Warning level: a delete that fails leaks a cached_content (billable,
+            # and re-readable if it was poisoned). The empty-candidate cache bypass
+            # logs "dropping" before this; a visible warning on a failed delete
+            # lets an operator tell it from a successful one at default log level.
             log.warning(
                 "growing cache delete failed (%s: %s); relies on TTL",
                 type(e).__name__,
@@ -3129,9 +3086,9 @@ class _GrowingPrefixCache(AgentMiddleware):
             name = await self._create(prefix)
         except Exception as e:
             # Back off (instance-wide) so the failure does not retry every growth
-            # interval. A transient overload -- the prefill storm the cache exists
-            # to relieve -- backs off only briefly, so the next turn rebuilds once
-            # it clears; a permanent failure (floor/API/IAM) backs off for the long
+            # interval. A transient overload (the prefill overload the cache
+            # relieves) backs off only briefly, so the next turn rebuilds once it
+            # clears; a permanent failure (floor/API/IAM) backs off for the long
             # window so a long-lived conversation is not poisoned by inline retries.
             transient = _is_transient(e)
             cooldown = (
@@ -3175,11 +3132,11 @@ class _GrowingPrefixCache(AgentMiddleware):
         else:
             self._states.move_to_end(key)
 
-        # An empty candidate's mutated retry (_RETRY_EMPTY): serve this ONE call
+        # An empty candidate's mutated retry (_RETRY_EMPTY): serve this one call
         # uncached, so the retry cannot re-read the prefix that may have produced
-        # the empty. Step aside rather than delete -- an empty candidate is usually
-        # a one-off flake, and tearing the cache down would make a single flake
-        # cost a full uncached prefix resend on every later call in the turn.
+        # the empty. Bypass the cache instead of deleting it: an empty candidate is
+        # usually a one-off flake, and tearing the cache down would make a single
+        # flake cost a full uncached prefix resend on every later call in the turn.
         #
         # An unparsable tool call retry (_RETRY_UNPARSABLE) also carries an
         # ephemeral nudge that never enters graph state, so it too skips seen_len
@@ -3232,16 +3189,16 @@ class _GrowingPrefixCache(AgentMiddleware):
         if st.name is not None and st.boundary < len(messages):
             tail = messages[st.boundary :]
             # Window guard: the cache serves its full (un-sheddable) prefix, so if
-            # prefix + tail would exceed the window, step aside and send the full
-            # request uncached -- ContextBudget then sheds it normally.
+            # prefix + tail would exceed the window, bypass the cache and send the
+            # full request uncached; ContextBudget then sheds it normally.
             #
             # Estimate the total as max(prefix + tail chars, the last call's full
-            # reported input), NOT prefix_tokens + _estimate_input_tokens(tail):
+            # reported input), not prefix_tokens + _estimate_input_tokens(tail):
             # the tail's own usage floor (_prev_input_tokens) is already the last
-            # FULL prompt (prefix + tail), so adding prefix_tokens on top double-
-            # counts the prefix and wrongly steps aside on large contexts -- the
-            # very turns the cache exists for. (The prefix is tools+system, not in
-            # the message content, so it cannot come from a char count of tail.)
+            # full prompt (prefix + tail), so adding prefix_tokens on top double-
+            # counts the prefix and wrongly bypasses the cache on large contexts,
+            # the very turns the cache exists for. (The prefix is tools+system, not
+            # in the message content, so it cannot come from a char count of tail.)
             tail_chars = sum(len(str(m.content)) for m in tail) // _CHARS_PER_TOKEN
             total = max(st.prefix_tokens + tail_chars, _prev_input_tokens(tail))
             if total <= _GROWING_MAX_TOTAL:

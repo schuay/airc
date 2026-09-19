@@ -407,8 +407,8 @@ class HandoverConfig:
     # "fix" jobs (a perf or task job sailed through a config that promised
     # repro-gathering). Defaults to repro alone, the one kind that cannot
     # produce a CL; every kind that uploads, runs CQ, or spends Pinpoint is an
-    # explicit opt-in. Deliberately no wildcard: a future kind must be a
-    # decision in this list, not a default that appears when it is added. The
+    # explicit opt-in. No wildcard: a new kind must be added to this list
+    # explicitly instead of appearing as a default when it is added. The
     # vocabulary is the apps' (the coding suite: bugfix, repro, perf, task),
     # validated by them -- core must not depend on a component package, so the
     # strings stay opaque here. [] is the drain state; the components warn
@@ -555,7 +555,7 @@ class Config:
             return profile
         # No entry to read: [models] may be absent entirely, or filter may be
         # riding its fallback to the default id. The id field stays the one of
-        # record and the knobs stay empty -- a role does NOT inherit another
+        # record and the knobs stay empty -- a role does not inherit another
         # role's depth, because the reason to name two roles is that they differ.
         return ModelProfile(
             key=role, id=self.default_model if role == "default" else self.filter_model
@@ -765,16 +765,15 @@ def write_template_config(
         raise SystemExit(f"{path} already exists; pass --force to overwrite")
     body = TEMPLATE_CONFIG
     if plugin_module:
-        # plugin_module is a CORE key, so core writes it -- the plugin's own text
+        # plugin_module is a core key, so core writes it; the plugin's own text
         # cannot, having landed after core already declared [airc]. Uncommenting
-        # here is what makes the emitted file runnable rather than a form to fill
-        # in.
+        # it here makes the emitted file runnable instead of a form to fill in.
         body = body.replace(
             '# plugin_module = "myapp.app"', f'plugin_module = "{plugin_module}"'
         )
     if plugin_template:
-        # A blank line between the two halves regardless of how the plugin's
-        # text is terminated, so the seam reads the same for every plugin.
+        # A blank line between core's text and the plugin's regardless of how
+        # the plugin's text ends.
         body = f"{body.rstrip()}\n\n{plugin_template.lstrip()}"
         if not body.endswith("\n"):
             body += "\n"

@@ -54,13 +54,12 @@ log = logging.getLogger(__name__)
 EventHook = Callable[[str, str, str], Awaitable[None]]
 
 
-# What holds for ANY room, whatever it is about and however it is rendered.
-# Deliberately NOT here: how long a post should be, how it should be laid out,
-# and which citation form to use. Those belong to the deployment, and room.md
-# -- spliced in directly after this -- can state them with a precision one room
-# can afford and this constant cannot. A vaguer second copy here is not a floor
-# under a deployment that says it better; it is a second rule to satisfy, and
-# an agent that has two will meet the looser one.
+# What holds for any room, whatever it is about and however it is rendered.
+# Not here: how long a post should be, how it should be laid out, and which
+# citation form to use. Those belong to the deployment, and room.md (spliced
+# in directly after this) can state them with a precision one room can afford
+# and this constant cannot. A vaguer second copy here would be a second rule
+# to satisfy, and an agent with two meets the looser one.
 ROOM_RULES = """\
 # Room rules
 
@@ -193,14 +192,14 @@ def strip_self_attribution(text: str, self_name: str) -> str:
     labels its own. Only the leading prefix, and only the agent's own name -- the
     room adds attribution itself, so the echoed one would render twice.
 
-    This deliberately does NOT police lines attributed to OTHER participants. That
-    guard existed and was removed: matching a persona name in brackets cannot tell
-    a fabricated line from a quoted one, and in a room whose subject matter uses
-    those same words as tags (a V8 commit subject opens "[compiler] ..."), quoting
-    is the more common case. Dropping a line is silent and unrecoverable, so a
-    false positive costs more than the cosmetic problem it prevents. Nothing
-    downstream depended on it: routing keys on MessageKind, and format_transcript's
-    bracket-vs-colon split already makes an echoed line inert for addressing.
+    Lines attributed to other participants are left alone: matching a persona
+    name in brackets cannot tell a fabricated line from a quoted one, and in a
+    room whose subject matter uses those same words as tags (a V8 commit subject
+    opens "[compiler] ...") quoting is the more common case. Dropping a line is
+    silent and unrecoverable, so a false positive costs more than the cosmetic
+    problem it prevents. Nothing downstream depends on it: routing keys on
+    MessageKind, and format_transcript's bracket-vs-colon split already makes an
+    echoed line inert for addressing.
     """
     text = text.strip()
     lowered = text.lower()
@@ -228,12 +227,12 @@ def build_turn_content(
     here we only frame the transcript as input.
 
     A current-time line leads the content. Agents need it constantly -- "this
-    week's offers", timer math, dating a memory entry -- and it goes HERE, in the
-    per-turn tail, deliberately NOT in the cached system prompt: a timestamp that
-    changed every turn would bust the prefix cache. As uncached tail content it is
+    week's offers", timer math, dating a memory entry -- and it goes here, in the
+    per-turn tail, not in the cached system prompt: a timestamp that changed
+    every turn would bust the prefix cache. As uncached tail content it is
     free. `now` is injectable for tests; None reads the wall clock.
 
-    The memory index is deliberately NOT here. It travels as its own marked
+    The memory index is not here either. It travels as its own marked
     message so MemoryIndexMiddleware can find the last copy in the conversation
     and skip repeating it; folded into this text it would be indistinguishable
     from the turn around it, and so repeated every turn.

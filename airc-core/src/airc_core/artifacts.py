@@ -57,12 +57,10 @@ class ArtifactLog:
     ) -> Path | None:
         """`write`, synchronously. For a caller that cannot await: the one real
         case is a cancellation handler preserving its artifact during shutdown,
-        where an await invites a second cancel and the file is the only thing
-        standing between a human and losing the work.
+        where an await invites a second cancel.
 
-        The write is a single small file, so blocking a caller that COULD await
-        costs it nothing measurable -- `write` exists for tidiness, not because
-        the thread is load-bearing.
+        The write is a single small file, so blocking a caller that could await
+        costs it nothing measurable; `write` exists for tidiness.
         """
         if self._root is None:
             return None
@@ -78,7 +76,7 @@ class ArtifactLog:
         except Exception as e:
             # Best-effort trace: any failure (disk full, bad path, an encode
             # error) is logged and swallowed -- it must never sink, or re-loop,
-            # the work it traces. Broad on purpose: a non-OSError here (e.g.
+            # the work it traces. Broad because a non-OSError here (e.g.
             # UnicodeEncodeError, a ValueError) used to escape and fail the turn.
             log.warning("artifacts: %s/%s: not written: %s", category, key, e)
             return None
@@ -93,7 +91,7 @@ class ArtifactLog:
 
         Returns the path written, or None when disabled or the write failed. A
         caller that only wants the trace can ignore it; one whose artifact is the
-        recovery path for work it is about to abandon has to be able to NAME the
+        recovery path for work it is about to abandon has to be able to name the
         file in the message telling a human to go read it -- and to say so
         loudly when there is no file to name.
         """

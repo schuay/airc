@@ -3,7 +3,7 @@
 
 """airc-prune: age out the content of old threads, then reclaim the bytes.
 
-What a retention policy is about is message content, and this room stores it
+A retention policy is about message content, and this room stores it
 twice: verbatim in `messages.text` (airc.db) and again, per persona, inside the
 LangGraph checkpoint blobs (airc.ckpt.db, which is the bulk of the volume). A
 sweep that skips the checkpoints has not scrubbed anything.
@@ -17,11 +17,11 @@ link vetoes regardless. Everything else (unknown links, unlinked local threads)
 falls to the short window: misclassification can only scrub early, never
 retain DM content past its window.
 
-The shape is REDACT, not delete. Blanking text keeps the rows, and with them the
-five dedup keys that stop a real-world event being announced twice
+The sweep redacts instead of deleting. Blanking text keeps the rows, and with
+them the five dedup keys that stop a real-world event being announced twice
 (`commit_threads`, `chat_threads`, `chat_seen_messages`, `handover_jobs`,
-`delivered_results`). That
-matters concretely: an icompleteu CL job polls CQ for hours and can sit awaiting
+`delivered_results`). That matters concretely: an icompleteu CL job polls CQ
+for hours and can sit awaiting
 review for days, so its result can arrive for a thread this sweep already
 scrubbed. With the keys intact that result routes into the existing thread; with
 the rows deleted it would create a new thread and post about a commit whose
@@ -54,8 +54,8 @@ from pathlib import Path
 from .config import CONFIG_DIR, load_config
 
 # Every kind except this one is redacted. A str, not MessageKind, because the
-# column stores the bare value and the pruner deliberately does not import the
-# store (see _connect).
+# column stores the bare value and the pruner does not import the store (see
+# _connect).
 _RETAINED_KIND = "system"
 
 # Thread-keyed tables with no content worth an audit trail and no dedup role:
@@ -68,7 +68,7 @@ _RETAINED_KIND = "system"
 # working state for a conversation whose content is being redacted anyway).
 # Ordered parent-last so a future FK cannot trip.
 #
-# plugin_state deliberately does NOT feed live_threads: its payload is opaque to
+# plugin_state does not feed live_threads: its payload is opaque to
 # core, so core cannot tell an open record from a spent one, and treating any row
 # as liveness would make a thread with one stale row permanently unprunable.
 _DROP_TABLES = (
@@ -87,7 +87,7 @@ _UNIT_SECONDS = {"h": 3600, "d": 86400, "w": 604800}
 def parse_duration(text: str) -> float:
     """A retention window ("30d", "6w", "48h") in seconds.
 
-    Deliberately a small closed set of units: a bare number would be ambiguous
+    A small closed set of units: a bare number would be ambiguous
     between seconds and days, and getting that wrong silently purges everything.
     """
     m = _DURATION_RE.match(text.strip())
@@ -139,17 +139,16 @@ def _connect(path: Path) -> sqlite3.Connection:
 def check_writable(db: sqlite3.Connection, path: Path) -> str | None:
     """None if this database can be written exclusively, else why not.
 
-    The sweep's whole premise is that the room is stopped: it deletes
-    checkpoints, then redacts, then vacuums. Without this check a still-running
-    room fails the run HALFWAY -- observed: the checkpoint delete and vacuum
-    succeeded, then airc.db raised "database is locked", so the personas lost
-    their context and not one byte of content was scrubbed. Loud, but the worst
-    possible split.
+    The sweep requires the room to be stopped: it deletes checkpoints, then
+    redacts, then vacuums. Without this check a still-running room fails the
+    run halfway. Observed: the checkpoint delete and vacuum succeeded, then
+    airc.db raised "database is locked", so the personas lost their context and
+    no content was scrubbed.
 
-    BEGIN IMMEDIATE takes the write lock without writing anything, which is
-    exactly the question being asked, and the rollback leaves no trace. Checked
-    on BOTH files before either is touched, so a locked airc.db is discovered
-    while the checkpoints are still intact.
+    BEGIN IMMEDIATE takes the write lock without writing anything, which is the
+    question being asked, and the rollback leaves no trace. Checked on both
+    files before either is touched, so a locked airc.db is discovered while the
+    checkpoints are still intact.
     """
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -162,8 +161,8 @@ def check_writable(db: sqlite3.Connection, path: Path) -> str | None:
 def existing_tables(db: sqlite3.Connection) -> set[str]:
     """The tables this database actually has.
 
-    Not a paranoia check: NOT opening through Store means the schema is never
-    created or migrated, so a store written by an older room genuinely lacks
+    Because this does not open through Store, the schema is never created or
+    migrated, so a store written by an older room genuinely lacks
     tables this code names. The live store at the time of writing had no
     `timers`, `pending_bugs`, `chat_headline_findings`, or `thread_seen_floor` --
     and an unguarded query against one aborts the sweep (or, mid-transaction,
@@ -461,10 +460,9 @@ def redact_threads(
 
 def vacuum(db: sqlite3.Connection) -> None:
     """Reclaim the freed pages. Without this the content is still on disk in the
-    freelist, and "the bytes are still there" is the wrong answer to a policy
-    question -- which is why a failure here fails the whole run rather than being
-    reported as a partial success. Truncates the WAL first so its frames are not
-    left holding the old pages either.
+    freelist, which fails the policy, so a failure here fails the whole run
+    instead of reporting a partial success. Truncates the WAL first so its
+    frames are not left holding the old pages either.
     """
     db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     db.execute("VACUUM")
@@ -503,7 +501,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=parse_duration,
         default=parse_duration("540d"),
         metavar="DURATION",
-        # Defaulted long rather than to --older-than: the asymmetric footgun is
+        # Defaulted long rather than to --older-than: the asymmetric risk is
         # a hand-run without the flag wiping space threads 17 months early
         # (irreversible), not a deploy without the split retaining them (idle
         # bytes). A single-window sweep is --space-older-than equal to
@@ -534,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
     db_path = args.db or cfg.db_path
     # Derived, not configured: the room derives the checkpoint path from db_path
     # the same way (runner.py), and there is no ckpt_path config key. Deriving it
-    # identically is what keeps `--db` from vacuuming the wrong second file.
+    # identically keeps `--db` from vacuuming the wrong second file.
     ckpt_path = db_path.with_suffix(".ckpt.db")
     if not db_path.exists():
         print(f"no store at {db_path}", file=sys.stderr)
@@ -597,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             print("aborted")
             return 1
 
-        # Checkpoints FIRST, deliberately. A crash between the two files leaves
+        # Checkpoints first. A crash between the two files leaves
         # orphaned checkpoints, which are harmless (nothing reads a checkpoint
         # without a live thread row) and a re-run clears them. The reverse order
         # would leave live threads with amputated persona state.

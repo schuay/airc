@@ -3,7 +3,7 @@
 
 """Derive the memory index for per-turn injection.
 
-There is deliberately NO stored index file (no MEMORY.md to drift). The index is
+There is no stored index file (no MEMORY.md to drift). The index is
 produced on demand by one `git grep` over the entries' `summary:` frontmatter --
 so it is complete and fresh by construction: the store's schema hook REQUIRES a
 `summary`, auto-commit means every entry is committed, and git grep scans tracked
@@ -26,7 +26,7 @@ import subprocess
 from pathlib import Path
 
 # Bound the injected block so a store that has grown large cannot dominate every
-# turn's tail. Hitting this cap is the tripwire to move off "inject the whole
+# turn's tail. Hitting this cap is the signal to move off "inject the whole
 # index" onto query-keyed retrieval.
 _MAX_INDEX_BYTES = 20_000
 _GIT_TIMEOUT_S = 10.0

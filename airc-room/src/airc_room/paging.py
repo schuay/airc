@@ -36,7 +36,7 @@ def _budget_for_pages(
     page (widest count, so the answer does not depend on which page it lands
     on) and a fence that may reopen and close.
 
-    A ceiling, not a promise, which is why it is private: _cut stops at a clean
+    A ceiling, not a promise, so it is private: _cut stops at a clean
     boundary, so a page closes early whenever the text has no break near its
     end, and the spilled remainder can still need one more page. A caller that
     needs the bound to hold has to measure -- see truncate_to_pages.
@@ -56,7 +56,7 @@ def truncate_to_pages(
 ) -> str:
     """`text`, cut until it pages into at most `pages` pages. Appends `note`.
 
-    Measured rather than budgeted. The arithmetic ceiling assumes every page
+    Measured by paging instead of computed. The arithmetic ceiling assumes every page
     fills, and a page that ends on a clean break does not: a repro whose diff
     is one long minified line can leave most of a page unused, so a character
     cap picked to look right is a cap that holds for the text it was tuned on.
@@ -83,12 +83,12 @@ def _cut(text: str, limit: int) -> int:
     """Choose a nonempty prefix no longer than limit, preferring clean breaks."""
     if len(text) <= limit:
         return len(text)
-    # The break must END within the budget, not start there: a needle whose last
+    # The break must end within the budget, not start there: a needle whose last
     # character sits at index `limit` yields a prefix of limit + 1. One over is
     # enough to breach, because a fenced page already spends its whole
     # _FENCE_OVERHEAD allowance and has no slack left to absorb it.
     window = text[:limit]
-    # The LATEST break, not the strongest one anywhere in the window. Ranking the
+    # The latest break, not the strongest one anywhere in the window. Ranking the
     # needles instead costs a whole page whenever a paragraph break sits early:
     # a repro post opens "headline\n\n" and then runs thousands of unbroken diff
     # lines, so preferring "\n\n" put the headline alone on page one and pushed
@@ -144,12 +144,12 @@ def _fence_open_after(text: str, opened: int) -> int:
 
     Takes the state at the start in the same terms. A walk rather than a parity
     count, because the two directions do not obey the same rule: a fence line
-    carrying an info string (```js) can only OPEN a block. Markdown closes only
+    carrying an info string (```js) can only open a block. Markdown closes only
     on backticks and whitespace, so a ```js inside an inlined diff is content,
     and counting it as a toggle would close a block the renderer leaves open --
     then every later page is decorated inside out.
 
-    The LENGTH rather than a flag, because markdown closes a fence only on a run
+    The length, not a flag, because markdown closes a fence only on a run
     at least as long as the one that opened it: a block opened with four
     backticks to survive quoting a fence is not closed by the three-backtick line
     inside it. Read as a flag, that line ended the block, the closing

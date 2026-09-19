@@ -15,7 +15,7 @@ The cascade, in decreasing precision:
      largest real failure class (replace_part_with_missing_leading_whitespace)
   3. a dotdotdots tier for elided `...` sections (try_dotdotdots)
 
-Fuzzy edit-distance matching is deliberately absent. In aider it sits below a
+Fuzzy edit-distance matching is absent. In aider it sits below a
 bare `return` in replace_most_similar_chunk and never runs on the apply path; a
 fuzzy apply that silently mismatches is worse than a clean failure the model can
 retry. SequenceMatcher survives only in find_similar_lines, for the diagnostic
@@ -132,7 +132,7 @@ def try_dotdotdots(whole, part, replace):
         raise ValueError("Unmatched ... in SEARCH/REPLACE block")
 
     # Drop the odd indices (the `...` separators), keeping the content pieces.
-    # Rebinding the parameters is deliberate: the split form is what every line
+    # The parameters are rebound because the split form is what every line
     # below means by these names, and a second pair would invite using the wrong one.
     part_pieces = [part_pieces[i] for i in range(0, len(part_pieces), 2)]
     replace_pieces = [replace_pieces[i] for i in range(0, len(replace_pieces), 2)]

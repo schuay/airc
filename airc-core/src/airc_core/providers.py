@@ -3,17 +3,14 @@
 
 """Per-provider facts, as data rather than as branches.
 
-Three separate tests for "is this Claude?" had accumulated: a model_id prefix in
-make_model, an isinstance check in the caching middleware, and a boolean
-parameter on a boundary function. Each grew its own notion of what Claude does
-differently, so a fact learned at one of them did not reach the others. The
-sampling TypeError and the unreadable finish_reason were both that shape.
+One table keeps separate "is this Claude?" tests (a model_id prefix in
+make_model, an isinstance check in a middleware, a boolean parameter) from each
+growing their own notion of what a provider does differently.
 
 What lives here is the part that is data: which constructor kwargs a provider
-rejects, and what it names the fields in its responses. Behaviour stays in code.
-A middleware that has to know one client library's serialization rules is not a
-table entry, and pretending otherwise would trade three branches for a
-configuration language.
+rejects, and what it names the fields in its responses. Behaviour stays in code:
+a middleware that has to know one client library's serialization rules is not a
+table entry.
 """
 
 from __future__ import annotations
@@ -40,9 +37,8 @@ class ProviderTraits:
     # is not "this provider cannot think" -- Gemini thinks too, but it is
     # configured by a token budget (thinking_budget), which is a different knob
     # with a different unit. A level is refused on such a provider rather than
-    # converted into a budget, for the reason the module header gives: an
-    # invented equivalence changes the request into something nobody asked for,
-    # and this one would do it to the most expensive parameter there is.
+    # converted into a budget: an invented equivalence would change the request
+    # into something nobody asked for, on the most expensive parameter there is.
     supports_effort: bool = False
     # Whether the reported output_tokens already includes thinking. Every
     # provider bills thinking at the output rate, but the langchain-google-vertexai

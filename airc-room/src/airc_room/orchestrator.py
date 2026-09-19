@@ -79,7 +79,7 @@ FollowUp = Callable[["TurnContext"], Awaitable[None]]
 class Disposition(StrEnum):
     """What a message handler decided about the message it was given.
 
-    CONSUMED suppresses ORCHESTRATION only. The message is already persisted and
+    CONSUMED suppresses orchestration only. The message is already persisted and
     already delivered to every transport by the time a handler sees it, and its
     `kind` is left alone -- so the store's history stays honest about what was
     said, and only the routing (mention parse, coordinator, turns) is skipped.
@@ -97,12 +97,10 @@ class Disposition(StrEnum):
 class MessageHandler(Protocol):
     """A plugin's observer on messages, run before routing.
 
-    The room pushes messages end to end -- transport, room.post, per-thread
-    worker, turn -- but the only consumer at the end of that pipeline is a
-    persona woken by a mention. A plugin had no delivery at all, so every plugin
-    feature reacting to what a human typed had to reconstruct arrival by
-    re-reading SQLite on a timer. This is the seam that pushes instead: a handler
-    IS the delivery, so a near-miss can be answered synchronously, once.
+    The only other consumer of an arriving message is a persona woken by a
+    mention, so without this a plugin feature reacting to what a human typed
+    would have to poll the store. A handler receives each message once,
+    synchronously, before routing.
 
     `name` is for logs (a handler that raises is named there).
     """
@@ -114,8 +112,8 @@ class MessageHandler(Protocol):
 
 log = logging.getLogger(__name__)
 
-# Addressing grammar: "handle:" anywhere in the text is an address, full
-# stop. This stays unambiguous because attribution uses a different shape
+# Addressing grammar: "handle:" anywhere in the text is an address.
+# This stays unambiguous because attribution uses a different form
 # everywhere agents and humans see it ("[sender] text" in transcripts,
 # "*sender* text" in Chat), so the colon belongs exclusively to addressing.
 # @ is avoided entirely (Chat reserves it for its own mention UI and personas
@@ -322,9 +320,9 @@ class _PendingMsg:
 class TurnContext:
     """The narrow room handle a follow-up handler drives its turn through.
 
-    The room owns turn EXECUTION (it has already acquired the concurrency slot
+    The room owns turn execution (it has already acquired the concurrency slot
     and shown the typing indicator before the handler runs); the handler owns the
-    RESPONSE. These are the only primitives it needs -- run a plain or structured
+    response. These are the only primitives it needs -- run a plain or structured
     turn, post as the responder, read the announcement and its persisted meta --
     so a plugin never reaches into orchestrator internals. Both run_* wrappers
     apply the turn timeout and the room's standard error UX, exactly as the plain
@@ -457,7 +455,7 @@ class Orchestrator:
     def _recover(self) -> None:
         """Re-enqueue persisted messages above each thread's watermark.
 
-        Synchronous on purpose (zero awaits), and the orchestrator must stay
+        Synchronous (zero awaits), and the orchestrator must stay
         the first task cli creates: recovery then completes before any
         transport or watcher coroutine runs a step, so a message can never be
         both recovered here and delivered via the inbox.
@@ -601,7 +599,7 @@ class Orchestrator:
         they owe back: a handler must be idempotent, exactly like every bus
         subscriber in the suite.
 
-        Handlers run INLINE, so a slow one delays this thread's routing (and only
+        Handlers run inline, so a slow one delays this thread's routing (and only
         this thread's). They are meant for store reads/writes, a bus publish, and
         at most a post; anything heavier belongs on the bus.
 

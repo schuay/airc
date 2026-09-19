@@ -99,14 +99,14 @@ class HarnessRun:
     # FUNCTION_CALL/MAX_TOKENS) -- which otherwise both surface as exit_code 1.
     finish_reason: str = ""
     # The terminating candidate carried no text and no tool calls: a zero-part
-    # reply. This is the silent-dead-turn signature -- a provider-side empty
-    # candidate that still reads finish_reason=STOP (so finish_reason alone looks
-    # benign). Lets the loop's abandon reason name it rather than a bare STOP.
+    # reply. This is the silent dead turn: a provider-side empty candidate that
+    # still reads finish_reason=STOP (so finish_reason alone looks benign). Lets
+    # the loop's abandon reason name it instead of a bare STOP.
     empty_candidate: bool = False
     # What this turn cost, agent calls plus the overhead beside them (a ceiling
     # summarization, an explicit cache). The harness already prices it to log
     # and journal it; handing it back is what lets the loop bound a step in
-    # dollars without reading anything back off disk. Both halves, matching the
+    # dollars without reading anything back off disk. Both parts, matching the
     # rows _job_usage sums, so a step's running total and the job's reported
     # cost are the same arithmetic.
     usage: Usage = field(default_factory=Usage)

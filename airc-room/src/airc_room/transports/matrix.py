@@ -136,7 +136,7 @@ class MatrixTransport:
         self._cfg = cfg
         self._room = room
         self._store = store
-        # store_sync_tokens stays off: v1 deliberately does NOT persist the sync
+        # store_sync_tokens stays off: v1 does not persist the sync
         # position, so a restart resumes from "now" and never floods the room
         # with a downtime backlog. encryption_enabled is the E2E seam, off for v1.
         client_config = AsyncClientConfig(

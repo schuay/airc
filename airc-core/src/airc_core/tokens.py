@@ -14,7 +14,7 @@ the dollars they cost at the price in force when the row was written. Cost is
 stored, not derived at query time, because prices change and a ledger should
 say what was paid.
 
-The ledger is deliberately ignorant of threads: it stores an opaque
+The ledger knows nothing about threads: it stores an opaque
 `thread_id` integer and never joins a titles table (that lives in airc's own
 store). `top_threads` returns ids and sums; a caller that wants titles resolves
 them against whatever store owns the threads. This keeps the ledger free of any
@@ -155,11 +155,10 @@ class TokenLog:
     def enabled(self) -> bool:
         """Whether the ledger is actually being kept.
 
-        The rest of TokenLog fails soft exactly as its docstring promises: a
-        disabled log's queries all return 0, which is right for a report (say
-        nothing rather than crash) and wrong for exactly one reader, the window
-        cap. A cap that reads that zero concludes nothing was spent and stops
-        existing at the moment nobody can see the spending.
+        The rest of TokenLog fails soft: a disabled log's queries all return 0,
+        which is right for a report (say nothing rather than crash) and wrong
+        for one reader, the window cap, which would conclude nothing was spent
+        at the moment nobody can see the spending.
         """
         return self._db is not None
 
@@ -204,7 +203,7 @@ class TokenLog:
             # replace the model error or cancellation the caller is handling.
             #
             # BUSY/LOCKED is the transient case, and in a suite where several
-            # components share one store it is the LIKELY case: another writer
+            # components share one store it is the likely case: another writer
             # held the file for a moment. Disabling the ledger on it turned one
             # collision into silent zero accounting until restart. Drop the one
             # row (roll back so no transaction dangles) and keep the ledger;
@@ -389,7 +388,7 @@ class SpendWindows:
     bad night is that somebody is watching it. This is that bound: one query per
     window at each intake boundary, `usd_total(now - window) < cap`.
 
-    Deliberately not a reservation. It does not know what the work it admits
+    Not a reservation. It does not know what the work it admits
     will cost, and exact observance is not what the cap is for: spend converges
     to the cap plus one generation of work already running, and that generation
     is bounded by the per-pass and per-job budgets. Nothing already admitted is
@@ -398,7 +397,7 @@ class SpendWindows:
 
     The windows roll rather than aligning to a calendar: a calendar week permits
     the whole cap on Sunday night and the whole cap again on Monday morning,
-    where a rolling window is a leaky bucket that actually bounds, with no
+    where a rolling window bounds continuously, with no
     timezone or DST question. What rolling costs is that it never visibly
     resets, so a bound fleet reads as a stuck one; `token_report.py` answers
     that by naming when the next dollars free up.

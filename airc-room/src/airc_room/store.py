@@ -25,7 +25,7 @@ BADGE_BUCKETS = ("blocker", "high", "medium", "low", "unknown", "info")
 
 # Retention: `airc-prune` (airc_room.prune) ages out old threads -- it redacts
 # message text/sender for every kind but SYSTEM, drops the thread's persona
-# checkpoints, and vacuums both files. It deliberately keeps the dedup keys
+# checkpoints, and vacuums both files. It keeps the dedup keys
 # (commit_threads, chat_threads, chat_seen_messages, handover_jobs,
 # delivered_results) so a late
 # event cannot re-announce a thread whose discussion was just purged. Run it
@@ -367,7 +367,7 @@ class Store:
                 "ALTER TABLE messages ADD COLUMN sender_id TEXT NOT NULL DEFAULT ''"
             )
         # chat_threads gained the DM/space distinction for per-class retention.
-        # Deliberately no backfill: existing rows stay NULL (unknown), which the
+        # No backfill: existing rows stay NULL (unknown), which the
         # pruner treats as not-a-space -- the direction that can only scrub
         # early, never retain a DM past its window. Live DM links self-heal on
         # the next inbound message (the transport re-links with is_dm set).
@@ -866,12 +866,12 @@ class Store:
     def result_delivered(self, job_id: str) -> bool:
         """Whether this result's outcome has already been posted to the room.
 
-        Result delivery is at-least-once by design (a crash between the state
-        save and the publish re-finalizes on restart), and the two things a
-        result does on arrival -- post it to the room, file its bug -- are the
-        two that are not idempotent. The finding badge and the fix enqueue key
-        off ids and already are. Durable rather than in-memory because the
-        redelivery this guards against is the one a RESTART causes.
+        Result delivery is at-least-once (a crash between the state save and
+        the publish re-finalizes on restart), and the two things a result does
+        on arrival -- post it to the room, file its bug -- are the two that are
+        not idempotent. The finding badge and the fix enqueue key off ids and
+        already are. Durable because the redelivery this guards against is
+        caused by a restart.
         """
         row = self._db.execute(
             "SELECT 1 FROM delivered_results WHERE job_id = ?", (job_id,)
@@ -1028,7 +1028,7 @@ class Store:
         """Remove one resolved placeholder row, by Chat message name.
 
         Keyed by the (globally unique) message name, not (thread, agent), and
-        called only AFTER the Chat-side resolve: the row is the durable promise
+        called only after the Chat-side resolve: the row is the durable promise
         that the card gets cleaned up, so deleting it first would strand the
         card on a crash in between, and deleting by agent could take out a
         newer placeholder the same agent posted meanwhile."""

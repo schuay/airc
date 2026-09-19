@@ -13,7 +13,7 @@ All-or-nothing, rather than aider's partial apply, because our chunks are small:
 resending the fixed array is cheap, and it never leaves the file half-edited
 under searches the model computed against the original. Cross-file edits are
 separate calls (the model emits several in one turn); a single typed `path` per
-call is what kills wrong-file application.
+call prevents wrong-file application.
 """
 
 from .editblock import find_similar_lines, replace_most_similar_chunk

@@ -4,7 +4,7 @@
 """The plugin contract: what a module must expose to be loaded as an airc app.
 
 The room (airc-room) is domain-neutral. It becomes a concrete app -- the V8
-coding room, a grocery room -- by loading ONE plugin module named in config
+coding room, a grocery room -- by loading one plugin module named in config
 (`[airc] plugin_module`) and calling a small, fixed set of factories on it. Core
 never imports a plugin by name; it resolves the module dynamically and validates
 it against this contract, so a non-coding deploy pulls in none of another app's
@@ -34,7 +34,7 @@ Optional (duck-typed; absent means the room's default behavior):
   plugin whose personas come from a configured source rather than its package.
 - parse_config(cfg) -> object  -- validate and type the plugin's own [airc]
   sub-table (carried on cfg.plugin_config), returning the config object its
-  subscribers read. Owning this is what lets core delete the domain config fields.
+  subscribers read. This lets core drop the domain config fields.
 - config_template() -> str | None  -- the plugin's own commented TOML sections,
   appended to core's starter config by `airc --init-config --plugin <module>`.
   The counterpart to parse_config: a plugin that parses its own sections also
@@ -46,14 +46,14 @@ Optional (duck-typed; absent means the room's default behavior):
 - build_local_tools(cfg, *, room=None) -> dict[str, list[BaseTool]]  -- local (non-MCP)
   langchain tools the plugin contributes, keyed by tool_group name. The room
   grants a persona the tools under a group iff that group is in the persona's
-  tool_groups -- the SAME gate MCP tools use, so a persona's grants stay in its
+  tool_groups -- the same gate MCP tools use, so a persona's grants stay in its
   agent.toml whether the tool is MCP or local. These groups live only in this
   dict (not in the [tool_groups] config), so a persona may name one without it
   being a configured MCP group. Used for tools that need in-process wiring an MCP
   server cannot get (e.g. the grocery memory tools jailed to an akbase path).
-  `room` is passed by keyword for a tool that must POST rather than only compute
-  -- e.g. one whose integrity property is that the ROOM, not the model's prose,
-  puts the text in the thread. Keyword-OPTIONAL deliberately: an older plugin
+  `room` is passed by keyword for a tool that must post rather than only compute
+  -- e.g. one whose integrity property is that the room, not the model's prose,
+  puts the text in the thread. Keyword-optional: an older plugin
   declaring `build_local_tools(cfg)` keeps working, so this stays a compatible
   addition and needs no PLUGIN_API_VERSION bump. The room inspects the hook and
   passes `room` only to one that accepts it, by name or through `**kwargs`.
@@ -72,14 +72,14 @@ Optional (duck-typed; absent means the room's default behavior):
   grocery's memory-compaction loop (summarize a grown thread into durable memory,
   then bump its context generation to truncate). Absent means no services.
 
-Note `aux_services()` is NOT a plugin-module hook: it is an optional method on
+Note `aux_services()` is not a plugin-module hook: it is an optional method on
 the Transport a plugin returns from build_transport, read off that transport
 instance (see cli.py), so a transport can own side loops (gchat's
 space-subscription renewal). It is documented with the Transport surface, not
 here.
 
 PLUGIN_API_VERSION is bumped when a required signature changes incompatibly. An
-external plugin declares the version it was written against as a LITERAL
+external plugin declares the version it was written against as a literal
 (PLUGIN_API_VERSION = 1), so a core that has moved on rejects it loudly rather
 than calling a changed signature; importing and re-exporting core's constant
 defeats the check (it always matches itself) and is only correct for the in-tree
@@ -119,7 +119,7 @@ class Plugin(Protocol):
 
     # Optional -- see the module docstring. Declared so the Protocol documents the
     # full surface, but a plugin need not implement them (callers use getattr).
-    # aux_services is deliberately absent: it lives on the Transport, not here.
+    # aux_services is absent: it lives on the Transport, not here.
     def default_transport_kind(self) -> str | None: ...
 
     def personas_dir(self, cfg=None) -> Path | None: ...

@@ -174,12 +174,12 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     tree. Per-thread binding also means no shared mutable cwd/env across the
     concurrent jobs a scheduler may run.
 
-    Granted unconditionally rather than through tool_groups, deliberately. Those
+    Granted unconditionally, not through tool_groups. Those
     groups are MCP-only: MCPToolset expands a group name to patterns matched
     against MCP tool names, and these are per-job StructuredTools closed over
     `workdir`. Routing them through it would mean either a second non-MCP
     registry inside the toolset or moving job-scoped construction into
-    suite-shared substrate. Neither earns its keep for a knob with one setting --
+    suite-shared substrate. Neither is worth it for a knob with one setting --
     every coding goal builds and runs, so a config that could withhold `shell`
     only offers a way to boot an agent that cannot work, which is a failure mode
     that has already happened once (see MCPToolset._expand's empty-group warning).
@@ -362,9 +362,9 @@ class _StopReasonCallback(BaseCallbackHandler):
                 )
                 if reason:
                     self.finish_reason = str(reason)
-                # A zero-part candidate: no tool calls AND no text. STOP with empty
-                # content is the silent-dead-turn shape -- benign by finish_reason
-                # alone, pathological by content. Track it so run_once can name it.
+                # A zero-part candidate: no tool calls and no text. STOP with empty
+                # content is the silent dead turn: benign by finish_reason alone,
+                # pathological by content. Track it so run_once can name it.
                 tool_calls = getattr(msg, "tool_calls", None) or []
                 content = str(getattr(msg, "content", "") or "").strip()
                 self.empty = not tool_calls and not content
@@ -625,13 +625,13 @@ class LangGraphHarness:
             schema=schema, handle_errors=True, tool_message_content=_REPORT_ACK
         )
         strategy.schema_specs[0].name = REPORT_TOOL_NAME
-        # The report tool must be in the CACHED tool list, though not in
+        # The report tool must be in the cached tool list, though not in
         # create_agent(tools=...) -- langchain appends the structured-output tool
         # itself at bind time (factory: final_tools.extend(structured_tools)), so
         # passing it here too would bind it twice.
         #
         # Why it has to be cached: a Vertex request that carries cached_content
-        # DROPS tools and tool_config entirely (langchain_google_vertexai
+        # drops tools and tool_config entirely (langchain_google_vertexai
         # _request_from_cached_content lists both as not_allowed_parameters and
         # logs "will be ignored"). Whatever bind_tools attached is therefore
         # invisible on any cache-served call, and the cache is built on the first
@@ -715,13 +715,13 @@ class LangGraphHarness:
         thread_id = str(result_path.parent)
         schema = self._schemas.get(agent, Report)
         graph = self._graph_for(thread_id, workdir, schema)
-        # Whether the thread has a conversation to continue. Asked of the SAVER,
+        # Whether the thread has a conversation to continue. Asked of the saver,
         # not of `self._graphs`: the dict is per-process, so with the durable
         # saver it answers a different question than the one that matters. A
         # restarted goal read live=False while its checkpoint was intact, which
         # both re-sent the full prompt into a thread that already contained it
-        # AND skipped the structured_response clear below -- so a turn that made
-        # no report read the PRE-CRASH verdict back as its own, crediting a
+        # and skipped the structured_response clear below, so a turn that made
+        # no report read the pre-crash verdict back as its own, crediting a
         # COMPLETE the restarted turn never earned. An empty state means the
         # thread is genuinely new (fresh run, LRU eviction under the in-memory
         # saver, or a saver that degraded to memory), and the full prompt is
@@ -766,7 +766,7 @@ class LangGraphHarness:
         # would read the PRIOR turn's report back as this turn's verdict: a valid
         # CONTINUE that the loop resets its dead-turn cap on, spinning to max_iters
         # doing nothing. Blank the channel before a live-thread resume so only a
-        # report produced THIS turn is accepted; a dead resume then reads None and
+        # report produced this turn is accepted; a dead resume then reads None and
         # falls into the loop's dead-turn guard. Can't clear via ainvoke input --
         # structured_response is OmitFromInput -- so update the checkpoint directly.
         #
@@ -796,12 +796,11 @@ class LangGraphHarness:
                 # unless we name the finish_reason -- a deterministic SAFETY/
                 # RECITATION/MALFORMED_FUNCTION_CALL block reproduces every resume
                 # and burns the dead-turn cap. A zero-part STOP is the same failure
-                # wearing a benign label: finish_reason reads STOP (so an allowlist
+                # under a benign label: finish_reason reads STOP (so an allowlist
                 # on reason alone skips it) but the candidate had no text and no
-                # tool calls, leaving the turn with nothing to report -- the
-                # silent-dead-turn shape. Surface both the reason and the empty
-                # flag so the log and the loop's abandon reason say why, instead
-                # of an opaque "exit 1".
+                # tool calls, leaving the turn with nothing to report. Surface both
+                # the reason and the empty flag so the log and the loop's abandon
+                # reason say why, instead of an opaque "exit 1".
                 code = 1
                 benign = {"STOP", "TOOL_CALLS", "TOOL_CALL", "END_TURN"}
                 reason = stop_cb.finish_reason
@@ -858,8 +857,8 @@ class LangGraphHarness:
                     "usage": usage.total.model_dump(),
                     # Only when the turn produced no report -- on a clean report
                     # the reason is STOP/TOOL_CALLS and carries no diagnostic value.
-                    # empty_candidate names the silent-dead-turn shape (a zero-part
-                    # STOP) that finish_reason alone cannot.
+                    # empty_candidate names the silent dead turn (a zero-part STOP)
+                    # that finish_reason alone cannot.
                     **(
                         {
                             "finish_reason": stop_cb.finish_reason,

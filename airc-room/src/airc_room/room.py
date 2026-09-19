@@ -29,7 +29,7 @@ class UndeliveredError(RuntimeError):
     """Every transport failed to deliver a message the caller must not lose.
 
     Raised only by `post(require_delivery=True)`. The default stays
-    fire-and-forget, because for a conversational turn the store IS the record
+    fire-and-forget, because for a conversational turn the store is the record
     and a failed frontend is the frontend's problem. A subscriber draining a
     durable queue is the opposite case: it acks the queue message on return, so
     a swallowed transport failure loses the item with no retry and no trace.
@@ -89,12 +89,12 @@ class Room:
         """The store behind this room, for a holder that needs more of it than
         Room re-exports.
 
-        Room's own surface is deliberately the small set of operations the room
+        Room's own surface is the small set of operations the room
         loop performs, and growing it one delegating method at a time for each
         new caller is how a facade turns into a second copy of the store's API.
         A local tool built with `room` (build_local_tools) is the case that
         forced this: it posts through Room and reads its own plugin_state rows,
-        and those two have to be the SAME connection or "is this proposal in the
+        and those two have to be the same connection or "is this proposal in the
         thread this message is in" becomes a cross-store join.
         """
         return self._store

@@ -4,7 +4,7 @@
 """Path confinement for the memory tools -- the security boundary.
 
 The memory tools give an LLM read/write over a git repo of markdown entries (the
-room's autonomous long-term memory). They run IN-PROCESS with no sandbox, so a
+room's autonomous long-term memory). They run in-process with no sandbox, so a
 write must be provably unable to touch anything outside the store: this module is
 that proof.
 
@@ -14,9 +14,9 @@ resolution. A `..` segment, an absolute path elsewhere, or a symlink pointing ou
 of the tree all raise Jailbreak, which the tool wrappers turn into a plain error
 string (never an exception into the turn).
 
-Unlike airc-home's original (a `set_root` module global), the root is a PARAMETER
--- so multiple stores can coexist in one process (a coding room and a grocery
-room, or a future per-space store) with no shared mutable state.
+The root is a parameter, not a module global, so multiple stores can coexist in
+one process (a coding room and a grocery room, or a future per-space store) with
+no shared mutable state.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _resolve_allowing_missing(p: Path) -> Path:
     base = existing.resolve()
     for name in reversed(tail):
         base = base / name
-    # Collapse any `..` in the non-existent tail LEXICALLY. The existing prefix is
+    # Collapse any `..` in the non-existent tail lexically. The existing prefix is
     # already symlink-resolved and the tail has no symlinks (its components do not
     # exist), so lexical normalization equals the real path the OS would create --
     # and without it a `..` in the tail (e.g. "sub/../../x.md") would survive into

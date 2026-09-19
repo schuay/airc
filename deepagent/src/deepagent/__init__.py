@@ -34,7 +34,7 @@ def __getattr__(name: str):
     # LangGraphHarness is the only backend behind the Harness protocol, and the
     # only thing here that costs langchain/langgraph/anthropic/mcp to import --
     # 785ms against 58-72ms for every other module in this package. Deferring it
-    # is what lets a consumer that wants a Journal, a Report or a LoopCaps take
+    # lets a consumer that wants a Journal, a Report or a LoopCaps take
     # the protocol and the data types without paying for an implementation it
     # never builds. A missing langgraph install now fails when the harness is
     # first constructed rather than at import; that is still daemon startup.

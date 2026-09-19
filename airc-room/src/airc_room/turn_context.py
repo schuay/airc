@@ -3,27 +3,21 @@
 
 """The turn identity a local tool reads out of its injected RunnableConfig.
 
-LangGraph keys a checkpoint on ONE opaque string, `configurable.thread_id`, so
+LangGraph keys a checkpoint on one opaque string, `configurable.thread_id`, and
 the runner packs (thread, persona, context generation) into it. That string is a
-checkpoint KEY, not a data channel -- and recovering the parts by parsing it back
-made every consumer depend on a format the runner alone owns. When the runner
-started folding the generation in (":g<n>"), the parse kept returning the first
-colon-separated field as the persona: "perf:g0" instead of "perf". Nothing
-matched a live persona after that, so every timer wake was dropped with "agent
-... is gone", and the tests kept passing because they asserted the old
-two-field string rather than what the runner builds.
+checkpoint key, not a data channel: parsing the parts back out ties every
+consumer to a format the runner alone owns, and broke when the runner added the
+generation suffix (the parse returned "perf:g0" as the persona, so no live
+persona matched and every timer wake was dropped).
 
-So the parts travel as their OWN configurable keys, built and read here.
+So the parts travel as their own configurable keys, built and read here.
 LangGraph passes unknown `configurable` keys through untouched (they reach a
-tool's injected config) and keys its checkpoint on `thread_id` alone, so this
-costs nothing and cannot drift again: the composite stays a checkpoint key, and
-no one reads identity out of it.
+tool's injected config) and keys its checkpoint on `thread_id` alone.
 
-Deliberately no fallback to parsing the composite. A turn that did not come from
-turn_config() has no identity to offer -- the forced-JSON structured turn is the
-real case, and it holds no local tools precisely because it belongs to no thread
--- so reporting "missing turn context" is the honest answer, where a silent
-reparse would reintroduce the coupling this exists to remove.
+There is no fallback to parsing the composite. A turn that did not come from
+turn_config() has no identity to offer (the forced-JSON structured turn, which
+holds no local tools because it belongs to no thread), and "missing turn
+context" is the correct answer there.
 """
 
 from __future__ import annotations
@@ -46,16 +40,15 @@ def turn_config(
     """The `configurable` a persona's turn runs under.
 
     `thread_id` is the composite LangGraph checkpoints on: the room thread, the
-    persona's STABLE key (not its addressable name, so a nickname toggle does not
+    persona's stable key (not its addressable name, so a nickname toggle does not
     orphan a checkpoint), and the context generation, which is what a memory
     compaction bumps to start the persona from a fresh checkpoint. The same two
     identity parts ride alongside under their own keys for tools to read.
 
     `trigger_id` is the message that caused this turn, when one did. A tool whose
     job is "did a human ask for this" would otherwise scan the thread backwards
-    guessing which message meant it -- a keyed read of the actual trigger is
-    strictly better, and the guess is what made two open requests in one thread
-    resolve to whichever was newest. Optional because not every turn has a
+    guessing which message meant it; guessing resolved two open requests in one
+    thread to whichever was newest. Optional because not every turn has a
     trigger: a timer wake is driven by a note, not a message.
     """
     cfg = {
@@ -73,9 +66,9 @@ def turn_context(config: RunnableConfig | None) -> tuple[int | None, str]:
     when the turn carries no identity. Tools treat that as a refusal, not a
     default -- acting on a guessed thread is worse than declining.
 
-    ALL OR NOTHING: a config carrying only one of the two parts yields no
-    identity at all. Returning the half that is present reproduces the exact
-    failure this module exists to prevent -- an empty agent still reads as
+    All or nothing: a config carrying only one of the two parts yields no
+    identity at all. Returning the half that is present reproduces the
+    failure above: an empty agent still reads as
     "present" to a caller that only checks the thread id, so timer_create would
     report success, persist a timer no persona can own, and have its wake
     dropped at fire time. A partial identity is a bug upstream; the only safe
