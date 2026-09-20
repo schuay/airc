@@ -192,7 +192,9 @@ class _ToolReq:
         self.tool_call = {"name": "read", "args": {}, "id": "c1"}
 
 
-async def test_the_pointer_rides_every_call_and_the_notice_only_the_closed_ones():
+async def test_an_open_call_gets_nothing_appended_and_a_closed_one_the_notice():
+    """No running spend line on the open calls: a figure that climbs on every
+    call reads as a clock and had the model wrapping up early."""
     seen = []
 
     async def handler(req):
@@ -204,10 +206,9 @@ async def test_the_pointer_rides_every_call_and_the_notice_only_the_closed_ones(
     await mw.awrap_model_call(
         _ModelReq(_Spend(usage=Usage(usd=20.0), closed=True)), handler
     )
-    assert any("$5.00 spent" in m for m in seen[0])
-    assert not any("NOTICE" in m for m in seen[0])
-    assert any("$20.00 spent" in m for m in seen[1])
-    assert any("NOTICE" in m for m in seen[1])
+    assert seen[0] == ["hi"]
+    assert seen[1][0] == "hi" and len(seen[1]) == 2
+    assert "NOTICE" in seen[1][1]
 
 
 class _ModelReq:
@@ -395,42 +396,6 @@ async def test_no_cost_limit_leaves_the_reads_open():
     assert spend.calls_left == math.inf and not spend.closed
 
 
-def test_no_cost_limit_drops_the_percentage_instead_of_dividing_by_zero():
-    """Same reasoning as the absent context target: this is prose the model
-    reads on every call, and "20% of the $0 cap" is a sentence that means
-    nothing asserted a hundred times."""
-    spend = _Spend(usage=Usage(usd=5.0, calls=3), last_input=410_000)
-    assert _budget(cost_limit=0.0, context_target=0).pointer(spend) == "$5.00 spent"
-    both = _budget(cost_limit=0.0, context_target=400_000).pointer(spend)
-    assert both == "$5.00 spent; context 410k of 400k target"
-
-
-def test_no_context_target_drops_the_clause_instead_of_rendering_a_zero():
-    """This is prose the model reads on EVERY call of the turn, so "context 410k
-    of 0 target" is not cosmetic -- it is a sentence that means nothing,
-    asserted a hundred times. The target drives nothing yet and is genuinely
-    allowed to be unset until the ledger says what it should be."""
-    spend = _Spend(usage=Usage(usd=5.0, calls=3), last_input=410_000)
-    assert _budget(context_target=0).pointer(spend) == "$5.00 spent, 20% of the $25 cap"
-    with_target = _budget(context_target=400_000).pointer(spend)
-    assert with_target == "$5.00 spent, 20% of the $25 cap; context 410k of 400k target"
-
-
 def test_a_negative_context_target_is_a_typo_not_an_unset_one():
     with pytest.raises(ValueError, match="context_target must be zero"):
         _budget(context_target=-1)
-
-
-async def test_an_untargeted_pass_still_gets_the_money_pointer():
-    """The spend bounds the pass, so it is reported on every call
-    whether or not a target was configured."""
-    seen = []
-
-    async def handler(req):
-        seen.append([str(m.content) for m in req.messages])
-        return "ok"
-
-    mw = _budget(context_target=0)
-    await mw.awrap_model_call(_ModelReq(_Spend(usage=Usage(usd=5.0))), handler)
-    assert any("$5.00 spent" in m for m in seen[0])
-    assert not any("target" in m for m in seen[0])

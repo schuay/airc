@@ -1283,13 +1283,12 @@ class BudgetMiddleware(AgentMiddleware):
     Two numbers answer different questions. `cost_limit` (USD) is the most
     a turn may ever cost: it ends the turn, keys the read-closing window, and is
     what "calls left" is measured against. `context_target` (prompt tokens) is
-    where a typical turn should be wrapping up; it appears in the pointer and
-    drives nothing else yet -- the nudge cadence still runs off call counts in
-    CallBudgetMiddleware until the schedule is re-sized against the ledger.
+    where a typical turn should be wrapping up; it drives nothing yet -- the
+    nudge cadence still runs off call counts in CallBudgetMiddleware until the
+    schedule is re-sized against the ledger.
 
-    `cost_limit = 0` is no ceiling at all: the turn never ends on spend, the
-    reads never close, and the pointer stops quoting a percentage of a cap that
-    does not exist. It is for a deployment where the dollar figure means
+    `cost_limit = 0` is no ceiling at all: the turn never ends on spend and the
+    reads never close. It is for a deployment where the dollar figure means
     nothing -- a model the price table cannot price, a flat-rate or local
     endpoint -- where the alternative was a bound computed from the generic
     placeholder rate, which is a number nobody chose. What still bounds such a
@@ -1339,17 +1338,13 @@ class BudgetMiddleware(AgentMiddleware):
     ) -> None:
         super().__init__()
         # 0 means no ceiling and is held as None from here down instead of as
-        # a very large number: the read-closing window and the pointer both
-        # divide by the limit, and a stand-in like 1e9 would leave them quoting
-        # 0% of a cap forever instead of dropping the clause. None also keeps
-        # every arithmetic site from reaching the unbounded case by accident.
-        # Negative is a typo.
+        # a very large number, so every arithmetic site has to spell out the
+        # unbounded case instead of reaching it by accident. Negative is a typo.
         if cost_limit < 0:
             raise ValueError(
                 f"cost_limit must be zero (no ceiling) or positive, got {cost_limit!r}"
             )
-        # 0 means no target: it drives nothing yet, and the pointer does not
-        # mention a target the operator has not chosen. Negative is a typo.
+        # 0 means no target; it drives nothing yet. Negative is a typo.
         if context_target < 0:
             raise ValueError(
                 f"context_target must be zero (no target) or positive, got"
@@ -1427,47 +1422,30 @@ class BudgetMiddleware(AgentMiddleware):
     async def abefore_model(self, state, runtime) -> dict[str, Any] | None:
         return self.before_model(state, runtime)
 
-    def pointer(self, spend: _Spend) -> str:
-        """The position line appended to every request: what has been spent
-        against the ceiling, and how much has been read against the target. It
-        informs; the nudges do the steering. "Of cap", because the cap is a
-        ceiling, not a target.
-
-        With no context target set the clause is dropped instead of rendered
-        against a zero, and with no cost ceiling the spend is reported without a
-        percentage. The model reads this on every call of the turn, so "context
-        410k of 0 target" would assert a meaningless sentence a hundred times.
-        """
-        u = spend.usage
-        line = f"{u.cost()} spent"
-        if self._cost_limit is not None:
-            pct = round(100 * u.usd / self._cost_limit)
-            line += f", {pct}% of the ${self._cost_limit:g} cap"
-        if self._context_target > 0:
-            line += (
-                f"; context {_k(spend.last_input)} of {_k(self._context_target)} target"
-            )
-        return line
-
     async def awrap_model_call(self, request, handler):
         # The empty-candidate retry re-enters with the request that already
-        # carries the pointer and the notice; re-appending stacks copies of
-        # both (CallBudgetMiddleware's reasoning).
+        # carries the notice; re-appending stacks a copy of it
+        # (CallBudgetMiddleware's reasoning).
         if _empty_retry.get():
             return await handler(request)
         spend = self._spend(getattr(request, "state", None) or {})
-        extra = [HumanMessage(self.pointer(spend))]
-        if spend.closed:
-            # Only reachable with a ceiling set -- an unbounded turn never runs
-            # its window down -- but the format is guarded, not assumed,
-            # since a caller could hand back a _Spend from a bounded run.
-            log.info(
-                "budget: reads closed with %s of the $%g cap spent",
-                spend.usage.cost(),
-                self._cost_limit or 0,
-            )
-            extra.append(HumanMessage(self._notice))
-        return await handler(request.override(messages=[*request.messages, *extra]))
+        # An open call gets nothing appended. A running spend line was tried
+        # and dropped: a figure that climbs on every call reads as a clock and
+        # has the model wrapping up well before anything closes. The nudges and
+        # the notice do the steering.
+        if not spend.closed:
+            return await handler(request)
+        # Only reachable with a ceiling set -- an unbounded turn never runs
+        # its window down -- but the format is guarded, not assumed,
+        # since a caller could hand back a _Spend from a bounded run.
+        log.info(
+            "budget: reads closed with %s of the $%g cap spent",
+            spend.usage.cost(),
+            self._cost_limit or 0,
+        )
+        return await handler(
+            request.override(messages=[*request.messages, HumanMessage(self._notice)])
+        )
 
     def _refuse(self, request):
         if not self._spend(request.state).closed_prev:
