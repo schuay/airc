@@ -1221,6 +1221,11 @@ CALLS_LEFT_KEY = "calls_left"
 # is what separates a run from a single cold replica after a retry or a
 # re-route that warms again on the next call. Both are first guesses; read the
 # per-call lines of the first trips before trusting them.
+#
+# Off by default: the misses it fires on are the provider's, and there is
+# nothing we do differently once we know, so all it bought was an abandoned
+# turn. Pass a floor to arm it.
+# TODO: Consider re-enabling or removing.
 _ZERO_CACHE_FLOOR = 150_000
 _ZERO_CACHE_TRIPS = 3
 
@@ -1313,7 +1318,8 @@ class BudgetMiddleware(AgentMiddleware):
       only call left that does anything.
     - Publishes calls-left under CALLS_LEFT_KEY for the two cache brakes.
     - Raises CacheLossTrip when the provider stops serving the prompt cache on
-      a large context, which is a fault to stop on, not to pay for.
+      a large context, which is a fault to stop on, not to pay for. Disabled
+      unless `zero_cache_floor` is set.
 
     The per-turn usage here is the agent's own calls only. Spend an invocation
     causes beside them -- a ceiling summarization on the filter model, an
@@ -1333,7 +1339,7 @@ class BudgetMiddleware(AgentMiddleware):
         notice: str,
         refusal: str,
         window: float = 3.0,
-        zero_cache_floor: int = _ZERO_CACHE_FLOOR,
+        zero_cache_floor: int = 0,  # 0 = tripwire disabled
         zero_cache_trips: int = _ZERO_CACHE_TRIPS,
     ) -> None:
         super().__init__()
@@ -1374,7 +1380,11 @@ class BudgetMiddleware(AgentMiddleware):
             calls_left = math.inf
         else:
             calls_left = max(0.0, (self._cost_limit - total.usd) / call.usd)
-        lost = call.input >= self._zero_cache_floor and call.cache_read == 0
+        lost = (
+            self._zero_cache_floor > 0
+            and call.input >= self._zero_cache_floor
+            and call.cache_read == 0
+        )
         return _Spend(
             usage=total,
             last_usd=call.usd,

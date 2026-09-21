@@ -82,18 +82,15 @@ def _agent(middleware, usage=None, recursion_limit=200):
     return model, graph
 
 
-# The tripwire is off unless a test asks for it: every other test here scripts
-# a model that reports no cache read at all, which is exactly what it watches
-# for, and a cost test that ended on the tripwire would assert nothing about
-# cost. The tripwire tests pass the real floor.
-_TRIPWIRE_OFF = 10**12
-
-
+# The tripwire is off by default in the middleware itself; the tests that
+# exercise it pass the real floor. Every other test here scripts a model that
+# reports no cache read at all, which is exactly what it watches for, and a
+# cost test that ended on the tripwire would assert nothing about cost.
 def _budget(
     cost_limit=25.0,
     context_target=400_000,
     window=3.0,
-    zero_cache_floor=_TRIPWIRE_OFF,
+    zero_cache_floor=0,
 ):
     return BudgetMiddleware(
         _MODEL,
@@ -349,6 +346,20 @@ async def test_the_trip_reaches_the_caller_through_the_graph():
     )
     with pytest.raises(CacheLossTrip):
         await graph.ainvoke({"messages": [HumanMessage("go")]})
+
+
+async def test_the_tripwire_is_off_unless_a_floor_is_given():
+    """Deactivated by default: the misses it fires on are the provider's, and
+    a turn abandoned over one buys nothing."""
+    mw = BudgetMiddleware(
+        _MODEL,
+        context_target=400_000,
+        cost_limit=1000.0,
+        notice="NOTICE",
+        refusal="REFUSED",
+    )
+    spend = await _run_calls(mw, [_usage(400_000)] * 10)
+    assert spend.zero_cache_run == 0
 
 
 async def test_the_trip_is_never_read_as_a_transient():
