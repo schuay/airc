@@ -15,7 +15,7 @@ from airc_core.agent import (
     truncate_oversized_tool_results,
 )
 from airc_core.mcptools import (
-    _MAX_TOOL_RESULT_CHARS,
+    MAX_TOOL_RESULT_CHARS,
     _fix_tool,
     _result_chars,
     _truncated,
@@ -27,14 +27,14 @@ from langchain_core.tools import StructuredTool
 
 def test_tool_results_are_capped():
     async def big_output() -> str:
-        return "x" * (_MAX_TOOL_RESULT_CHARS + 10_000)
+        return "x" * (MAX_TOOL_RESULT_CHARS + 10_000)
 
     tool = StructuredTool.from_function(
         coroutine=big_output, name="big", description="d"
     )
     _fix_tool(tool)
     out = asyncio.run(tool.coroutine())
-    assert len(out) < _MAX_TOOL_RESULT_CHARS + 200
+    assert len(out) < MAX_TOOL_RESULT_CHARS + 200
     assert "output truncated (10000 more chars)" in out
 
 
@@ -71,7 +71,7 @@ def _content_blocks(text: str) -> list[dict]:
 def test_mcp_list_content_result_is_capped():
     # The real MCP path: a (content, artifact) tuple whose content is a list of
     # content blocks. A bare isinstance(str) check let this through uncapped.
-    big = "x" * (_MAX_TOOL_RESULT_CHARS + 10_000)
+    big = "x" * (MAX_TOOL_RESULT_CHARS + 10_000)
 
     async def big_output():
         return _content_blocks(big), {"structured": True}
@@ -84,7 +84,7 @@ def test_mcp_list_content_result_is_capped():
     )
     _fix_tool(tool)
     content, artifact = asyncio.run(tool.coroutine())
-    assert _result_chars((content, artifact)) < _MAX_TOOL_RESULT_CHARS + 200
+    assert _result_chars((content, artifact)) < MAX_TOOL_RESULT_CHARS + 200
     assert "output truncated (10000 more chars)" in content[0]["text"]
     assert artifact == {"structured": True}  # artifact passes through untouched
 
@@ -107,13 +107,13 @@ def test_mcp_list_content_size_is_logged(caplog):
 
 def test_truncated_caps_combined_text_across_blocks():
     blocks = [
-        {"type": "text", "text": "a" * (_MAX_TOOL_RESULT_CHARS - 5)},
+        {"type": "text", "text": "a" * (MAX_TOOL_RESULT_CHARS - 5)},
         {"type": "image", "url": "u"},  # non-text block left intact
         {"type": "text", "text": "b" * 1000},
     ]
     out = _truncated(blocks)
     total = sum(len(b["text"]) for b in out if "text" in b)
-    assert total <= _MAX_TOOL_RESULT_CHARS + 200
+    assert total <= MAX_TOOL_RESULT_CHARS + 200
     assert out[1] == {"type": "image", "url": "u"}
 
 

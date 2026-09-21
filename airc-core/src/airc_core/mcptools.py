@@ -65,7 +65,13 @@ _STRIP_KEYS = {"additionalProperties", "$schema", "title"}
 # Lower starts to clip routinely, and a re-query costs a turn, which is the
 # more expensive unit.
 # TODO(jgruber): make this a configurable knob if a workload needs a tighter cap.
-_MAX_TOOL_RESULT_CHARS = 50_000
+#
+# Public because a consumer that is not a model has to size its REQUESTS against
+# it: the cap cuts by characters, which turns a structured reply into a parse
+# error rather than a shorter one, so airc-watchers' perf detector asks pd for a
+# page it knows will fit. Anything reading this name is coupled to the cap on
+# purpose -- do not privatise it again without giving those callers a way to ask.
+MAX_TOOL_RESULT_CHARS = 50_000
 
 # Per-call ceiling on one tool execution. Legit calls are seconds (a
 # repo_git_grep that takes 2 minutes is wedged, not thorough); this reaps a hung
@@ -117,7 +123,7 @@ def _transport_errors() -> tuple[type[BaseException], ...]:
 _TRANSPORT_ERRORS = _transport_errors()
 
 
-def _truncate_text(text: str, limit: int = _MAX_TOOL_RESULT_CHARS) -> str:
+def _truncate_text(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
     cut = len(text) - limit
     return text[:limit] + (
         f"\n[... output truncated ({cut} more chars);"
@@ -126,7 +132,7 @@ def _truncate_text(text: str, limit: int = _MAX_TOOL_RESULT_CHARS) -> str:
 
 
 def _truncated(value):
-    """Cap a tool result's text payload at _MAX_TOOL_RESULT_CHARS.
+    """Cap a tool result's text payload at MAX_TOOL_RESULT_CHARS.
 
     Two forms occur. A plain-function tool returns a string. The MCP adapter
     returns content as a list of content blocks, with text in
@@ -138,9 +144,9 @@ def _truncated(value):
     (image/file) are left intact.
     """
     if isinstance(value, str):
-        return _truncate_text(value) if len(value) > _MAX_TOOL_RESULT_CHARS else value
+        return _truncate_text(value) if len(value) > MAX_TOOL_RESULT_CHARS else value
     if isinstance(value, list):
-        budget = _MAX_TOOL_RESULT_CHARS
+        budget = MAX_TOOL_RESULT_CHARS
         for block in value:
             if not (isinstance(block, dict) and isinstance(block.get("text"), str)):
                 continue
@@ -267,7 +273,7 @@ def _fix_tool(tool: BaseTool) -> BaseTool:
                     "tool %s result: %d chars%s",
                     name,
                     raw,
-                    " (capped)" if raw > _MAX_TOOL_RESULT_CHARS else "",
+                    " (capped)" if raw > MAX_TOOL_RESULT_CHARS else "",
                 )
             # content_and_artifact tools return (content, artifact).
             if isinstance(out, tuple) and len(out) == 2:
