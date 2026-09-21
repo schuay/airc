@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from airc_core import Usage
+from airc_core import REFUSAL_STOP_REASON, Usage
 
 from .harness import REPORT_TOOL_NAME, AgentResult, Disposition, Harness
 from .journal import Journal
@@ -325,16 +325,17 @@ async def run_agent_loop(
             # derives that name (result_path.with_suffix(".log")) but nothing
             # ever writes it, so the old hint sent an operator to a file that
             # does not exist. events.jsonl is written and flushed per event.
+            refused = run.finish_reason.strip().lower() == REFUSAL_STOP_REASON
             log.warning(
                 "%s turn %d: no result and no progress (%s), retry %d/%d -- inspect %s",
                 agent or "agent",
                 i,
                 why,
                 consecutive_empty,
-                caps.no_result_cap,
+                1 if refused else caps.no_result_cap,
                 journal.path if journal is not None else run.log_path,
             )
-            if consecutive_empty >= caps.no_result_cap:
+            if refused or consecutive_empty >= caps.no_result_cap:
                 await _forget(harness, control_dir)
                 return AgentResult(
                     disposition=Disposition.ABANDON,

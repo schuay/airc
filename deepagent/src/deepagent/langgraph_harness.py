@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from airc_core import (
+    STOP_REASON_KEYS,
     CommonConfig,
     EmptyCandidateError,
     GroundingReminderMiddleware,
@@ -356,9 +357,14 @@ class _StopReasonCallback(BaseCallbackHandler):
             for gen in (response.generations or [[]])[0]:
                 msg = getattr(gen, "message", None)
                 meta = getattr(msg, "response_metadata", None) or {}
-                # langchain-google puts it here; some providers use generation_info.
-                reason = meta.get("finish_reason") or (
-                    (getattr(gen, "generation_info", None) or {}).get("finish_reason")
+                info = getattr(gen, "generation_info", None) or {}
+                reason = next(
+                    (
+                        meta.get(k) or info.get(k)
+                        for k in STOP_REASON_KEYS
+                        if meta.get(k) or info.get(k)
+                    ),
+                    None,
                 )
                 if reason:
                     self.finish_reason = str(reason)

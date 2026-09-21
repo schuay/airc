@@ -66,3 +66,22 @@ async def test_any_other_exception_is_still_a_hard_error(tmp_path):
     # The by-type catch must not swallow real crashes into the softer code.
     run = await _run(tmp_path, RuntimeError("boom"))
     assert run.exit_code == -1
+
+
+def test_stop_reason_callback_reads_anthropic_stop_reason():
+    from types import SimpleNamespace
+
+    from deepagent.langgraph_harness import _StopReasonCallback
+
+    cb = _StopReasonCallback()
+    gen = SimpleNamespace(
+        message=SimpleNamespace(
+            content="",
+            tool_calls=[],
+            response_metadata={"stop_reason": "refusal"},
+        ),
+        generation_info=None,
+    )
+    cb.on_llm_end(SimpleNamespace(generations=[[gen]]), run_id="r1")
+    assert cb.finish_reason == "refusal"
+    assert cb.empty is True

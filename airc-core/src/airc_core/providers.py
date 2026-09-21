@@ -117,6 +117,11 @@ STOP_REASON_KEYS: tuple[str, ...] = tuple(
     )
 )
 
+# Anthropic's stop_reason when the classifier refuses a generation (arrives
+# with empty content and 0 output tokens). Shared by _EmptyCandidateRetry and
+# the reentry loop so neither layer retries a refused turn.
+REFUSAL_STOP_REASON = "refusal"
+
 
 # output_config.effort, in increasing depth. The Messages API's own vocabulary,
 # so it is repeated here instead of derived: the SDK exposes it as a Literal

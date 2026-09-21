@@ -236,6 +236,24 @@ async def test_dead_turn_abandon_names_finish_reason(tmp_path):
     assert "finish_reason=SAFETY" in out.reason
 
 
+async def test_refusal_abandons_after_one_attempt(tmp_path):
+    # Once the refusing input is in checkpoints.db, resuming the thread only
+    # re-bills the same refusal up to no_result_cap. Abandon on the first turn.
+    journal = Journal(tmp_path / "events.jsonl")
+    h = _ScriptedHarness(script=[(None, True, "refusal", True)])
+    out = await run_agent_loop(
+        h,
+        prompt_path=tmp_path / "p.md",
+        workdir=tmp_path / "wt",
+        control_dir=tmp_path / "ctl",
+        caps=LoopCaps(max_iters=10, no_result_cap=3),
+        journal=journal,
+    )
+    assert out.disposition is Disposition.ABANDON
+    assert "finish_reason=refusal" in out.reason
+    assert h.calls == 1
+
+
 async def test_interjection_reaches_the_next_turn(tmp_path):
     # The orchestrator learns something after a goal started (new review
     # comments). It must reach the agent at the next turn boundary -- not

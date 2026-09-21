@@ -49,7 +49,7 @@ from langgraph.constants import TAG_NOSTREAM
 
 from .collector import book_aside
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
-from .providers import STOP_REASON_KEYS
+from .providers import REFUSAL_STOP_REASON, STOP_REASON_KEYS
 from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, _k
 
 log = logging.getLogger(__name__)
@@ -572,10 +572,12 @@ class _EmptyCandidateRetry(AgentMiddleware):
 
     Detection scope: an empty candidate (0 parts: no text and no tool calls)
     and STOP with no content. A SAFETY/RECITATION block with content is a
-    genuine refusal, not a flake, and is not retried here. Nor is a tool call
-    the provider truncated, which looks zero-part to a check on content and
-    tool_calls alone: that has its own retry and its own wording (see
-    _unparsable_tool_call and _retry_unparsable).
+    genuine refusal, not a flake, and is not retried here; Anthropic's
+    stop_reason="refusal" carries no content at all and raises
+    EmptyCandidateError immediately without the uncached nudge retry. Nor is a
+    tool call the provider truncated, which looks zero-part to a check on
+    content and tool_calls alone: that has its own retry and its own wording
+    (see _unparsable_tool_call and _retry_unparsable).
 
     There is no legitimately empty reply to confuse this with: an agent with
     nothing to say answers with a sentinel (the room's NOTHING_TO_ADD) or calls
@@ -604,6 +606,9 @@ class _EmptyCandidateRetry(AgentMiddleware):
             if _empty_retry.get():
                 _empty_retry.set(0)
             return resp
+        reason = _finish_reason(empty)
+        if reason.strip().lower() == REFUSAL_STOP_REASON:
+            raise EmptyCandidateError(f"empty candidate (finish_reason={reason})")
         # Still empty. Do not raise for an identical retry: the cache (nested
         # inside) would re-read the same prefix and the model would reproduce the
         # zero-part candidate. Mutate, once: set _empty_retry so the growing
@@ -616,7 +621,7 @@ class _EmptyCandidateRetry(AgentMiddleware):
         log.warning(
             "empty candidate (finish_reason=%s); retrying once uncached with a"
             " nudge to force output",
-            _finish_reason(empty),
+            reason,
         )
         resp2 = await handler(
             request.override(messages=[*request.messages, _EMPTY_NUDGE])

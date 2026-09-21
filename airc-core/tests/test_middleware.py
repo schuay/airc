@@ -1140,6 +1140,26 @@ async def test_empty_candidate_exhausts_and_raises_by_type(monkeypatch):
     assert model.calls == 2
 
 
+async def test_refusal_without_content_raises_without_nudge_retry(monkeypatch):
+    from airc_core import agent
+
+    monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
+    # Anthropic's stop_reason="refusal" arrives with empty content. It is a
+    # deterministic classifier refusal, not a zero-part STOP flake, so
+    # _EmptyCandidateRetry raises EmptyCandidateError on the first call without
+    # spending an uncached nudge call.
+    refusal = {"content": "", "response_metadata": {"stop_reason": "refusal"}}
+    model, graph = _candidate_agent([refusal])
+    try:
+        await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
+        raised = False
+    except EmptyCandidateError as e:
+        raised = True
+        assert "finish_reason=refusal" in str(e)
+    assert raised
+    assert model.calls == 1
+
+
 async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypatch):
     from airc_core import agent
 
