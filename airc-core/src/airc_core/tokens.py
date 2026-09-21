@@ -96,6 +96,10 @@ _ADDED_COLUMNS = (
     ("estimated", "INTEGER NOT NULL DEFAULT 0"),
     ("usd_input", "REAL NOT NULL DEFAULT 0"),
     ("usd_output", "REAL NOT NULL DEFAULT 0"),
+    # Free-form attribution from the caller: which commit and stage the row
+    # belongs to. `agent` and `kind` are the fixed vocabulary the summaries
+    # group by; this is the one place a per-row identity can go.
+    ("label", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -166,7 +170,15 @@ class TokenLog:
         if self._db is not None:
             self._db.close()
 
-    def add(self, usage: Usage, *, thread_id: int, agent: str, kind: str) -> None:
+    def add(
+        self,
+        usage: Usage,
+        *,
+        thread_id: int,
+        agent: str,
+        kind: str,
+        label: str = "",
+    ) -> None:
         if self._db is None:
             return
         try:
@@ -174,8 +186,9 @@ class TokenLog:
                 "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
                 " output_tokens, cached_input_tokens, model, model_calls,"
                 " max_call_input_tokens, cache_write_tokens, reasoning_tokens,"
-                " cache_storage_token_hours, usd, estimated, usd_input, usd_output)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " cache_storage_token_hours, usd, estimated, usd_input, usd_output,"
+                " label)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     thread_id,
@@ -194,6 +207,7 @@ class TokenLog:
                     int(usage.estimated),
                     usage.usd_input,
                     usage.usd_output,
+                    label,
                 ),
             )
             self._db.commit()

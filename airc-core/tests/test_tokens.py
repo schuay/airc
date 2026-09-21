@@ -434,3 +434,32 @@ def test_the_ledger_is_indexed_on_time(tmp_path):
         "EXPLAIN QUERY PLAN SELECT SUM(usd) FROM token_usage WHERE ts >= 0"
     ).fetchall()
     assert any("idx_token_usage_ts" in str(r) for r in plan), plan
+
+
+def test_label_is_stored_per_row_and_migrated(tmp_path):
+    """A row carries the caller's attribution, and a ledger written before the
+    column existed reads back with an empty one."""
+    import sqlite3
+
+    path = tmp_path / "tokens.db"
+    t = TokenLog(path)
+    t.add(
+        _u(10, 1), thread_id=0, agent="review", kind="review", label="abc123 review#0"
+    )
+    t.add(_u(10, 1), thread_id=0, agent="review", kind="review")
+    rows = (
+        sqlite3.connect(path)
+        .execute("SELECT label FROM token_usage ORDER BY id")
+        .fetchall()
+    )
+    assert rows == [("abc123 review#0",), ("",)]
+    t.close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE token_usage DROP COLUMN label")
+    db.commit()
+    db.close()
+    TokenLog(path).close()
+    cols = {
+        r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(token_usage)")
+    }
+    assert "label" in cols
