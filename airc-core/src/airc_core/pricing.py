@@ -13,7 +13,9 @@ mid-market magnitude with the ratios the listed providers share (a cache read
 at a tenth of input, output at five times). It exists so an unlisted model --
 a private deployment, a new checkpoint -- is still costed instead of dropped
 from every total, and so its rows are flagged as estimated instead of passed
-off as measured.
+off as measured. A deploy that knows better can say which listing such a
+name really is (`register_alias`, fed from `[pricing.aliases]` in config) and
+have it priced there instead.
 """
 
 from __future__ import annotations
@@ -171,10 +173,58 @@ def bare_model_name(model_id: str) -> str:
     return name.split("@", 1)[0]
 
 
+# Names the table does not list, priced at a listing it does. Keyed by what
+# the deploy wrote -- a full "provider:name" id or a bare name -- and valued
+# by a LISTED bare name, never another alias, so `price_for` stays one lookup
+# with no chain to follow.
+#
+# This exists for the name that is not a public listing and never will be: a
+# private deployment of a released model under an internal label, a checkpoint
+# served ahead of its release. Such a model is not free and is not the generic
+# placeholder either; the operator knows which listing it is closest to and
+# says so. The price that comes back is the target's, unchanged -- there is no
+# "approximately" flag, and a budget over an aliased model is a budget at the
+# target's rate. That is the deal: an alias is the operator asserting the
+# equivalence, and the table takes them at their word.
+#
+# Filled from config ([pricing.aliases], via config.load_common), which is the
+# right home for it: these names are per-deploy and churn faster than a
+# release cycle, and a table in code would need a release for each one.
+_ALIASES: dict[str, str] = {}
+
+
+def register_alias(model: str, priced_as: str) -> None:
+    """Price `model` (a full id or a bare name) at `priced_as`'s listing.
+
+    `priced_as` must be listed, as a bare name or a full id -- an alias to an
+    unlisted name would resolve to GENERIC, which is exactly what the alias was
+    written to avoid, so it is dead config and refused. Re-registering the same
+    pair is a no-op, for the reason register_provider gives (load_common runs
+    more than once per process in some components); a CONFLICTING pair raises,
+    because which price applied would otherwise depend on parse order.
+    """
+    target = bare_model_name(priced_as)
+    if target not in _LISTED:
+        raise ValueError(
+            f"{model!r} cannot be priced as {priced_as!r}: the price table has"
+            f" no listing for {target!r} (listed: {', '.join(_LISTED)})"
+        )
+    if (prior := _ALIASES.get(model)) is not None and prior != target:
+        raise ValueError(f"{model!r} is already priced as {prior!r}")
+    _ALIASES[model] = target
+
+
 def price_for(model_id: str) -> Price:
-    """The listing for `model_id`, or GENERIC. Exact match on the bare name:
-    a prefix heuristic would price a new "-lite" variant as its big sibling."""
-    return _LISTED.get(bare_model_name(model_id), GENERIC)
+    """The listing for `model_id`, or GENERIC.
+
+    Aliases first, the full id before the bare name so an alias written for
+    one provider's spelling does not also claim another's; then the bare name
+    itself. Exact matches throughout: a prefix heuristic would price a new
+    "-lite" variant as its big sibling.
+    """
+    bare = bare_model_name(model_id)
+    key = _ALIASES.get(model_id) or _ALIASES.get(bare) or bare
+    return _LISTED.get(key, GENERIC)
 
 
 def listed_models() -> tuple[str, ...]:

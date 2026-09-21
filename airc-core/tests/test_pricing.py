@@ -6,7 +6,15 @@
 from __future__ import annotations
 
 import pytest
-from airc_core.pricing import GENERIC, Rate, bare_model_name, listed_models, price_for
+from airc_core.pricing import (
+    GENERIC,
+    Price,
+    Rate,
+    bare_model_name,
+    listed_models,
+    price_for,
+    register_alias,
+)
 
 
 def test_lookup_strips_provider_prefix_and_vertex_version():
@@ -74,3 +82,121 @@ def test_storage_is_billed_by_token_hour():
     # 1M tokens held for half an hour at $4.50 per M-token-hour.
     cost = p.cost(prompt_tokens=0, cache_storage_token_hours=500_000)
     assert (cost.input, cost.output) == (pytest.approx(2.25), 0.0)
+
+
+# ── aliases ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def listing():
+    """A listing of our own plus a clean alias table, both restored afterwards:
+    register_alias writes process-global module state, and the alias table
+    would otherwise leak between tests in the order they happened to run."""
+    from datetime import date
+
+    from airc_core import pricing
+
+    fake = Price(
+        model="listed-model",
+        rate=Rate(input=2.0, cache_read=0.2, output=10.0),
+        as_of=date(2026, 1, 1),
+    )
+    saved_listed, saved_aliases = dict(pricing._LISTED), dict(pricing._ALIASES)
+    pricing._LISTED[fake.model] = fake
+    pricing._ALIASES.clear()
+    try:
+        yield fake
+    finally:
+        pricing._LISTED.clear()
+        pricing._LISTED.update(saved_listed)
+        pricing._ALIASES.clear()
+        pricing._ALIASES.update(saved_aliases)
+
+
+def test_alias_prices_an_unlisted_name_at_its_target(listing):
+    assert price_for("mybackend:internal-ckpt-7") is GENERIC
+    register_alias("mybackend:internal-ckpt-7", "listed-model")
+    p = price_for("mybackend:internal-ckpt-7")
+    # The target's listing, unchanged: not generic, and not marked in any way.
+    assert p is listing and not p.generic
+
+
+def test_alias_by_bare_name_covers_every_provider_spelling(listing):
+    register_alias("internal-ckpt-7", "listed-model")
+    assert price_for("mybackend:internal-ckpt-7") is listing
+    assert price_for("otherbackend:internal-ckpt-7") is listing
+    assert price_for("internal-ckpt-7") is listing
+
+
+def test_full_id_alias_beats_bare_alias_and_claims_only_its_provider(listing):
+    """A provider-qualified alias is a statement about ONE provider's spelling
+    of the name; the bare alias, if any, still answers for the others."""
+    from datetime import date
+
+    from airc_core import pricing
+
+    other = Price(
+        model="other-listed",
+        rate=Rate(input=1.0, cache_read=0.1, output=5.0),
+        as_of=date(2026, 1, 1),
+    )
+    pricing._LISTED[other.model] = other
+    register_alias("internal-ckpt-7", "listed-model")
+    register_alias("mybackend:internal-ckpt-7", "other-listed")
+    assert price_for("mybackend:internal-ckpt-7") is other
+    assert price_for("otherbackend:internal-ckpt-7") is listing
+
+
+def test_alias_target_may_be_written_as_a_full_id(listing):
+    register_alias("mybackend:internal-ckpt-7", "somewhere:listed-model")
+    assert price_for("mybackend:internal-ckpt-7") is listing
+
+
+def test_alias_to_an_unlisted_name_is_refused(listing):
+    """It would resolve to GENERIC, which is the outcome the alias was written
+    to prevent -- dead config, refused rather than honoured silently."""
+    with pytest.raises(ValueError, match="no listing for 'nowhere-model'"):
+        register_alias("mybackend:internal-ckpt-7", "nowhere-model")
+    # Chains are not a thing either: an alias is not a listing.
+    register_alias("internal-ckpt-7", "listed-model")
+    with pytest.raises(ValueError, match="no listing for 'internal-ckpt-7'"):
+        register_alias("mybackend:other-ckpt", "internal-ckpt-7")
+    assert price_for("mybackend:other-ckpt") is GENERIC
+
+
+def test_alias_reregistration_same_is_noop_conflicting_raises(listing):
+    from datetime import date
+
+    from airc_core import pricing
+
+    pricing._LISTED["other-listed"] = Price(
+        model="other-listed",
+        rate=Rate(input=1.0, cache_read=0.1, output=5.0),
+        as_of=date(2026, 1, 1),
+    )
+    register_alias("internal-ckpt-7", "listed-model")
+    register_alias("internal-ckpt-7", "listed-model")  # same pair: fine
+    register_alias("internal-ckpt-7", "somewhere:listed-model")  # same target
+    with pytest.raises(ValueError, match="already priced as 'listed-model'"):
+        register_alias("internal-ckpt-7", "other-listed")
+    assert price_for("internal-ckpt-7") is listing
+
+
+def test_alias_does_not_shadow_a_real_listing(listing):
+    """Aliases are consulted first, so an alias whose KEY is itself a listed
+    name would silently re-price a real model. Nothing stops an operator
+    writing one; this pins that the lookup then follows the alias, so the
+    behaviour is at least the documented one rather than an accident."""
+    from datetime import date
+
+    from airc_core import pricing
+
+    other = Price(
+        model="other-listed",
+        rate=Rate(input=1.0, cache_read=0.1, output=5.0),
+        as_of=date(2026, 1, 1),
+    )
+    pricing._LISTED[other.model] = other
+    assert price_for("x:other-listed") is other
+    register_alias("other-listed", "listed-model")
+    assert price_for("x:other-listed") is listing

@@ -91,6 +91,7 @@ _KNOWN_TOPLEVEL = frozenset(
     {
         "models",
         "model_providers",
+        "pricing",
         "mcp",
         "gcp",
         "tool_groups",

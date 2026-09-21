@@ -324,6 +324,83 @@ def test_unpriced_model_is_named_at_load(caplog):
     assert "filter = deepseek:deepseek-chat" in caplog.text
 
 
+# ── [pricing] ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def priced():
+    """A listing of our own and a clean alias table, restored afterwards --
+    load_common registers aliases into process-global module state."""
+    from datetime import date
+
+    from airc_core import pricing
+
+    fake = pricing.Price(
+        model="listed-model",
+        rate=pricing.Rate(input=2.0, cache_read=0.2, output=10.0),
+        as_of=date(2026, 1, 1),
+    )
+    saved_listed, saved_aliases = dict(pricing._LISTED), dict(pricing._ALIASES)
+    pricing._LISTED[fake.model] = fake
+    pricing._ALIASES.clear()
+    try:
+        yield pricing
+    finally:
+        pricing._LISTED.clear()
+        pricing._LISTED.update(saved_listed)
+        pricing._ALIASES.clear()
+        pricing._ALIASES.update(saved_aliases)
+
+
+def test_pricing_alias_is_registered_before_the_unpriced_checks(priced, caplog):
+    """The section exists to satisfy _warn_unpriced and refuse_unpriced, so it
+    has to be parsed before they run: an alias registered afterwards is a
+    warning already printed, or a refusal that already exited."""
+    import logging
+
+    raw = {
+        "pricing": {"aliases": {"mybackend:internal-ckpt-7": "listed-model"}},
+        "models": {"default": "mybackend:internal-ckpt-7"},
+        "daily_usd_cap": 10,
+    }
+    with caplog.at_level(logging.WARNING, logger="airc_core.config"):
+        cfg = load_common(raw)  # would SystemExit on the cap if unpriced
+    assert "has no price listing" not in caplog.text
+    assert cfg.pricing_aliases == {"mybackend:internal-ckpt-7": "listed-model"}
+    assert priced.price_for("mybackend:internal-ckpt-7").model == "listed-model"
+    # Reparse of the same file is what icompleteu does; must not conflict.
+    load_common(raw)
+
+
+def test_pricing_absent_registers_nothing(priced):
+    cfg = load_common({"models": {"default": "mybackend:internal-ckpt-7"}})
+    assert cfg.pricing_aliases == {}
+    assert priced.price_for("mybackend:internal-ckpt-7").generic
+
+
+def test_pricing_alias_errors_name_the_entry(priced):
+    # register_alias's ValueError becomes a SystemExit naming the entry, so the
+    # operator gets the line to edit rather than a traceback.
+    with pytest.raises(
+        SystemExit, match=r"\[pricing.aliases\] mybackend:x.*no listing"
+    ):
+        load_common({"pricing": {"aliases": {"mybackend:x": "nowhere-model"}}})
+    with pytest.raises(SystemExit, match=r"\[pricing.aliases\] mybackend:x must name"):
+        load_common({"pricing": {"aliases": {"mybackend:x": 3}}})
+    with pytest.raises(SystemExit, match=r"\[pricing.aliases\] must be a table"):
+        load_common({"pricing": {"aliases": "listed-model"}})
+    with pytest.raises(SystemExit, match="aliasses"):
+        load_common({"pricing": {"aliasses": {}}})
+    # Two configs in one process disagreeing about a name is a conflict, not a
+    # last-writer-wins.
+    priced._LISTED["other-listed"] = priced._LISTED["listed-model"].model_copy(
+        update={"model": "other-listed"}
+    )
+    load_common({"pricing": {"aliases": {"mybackend:x": "listed-model"}}})
+    with pytest.raises(SystemExit, match="already priced as 'listed-model'"):
+        load_common({"pricing": {"aliases": {"mybackend:x": "other-listed"}}})
+
+
 def test_enabling_the_explicit_vertex_cache_is_said_at_load(caplog):
     """The explicit Vertex cache path has been inactive since 2026-09 and its
     cost rule still carries a hand-tuned ratio; a config that would run it is

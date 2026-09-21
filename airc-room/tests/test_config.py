@@ -259,7 +259,7 @@ def test_known_sibling_sections_allowed(tmp_path):
     assert cfg.handover.enabled is True
 
 
-def test_a_shared_key_load_common_parses_is_not_a_typo(tmp_path):
+def test_a_shared_key_load_common_parses_is_not_a_typo(tmp_path, monkeypatch):
     """The suite shares ONE file, so every key airc_core.load_common reads has
     to be in _KNOWN_TOPLEVEL as well -- the room rejects an unknown top-level
     key BEFORE load_common ever sees it, so a key wired only in core makes the
@@ -268,11 +268,29 @@ def test_a_shared_key_load_common_parses_is_not_a_typo(tmp_path):
     The spend caps are the case that caught this. Named explicitly instead of
     derived, because there is no machine-readable list of what load_common
     parses and a test that derived one would drift with it."""
+    from datetime import date
+
+    from airc_core import pricing
+
+    # A listing of our own for the alias to point at, and a private alias
+    # table: load_common registers into module state the other tests share.
+    monkeypatch.setitem(
+        pricing._LISTED,
+        "listed-model",
+        pricing.Price(
+            model="listed-model",
+            rate=pricing.Rate(input=1.0, cache_read=0.1, output=5.0),
+            as_of=date(2026, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(pricing, "_ALIASES", {})
     body = (
         "daily_usd_cap = 150\n"
         "weekly_usd_cap = 750\n"
         "[models]\n"
         'default = "google_anthropic_vertex:claude-opus-5"\n'
+        "[pricing.aliases]\n"
+        '"mybackend:internal-ckpt-7" = "listed-model"\n'
     )
     load_config(_write(tmp_path, body))
 

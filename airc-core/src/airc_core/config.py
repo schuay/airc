@@ -26,7 +26,7 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 
-from .pricing import price_for
+from .pricing import price_for, register_alias
 from .providers import EFFORT_LEVELS, traits_for
 
 log = logging.getLogger(__name__)
@@ -248,6 +248,11 @@ class CommonConfig:
     #: registered in airc_core.model, so a component can SEE what was declared
     #: (an inspector, a test) without reading module state it does not own.
     model_providers: dict[str, dict] = field(default_factory=dict)
+    #: [pricing.aliases] verbatim, model -> listed name it is priced as. On the
+    #: config for the same reason model_providers is, and registered in
+    #: airc_core.pricing for the same reason too: price_for is a free function
+    #: with no cfg in scope.
+    pricing_aliases: dict[str, str] = field(default_factory=dict)
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     mcp_enable_in_sandbox: dict[str, bool] = field(default_factory=dict)
     tool_groups: dict[str, list[str]] = field(
@@ -307,6 +312,40 @@ def profile_for(common: CommonConfig, key: str, where: str) -> ModelProfile:
     raise ValueError(f"no model configured: [models].{key} or .default{where}")
 
 
+def _load_pricing(raw: Mapping, cfg: CommonConfig) -> None:
+    """Parse [pricing] and register each alias with airc_core.pricing.
+
+    Registering as a side effect of parsing, like _load_model_providers and for
+    the same reason: price_for is a free function, every component reaches it,
+    and load_common is the one point they all pass through. Must run BEFORE
+    _warn_unpriced and refuse_unpriced, which are the checks these aliases
+    exist to satisfy -- an alias registered after them is a warning the
+    operator already saw, or a refusal that already exited.
+
+    The `aliases` table is user-keyed (the alias IS the key), so it is open;
+    each value must be a string naming a listing, and register_alias decides
+    whether it does. Only the section's own key set is strict.
+    """
+    if not (pricing := raw.get("pricing")):
+        return
+    reject_unknown(pricing, {"aliases"}, "[pricing]")
+    aliases = pricing.get("aliases") or {}
+    if not isinstance(aliases, Mapping):
+        raise SystemExit('[pricing.aliases] must be a table of "model" = "listed"')
+    for model, priced_as in aliases.items():
+        where = f"[pricing.aliases] {model}"
+        if not isinstance(priced_as, str) or not priced_as:
+            raise SystemExit(f"{where} must name a listed model (a string)")
+        try:
+            register_alias(str(model), priced_as)
+        except ValueError as e:
+            # SystemExit, like every other config error here: this runs during
+            # startup parsing, where a traceback buries the one line naming the
+            # entry the operator has to fix.
+            raise SystemExit(f"{where}: {e}") from e
+        cfg.pricing_aliases[str(model)] = priced_as
+
+
 def _warn_unpriced(models: Mapping[str, str]) -> None:
     """Name, at load, every [models] entry the price table has no listing for.
 
@@ -346,8 +385,9 @@ def refuse_unpriced(models: Mapping[str, str], what: str) -> None:
     raise SystemExit(
         f"{what} is a dollar budget, and the price table has no listing for"
         f" {', '.join(unpriced)}: the bound would be on the generic placeholder"
-        " rate rather than on what the model costs. Add the model to"
-        " airc_core.pricing, or point the budgeted stage at a listed model."
+        " rate rather than on what the model costs. Price it as a listed model"
+        " under [pricing.aliases], add it to airc_core.pricing, or point the"
+        " budgeted stage at a listed model."
     )
 
 
@@ -413,6 +453,9 @@ def load_common(raw: Mapping) -> CommonConfig:
         k: _parse_model_profile(k, v) for k, v in raw.get("models", {}).items()
     }
     cfg.models = {k: p.id for k, p in cfg.model_profiles.items()}
+    # Before the unpriced checks, by construction: they read the table these
+    # aliases write to. Order here is the whole point of the section.
+    _load_pricing(raw, cfg)
     _warn_unpriced(cfg.models)
     _load_model_providers(raw, cfg)
     if mcp := raw.get("mcp"):
