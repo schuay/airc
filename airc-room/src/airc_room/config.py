@@ -271,9 +271,9 @@ ttl_minutes = 30           # cache lifetime; clamped up if below the turn deadli
 # than this are acked unread instead of replayed, so a long outage does not flood
 # the room. Default 3600 (1h); a subscriber may exempt itself.
 # catchup_max_age_s = 3600
-# Address and display each persona by its agent.toml `nickname` instead of the
-# functional folder handle. Persisted per-thread state keys on the stable folder
-# identity, so toggling this preserves each persona's thread memory.
+# Use each persona's agent.toml `nickname` as its primary address and display
+# name. The functional folder handle remains an address alias. Persisted state
+# keys on the folder identity, so toggling this preserves thread memory.
 # use_nicknames = true
 
 # Per-persona voice guides (TONE only), keyed by the persona's functional handle
@@ -474,10 +474,10 @@ class Config:
     # tail (the system prompt loses weight far from it). 0 disables it. See
     # agent.GroundingReminderMiddleware.
     grounding_reminder_tokens: int = 200_000
-    # Address and display personas by their human nickname (agent.toml `nickname`)
-    # instead of the functional folder handle. Off keeps the functional names.
-    # Persisted per-thread state keys on the stable folder identity (not the
-    # handle), so toggling this on or off preserves each persona's thread memory.
+    # Use each persona's human nickname (agent.toml `nickname`) as its primary
+    # address and display name. The functional folder handle remains an address
+    # alias. Persisted per-thread state keys on the stable folder identity, so
+    # toggling this on or off preserves each persona's thread memory.
     use_nicknames: bool = False
     # Per-persona voice guides, keyed by functional handle (gc, compiler, ...).
     # Each value is a path to a distilled TONE guide.

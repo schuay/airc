@@ -47,8 +47,8 @@ class Persona:
     tools: tuple[str, ...] = field(default_factory=tuple)
     path: Path | None = None
     # Optional human nickname (e.g. "Sonic" for the perf agent). Only takes
-    # effect when [airc].use_nicknames is on, at which point it replaces both the
-    # handle (name) and display_name; the folder name stays the on-disk identity.
+    # effect when [airc].use_nicknames is on, at which point it becomes the
+    # primary handle and display_name. The folder name remains an address alias.
     nickname: str = ""
     # Stable identity for persisted per-thread state (seen offsets, checkpoints):
     # the folder name, unchanged by the nickname swap. Keeping state keyed on this
@@ -59,6 +59,25 @@ class Persona:
     @property
     def state_key(self) -> str:
         return self.key or self.name
+
+    @property
+    def sender_label(self) -> str:
+        return (
+            f"{self.name} ({self.state_key})"
+            if self.name != self.state_key
+            else self.name
+        )
+
+
+def persona_handles(personas: dict[str, Persona]) -> dict[str, str]:
+    """Map every addressable handle to its live persona name."""
+    handles: dict[str, str] = {}
+    for name, persona in personas.items():
+        for handle in (name, persona.state_key):
+            if handle in handles and handles[handle] != name:
+                raise PersonaError(f"duplicate persona handle {handle!r}")
+            handles[handle] = name
+    return handles
 
 
 def load_persona(folder: Path) -> Persona:
@@ -108,11 +127,10 @@ def load_commit_brief(agents_dir: Path) -> str:
 
 
 def _apply_nickname(p: Persona) -> Persona:
-    """Swap in the persona's nickname as both handle and display name. The
-    lowercased nickname becomes the addressable handle, so it must be a valid
-    handle; routing, display, and prompts then use the nickname uniformly.
-    Persisted state stays keyed on p.state_key (the folder name, untouched by the
-    replace below), so the toggle does not orphan a persona's thread memory."""
+    """Swap in the persona's nickname as primary handle and display name. The
+    lowercased nickname must be a valid handle. The stable folder handle remains
+    addressable through persona_handles and continues to key persisted state, so
+    the toggle does not orphan a persona's thread memory."""
     if not p.nickname:
         return p
     handle = p.nickname.lower()
@@ -144,4 +162,5 @@ def discover_personas(
         personas[p.name] = p
     if not personas:
         raise PersonaError(f"no agent folders found in {agents_dir}")
+    persona_handles(personas)
     return personas

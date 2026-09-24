@@ -95,6 +95,28 @@ async def test_post_is_best_effort_by_default(tmp_path):
     assert msg.text == "hello"
 
 
+async def test_agent_label_is_only_used_for_transport_rendering(tmp_path):
+    room = Room(
+        Store(tmp_path / "airc.db"),
+        agent_labels={"michi": "michi (compiler)"},
+    )
+    rec = _Recorder()
+    room.add_transport(rec)
+    t = room.create_thread("t")
+    msg = await room.post(t.id, "michi", MessageKind.AGENT, "hello")
+    assert rec.seen[0].sender == "michi (compiler)"
+    assert msg.sender == room.thread_messages(t.id)[0].sender == "michi"
+    assert room.inbox.get_nowait().sender == "michi"
+
+
+async def test_agent_label_is_used_for_typing():
+    room = Room(_Store(), agent_labels={"michi": "michi (compiler)"})
+    cap = _Typing()
+    room.add_transport(cap)
+    await room.typing(1, "michi", True)
+    assert cap.calls == [(1, "michi (compiler)", True, None)]
+
+
 async def test_require_delivery_raises_when_no_transport_took_it(tmp_path):
     # The queue-drain contract: a subscriber acks its bus message when post
     # returns, so a swallowed transport failure drops the item with no retry and

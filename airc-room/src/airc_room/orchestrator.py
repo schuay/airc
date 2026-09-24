@@ -66,6 +66,7 @@ from airc_core import (
 )
 
 from .config import Config
+from .personas import persona_handles
 from .room import Room
 from .runner import AgentRunner
 from .store import Message, MessageKind, Store
@@ -530,6 +531,7 @@ class Orchestrator:
         if await self._consumed(msg):
             return
         agents = self._runner.agents
+        handles = persona_handles(agents)
         candidates = [n for n in agents if n != msg.sender]
         if not candidates:
             return
@@ -564,9 +566,13 @@ class Orchestrator:
             # agent writing "perf, compiler: ..." with its own name must still
             # force compiler, not void the whole address because its own name
             # is not a candidate.
-            responders = [
-                n for n in parse_mentions(msg.text, set(agents)) if n != msg.sender
-            ]
+            responders = list(
+                dict.fromkeys(
+                    handles[h]
+                    for h in parse_mentions(msg.text, set(handles))
+                    if handles[h] != msg.sender
+                )
+            )
             # A human's direct address forces a substantive reply: the named
             # agent's NOTHING_TO_ADD escape hatch is withdrawn for this turn.
             # An agent addressing another agent does not get that override.
@@ -937,7 +943,7 @@ class Orchestrator:
         signals = []
         if pressure := self._pressure(streak):
             signals.append(pressure)
-        if humans_moved_on(messages, set(agents)):
+        if humans_moved_on(messages, set(persona_handles(agents))):
             signals.append(_MOVED_ON)
         signals_text = (
             "\nSignals:\n" + "\n".join(f"- {s}" for s in signals) + "\n"

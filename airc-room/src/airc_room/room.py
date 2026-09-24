@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Protocol
 
 from .store import Message, MessageKind, Store, Thread
@@ -79,9 +80,12 @@ class Transport(Protocol):
 
 
 class Room:
-    def __init__(self, store: Store) -> None:
+    def __init__(
+        self, store: Store, agent_labels: dict[str, str] | None = None
+    ) -> None:
         self._store = store
         self._transports: list[Transport] = []
+        self._agent_labels = agent_labels or {}
         self.inbox: asyncio.Queue[Message] = asyncio.Queue()
 
     @property
@@ -188,11 +192,16 @@ class Room:
             thread_id, sender, kind, text, follow_up, sender_id=sender_id
         )
         self.inbox.put_nowait(msg)
+        outbound = (
+            replace(msg, sender=self._agent_labels.get(sender, sender))
+            if msg.kind == MessageKind.AGENT
+            else msg
+        )
         delivered = 0
         for t in self._transports:
             try:
                 async with asyncio.timeout(_TRANSPORT_TIMEOUT):
-                    await t.deliver(msg)
+                    await t.deliver(outbound)
                 delivered += 1
             except Exception:
                 log.exception("transport %s failed to deliver message", t.name)
@@ -209,6 +218,7 @@ class Room:
         render it (e.g. a Chat "thinking..." placeholder); those without a
         ``typing`` method ignore it. ``budget`` is the turn's time allowance in
         seconds, letting a transport show a countdown."""
+        sender = self._agent_labels.get(sender, sender)
         for t in self._transports:
             fn = getattr(t, "typing", None)
             if fn is None:

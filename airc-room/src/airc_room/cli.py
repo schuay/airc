@@ -522,7 +522,8 @@ async def amain(args: argparse.Namespace) -> None:
 
     store = Store(cfg.db_path)
     tokens = TokenLog(cfg.token_db_path)
-    room = Room(store)
+    agent_labels = {name: persona.sender_label for name, persona in personas.items()}
+    room = Room(store, agent_labels=agent_labels)
 
     # Which chat frontend to bind. "console" and "headless" are core; every other
     # kind (gchat now, matrix later) is resolved through the app plugin, so core

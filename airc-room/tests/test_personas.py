@@ -95,10 +95,12 @@ def test_discover_use_nicknames_swaps_handle_and_display(tmp_path):
     sonic = personas["sonic"]
     assert sonic.display_name == "Sonic"
     assert sonic.path.name == "perf"
+    assert sonic.sender_label == "sonic (perf)"
     # State stays keyed on the folder identity, so toggling nicknames does not
     # orphan a persona's persisted thread state.
     assert sonic.state_key == "perf"
     assert personas["gc"].display_name == "Gc"
+    assert personas["gc"].sender_label == "gc"
 
 
 def test_state_key_matches_functional_handle_across_toggle(tmp_path):
@@ -120,6 +122,13 @@ def test_discover_without_nicknames_keeps_functional(tmp_path):
 def test_nickname_must_be_valid_handle(tmp_path):
     write_agent(tmp_path, "perf", toml='description = "d"\nnickname = "Sonic!"')
     with pytest.raises(PersonaError, match="not a valid handle"):
+        discover_personas(tmp_path, use_nicknames=True)
+
+
+def test_nickname_must_not_collide_with_a_stable_handle(tmp_path):
+    write_agent(tmp_path, "compiler", toml='description = "d"\nnickname = "Michi"')
+    write_agent(tmp_path, "michi", toml='description = "d"\nnickname = "Max"')
+    with pytest.raises(PersonaError, match="duplicate persona handle 'michi'"):
         discover_personas(tmp_path, use_nicknames=True)
 
 

@@ -17,6 +17,7 @@ class FakeRunner:
 
     def __init__(self, names, delay=0.05):
         self._names = list(names)
+        self._state_keys = {name: name for name in names}
         self.delay = delay
         self.calls = []  # (agent, thread_id) in completion order
         self.addressed = []  # (agent, thread_id, addressed) in completion order
@@ -29,7 +30,10 @@ class FakeRunner:
     def agents(self):
         from types import SimpleNamespace
 
-        return {n: SimpleNamespace(description=f"{n} expert") for n in self._names}
+        return {
+            n: SimpleNamespace(description=f"{n} expert", state_key=self._state_keys[n])
+            for n in self._names
+        }
 
     async def run_turn(
         self, name, thread_id, *, addressed=False, task_prompt=None, trigger_id=None
@@ -78,6 +82,21 @@ async def test_responders_of_one_message_overlap(tmp_path, monkeypatch):
     await room.post(t.id, "alice", "human", "perf, compiler: go")
     await drive(orch, lambda: len(replies(store, t.id)) == 2)
     assert runner.max_active == 2
+
+
+async def test_nickname_and_stable_handles_address_the_same_agent(
+    tmp_path, monkeypatch
+):
+    store, room, runner, orch = make_env(
+        tmp_path, monkeypatch, agents=("michi",), delay=0.01
+    )
+    runner._state_keys["michi"] = "compiler"
+    t = room.create_thread("main")
+    for address in ("michi", "compiler", "michi, compiler"):
+        message = store.add_message(t.id, "alice", "human", f"{address}: go")
+        await orch._handle(message, _PendingMsg(message.id, remaining=1))
+        await asyncio.gather(*orch._round_tasks)
+    assert runner.addressed == [("michi", t.id, True)] * 3
 
 
 async def test_same_agent_overlaps_across_threads(tmp_path, monkeypatch):
