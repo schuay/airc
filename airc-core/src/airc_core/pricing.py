@@ -24,6 +24,8 @@ from datetime import date
 
 from pydantic import BaseModel, ConfigDict
 
+from .providers import bare_model_name
+
 _MILLION = 1_000_000
 
 
@@ -142,6 +144,17 @@ _LISTED: dict[str, Price] = {
             ),
             as_of=_READ,
         ),
+        Price(
+            model="claude-opus-5-5",
+            rate=Rate(
+                input=5.0,
+                cache_read=0.5,
+                output=25.0,
+                cache_write_5m=6.25,
+                cache_write_1h=10.0,
+            ),
+            as_of=_READ,
+        ),
     )
 }
 
@@ -163,14 +176,6 @@ GENERIC = Price(
     note="placeholder rate for models without a listing",
     generic=True,
 )
-
-
-def bare_model_name(model_id: str) -> str:
-    """The provider-side name: "google_anthropic_vertex:claude-opus-5@20260701"
-    -> "claude-opus-5". Vertex pins a version with "@"; the price is the
-    model's."""
-    name = model_id.split(":", 1)[-1]
-    return name.split("@", 1)[0]
 
 
 # Names the table does not list, priced at a listing it does. Keyed by what

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from airc_core import model as model_mod
-from airc_core.providers import STOP_REASON_KEYS, traits_for
+from airc_core.providers import STOP_REASON_KEYS, model_traits_for, traits_for
 
 
 def test_both_anthropic_routes_share_one_record():
@@ -74,3 +74,24 @@ def test_a_provider_without_restrictions_keeps_its_kwargs():
     kwargs = {"temperature": 0.7, "seed": 1}
     model_mod._drop_unsupported_kwargs(kwargs, "google_vertexai:gemini")
     assert kwargs == {"temperature": 0.7, "seed": 1}
+
+
+def test_model_traits_key_by_bare_name_across_providers_and_version_pins():
+    """Checkpoint traits follow the model name whether served direct, on Vertex,
+    or pinned with @version; unlisted models get the neutral record."""
+    for mid in (
+        "google_anthropic_vertex:claude-opus-5-5",
+        "google_anthropic_vertex:claude-opus-5-5@20260901",
+        "anthropic:claude-opus-5-5",
+    ):
+        t = model_traits_for(mid)
+        assert t.id == "claude-opus-5-5"
+        assert t.supports_forced_tool_choice is False
+
+    assert (
+        model_traits_for(
+            "google_anthropic_vertex:claude-opus-5"
+        ).supports_forced_tool_choice
+        is True
+    )
+    assert model_traits_for("some_new_provider:m").supports_forced_tool_choice is True

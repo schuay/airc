@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
-from .providers import EFFORT_LEVELS, google_sdk, traits_for
+from .providers import EFFORT_LEVELS, google_sdk, model_traits_for, traits_for
 
 log = logging.getLogger(__name__)
 
@@ -671,6 +671,50 @@ def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
     kwargs["effort"] = effort
 
 
+def _strip_forced_tool_choice(tool_choice):
+    if not tool_choice:
+        return tool_choice
+    if isinstance(tool_choice, str):
+        return tool_choice if tool_choice in ("auto", "none") else None
+    if isinstance(tool_choice, dict):
+        if tool_choice.get("type") in ("auto", "none", None):
+            return tool_choice
+        if "disable_parallel_tool_use" in tool_choice:
+            return {
+                "type": "auto",
+                "disable_parallel_tool_use": tool_choice["disable_parallel_tool_use"],
+            }
+        return None
+    return None
+
+
+def _guard_forced_tool_choice(model, model_id: str):
+    """Drop forced tool_choice on checkpoints whose API refuses "any" and "tool".
+
+    ToolStrategy binds every agent call with tool_choice="any", and review's
+    salvage call binds tool_choice=<schema>. ChatAnthropicVertex passes both
+    straight through to messages.create(), where checkpoints like claude-opus-5-5
+    reject them with 400 ("tool_choice: type 'tool' and 'any' are not supported
+    for this model"). Dropping to None leaves the request in the provider's
+    default "auto" mode; RequireStructuredResultMiddleware and
+    FinalAnswerMiddleware handle a turn that answers in prose instead of calling
+    the result tool.
+    """
+    if model_traits_for(model_id).supports_forced_tool_choice:
+        return model
+    orig = getattr(model, "bind_tools", None)
+    if orig is None:
+        return model
+
+    def bind_tools(tools, *args, tool_choice=None, **kwargs):
+        return orig(
+            tools, *args, tool_choice=_strip_forced_tool_choice(tool_choice), **kwargs
+        )
+
+    object.__setattr__(model, "bind_tools", bind_tools)
+    return model
+
+
 def make_model(model_id: str, *, effort: str | None = None, **kwargs):
     if problem := check_model_id(model_id):
         raise ValueError(f"{problem}; {supported_models_hint()}")
@@ -686,7 +730,10 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
     # Vertex proxy endpoint, which is provider-specific, so a custom backend that
     # must work from inside the sandbox needs its own egress arrangement.
     if spec := _custom_spec(model_id):
-        return _custom_factory(model_id.split(":", 1)[0], spec)(model_id, **kwargs)
+        return _guard_forced_tool_choice(
+            _custom_factory(model_id.split(":", 1)[0], spec)(model_id, **kwargs),
+            model_id,
+        )
     # Every built-in provider, before any branch reads kwargs: a kwarg the API
     # refuses is refused the same way wherever it came from. Registered external
     # providers are excluded above -- their kwargs are the factory's contract.
@@ -715,7 +762,9 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
                     " would leak the OpenAI key to openrouter.ai"
                 )
             kwargs["api_key"] = key
-        return init_chat_model(f"openai:{name}", **kwargs)
+        return _guard_forced_tool_choice(
+            init_chat_model(f"openai:{name}", **kwargs), model_id
+        )
     if model_id.startswith("google_anthropic_vertex:"):
         # The call-time defaults the google_vertexai: branch sets, for the same
         # reasons; ChatAnthropicVertex's own defaults are worse on each:
@@ -766,7 +815,9 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
             kwargs.setdefault("access_token", _PROXY_PLACEHOLDER_TOKEN)
     if model_id.startswith("google_vertexai:"):
         if _google_sdk() == "genai":
-            return _make_genai_vertex(model_id, kwargs)
+            return _guard_forced_tool_choice(
+                _make_genai_vertex(model_id, kwargs), model_id
+            )
         # Construction is the universal Vertex chokepoint (every agent/review
         # graph builds its model here), so silence the benign call-time warnings
         # and install the tool-first converter guard once, for every component.
@@ -798,4 +849,6 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
         # A per-call deadline reaps a hung stream (see _VERTEX_CALL_TIMEOUT_S);
         # an explicit caller value wins.
         kwargs.setdefault("timeout", _VERTEX_CALL_TIMEOUT_S)
-    return init_chat_model(model_id, **(_provider_kwargs(model_id) | kwargs))
+    return _guard_forced_tool_choice(
+        init_chat_model(model_id, **(_provider_kwargs(model_id) | kwargs)), model_id
+    )

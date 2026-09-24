@@ -879,3 +879,49 @@ def test_no_effort_sends_no_output_config(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
     m = make_model("google_anthropic_vertex:claude-opus-5", access_token="x")
     assert "output_config" not in m.model_kwargs
+
+
+def test_models_without_forced_tool_choice_drop_any_and_named_tool(monkeypatch):
+    """ToolStrategy binds tool_choice='any' and salvage binds the schema name.
+    claude-opus-5-5 rejects both with 400 ('tool_choice: type "tool" and "any"
+    are not supported for this model'); bind_tools drops them to None while
+    keeping 'auto', and leaves checkpoints that accept them untouched."""
+    pytest.importorskip("langchain_google_vertexai")
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    tool = {
+        "name": "ReviewResult",
+        "description": "report",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+    m55 = make_model("google_anthropic_vertex:claude-opus-5-5", access_token="x")
+    for forced in (
+        "any",
+        "ReviewResult",
+        {"type": "any"},
+        {"type": "tool", "name": "ReviewResult"},
+    ):
+        bound = m55.bind_tools([tool], tool_choice=forced)
+        assert "tool_choice" not in bound.kwargs
+
+    # Non-forced modes and parallel_tool_calls flags survive.
+    auto_bound = m55.bind_tools([tool], tool_choice="auto")
+    assert auto_bound.kwargs["tool_choice"] == {"type": "auto"}
+    no_parallel = m55.bind_tools(
+        [tool], tool_choice={"type": "any", "disable_parallel_tool_use": True}
+    )
+    assert no_parallel.kwargs["tool_choice"] == {
+        "type": "auto",
+        "disable_parallel_tool_use": True,
+    }
+
+    # claude-opus-5 still accepts forced tool_choice and keeps it.
+    m5 = make_model("google_anthropic_vertex:claude-opus-5", access_token="x")
+    assert m5.bind_tools([tool], tool_choice="any").kwargs["tool_choice"] == {
+        "type": "any"
+    }
+    assert m5.bind_tools([tool], tool_choice="ReviewResult").kwargs["tool_choice"] == {
+        "type": "tool",
+        "name": "ReviewResult",
+    }

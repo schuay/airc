@@ -133,3 +133,41 @@ REFUSAL_STOP_REASON = "refusal"
 # per-model fact no table here tracks. Config checks the vocabulary; the
 # provider rejects a model that cannot serve the level asked for.
 EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+
+def bare_model_name(model_id: str) -> str:
+    """The provider-side name: "google_anthropic_vertex:claude-opus-5@20260701"
+    -> "claude-opus-5". Vertex pins a version with "@"; the traits and price
+    are the model's."""
+    name = model_id.split(":", 1)[-1]
+    return name.split("@", 1)[0]
+
+
+@dataclass(frozen=True)
+class ModelTraits:
+    """What one checkpoint does differently across every provider that serves it,
+    keyed by bare_model_name(model_id)."""
+
+    id: str
+    # Whether the checkpoint accepts forced tool_choice ("any" or a named tool).
+    # False drops a forced tool_choice in bind_tools so the call goes out in
+    # the provider's default "auto" mode instead of failing with 400.
+    supports_forced_tool_choice: bool = True
+
+
+_DEFAULT_MODEL = ModelTraits(id="")
+
+# claude-opus-5-5 rejects tool_choice types "any" and "tool" with 400
+# ("tool_choice: type 'tool' and 'any' are not supported for this model"),
+# whether or not thinking is configured in the request.
+_MODEL_TRAITS: dict[str, ModelTraits] = {
+    "claude-opus-5-5": ModelTraits(
+        id="claude-opus-5-5",
+        supports_forced_tool_choice=False,
+    ),
+}
+
+
+def model_traits_for(model_id: str) -> ModelTraits:
+    """Traits for `model_id`'s checkpoint; a neutral record for anything else."""
+    return _MODEL_TRAITS.get(bare_model_name(model_id), _DEFAULT_MODEL)
