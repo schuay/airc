@@ -24,6 +24,7 @@ airc dependency so airc-processors can log to it directly.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import sqlite3
 import time
@@ -61,6 +62,9 @@ CREATE TABLE IF NOT EXISTS token_usage (
     -- Largest single-call input_tokens within this row. Distinguishes a turn
     -- that grew quadratically (max near the per-row sum) from many even calls.
     max_call_input_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Provider-reported prompt size for each model call in this row. The
+    -- growth curve is needed to place token-based convergence checkpoints.
+    call_input_tokens TEXT NOT NULL DEFAULT '[]',
     -- Thinking subset of output_tokens.
     reasoning_tokens INTEGER NOT NULL DEFAULT 0,
     -- Explicit-cache storage booked at creation: tokens held times TTL hours.
@@ -89,6 +93,7 @@ _ADDED_COLUMNS = (
     ("model", "TEXT NOT NULL DEFAULT ''"),
     ("model_calls", "INTEGER NOT NULL DEFAULT 0"),
     ("max_call_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("call_input_tokens", "TEXT NOT NULL DEFAULT '[]'"),
     ("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("cache_storage_token_hours", "REAL NOT NULL DEFAULT 0"),
@@ -178,6 +183,7 @@ class TokenLog:
         agent: str,
         kind: str,
         label: str = "",
+        call_input_tokens: list[int] | None = None,
     ) -> None:
         if self._db is None:
             return
@@ -185,10 +191,11 @@ class TokenLog:
             self._db.execute(
                 "INSERT INTO token_usage (ts, thread_id, agent, kind, input_tokens,"
                 " output_tokens, cached_input_tokens, model, model_calls,"
-                " max_call_input_tokens, cache_write_tokens, reasoning_tokens,"
+                " max_call_input_tokens, call_input_tokens, cache_write_tokens,"
+                " reasoning_tokens,"
                 " cache_storage_token_hours, usd, estimated, usd_input, usd_output,"
                 " label)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     thread_id,
@@ -200,6 +207,7 @@ class TokenLog:
                     usage.model,
                     usage.calls,
                     usage.max_call_input,
+                    json.dumps(call_input_tokens or [], separators=(",", ":")),
                     usage.cache_write,
                     usage.reasoning,
                     usage.cache_storage_token_hours,

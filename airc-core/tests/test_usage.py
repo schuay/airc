@@ -195,6 +195,7 @@ def test_collector_books_calls_and_routes_summarization_aside(caplog):
         c.on_chat_model_start({}, msgs, run_id=r3)
         c.on_llm_error(RuntimeError("503"), run_id=r3)
     assert c.total.calls == 1 and c.total.input == 1_000 and c.total.model == OPUS
+    assert c.call_input_tokens == [1_000]
     assert c.aside.calls == 1 and c.aside.model == "google_vertexai:gemini-3.8-flash"
     assert c.aside.usd == pytest.approx((50_000 * 0.75 + 2_000 * 3.75) / 1e6)
     assert c._shape == {} and c._aside_model == {}

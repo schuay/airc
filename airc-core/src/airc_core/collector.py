@@ -78,6 +78,10 @@ class UsageCollector(BaseCallbackHandler):
         self._model_id = model_id
         self.total = Usage(model=model_id)
         self.aside = Usage()
+        # The aggregate keeps max_call_input, but cadence design needs the
+        # growth curve. Keep the provider-reported prompt size of every agent
+        # call; callers that persist usage can store it beside the total.
+        self.call_input_tokens: list[int] = []
         self._shape: dict[object, tuple[int, int, int]] = {}
         self._aside_model: dict[object, str] = {}
 
@@ -111,6 +115,7 @@ class UsageCollector(BaseCallbackHandler):
             return
         call = Usage.of_call(usage, self._model_id)
         self.total = self.total + call
+        self.call_input_tokens.append(call.input)
         n_msgs, n_tool, tool_chars = self._shape.pop(run_id, (0, 0, 0))
         # Per call, so the growth curve within a turn is visible: what this
         # call cost and what the turn has cost so far, then the prompt's size

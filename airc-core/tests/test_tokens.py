@@ -39,7 +39,13 @@ def _u(
 
 def test_token_accounting(tmp_path):
     t = TokenLog(tmp_path / "tokens.db")
-    t.add(_u(1000, 50), thread_id=1, agent="perf", kind="turn")
+    t.add(
+        _u(1000, 50),
+        thread_id=1,
+        agent="perf",
+        kind="turn",
+        call_input_tokens=[200, 300, 500],
+    )
     t.add(_u(100, 1), thread_id=1, agent="perf", kind="coordinator")
     t.add(_u(300, 20), thread_id=2, agent="compiler", kind="turn")
     assert t.totals() == (1400, 71)
@@ -50,6 +56,10 @@ def test_token_accounting(tmp_path):
     top = t.top_threads(n=1)
     assert top[0] == (1, 1100, 51, 0.0)  # (thread_id, input, output, usd)
     assert t.totals(since=1e12) == (0, 0)  # window filter
+    (curve,) = t._db.execute(
+        "SELECT call_input_tokens FROM token_usage WHERE input_tokens=1000"
+    ).fetchone()
+    assert curve == "[200,300,500]"
 
 
 def test_cost_is_stored_per_row_and_summed_with_the_estimate_flag(tmp_path):
