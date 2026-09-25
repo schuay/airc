@@ -83,6 +83,7 @@ def test_model_traits_key_by_bare_name_across_providers_and_version_pins():
         "google_anthropic_vertex:claude-opus-5-5",
         "google_anthropic_vertex:claude-opus-5-5@20260901",
         "anthropic:claude-opus-5-5",
+        "openrouter:anthropic/claude-opus-5-5",
     ):
         t = model_traits_for(mid)
         assert t.id == "claude-opus-5-5"

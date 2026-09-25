@@ -169,5 +169,12 @@ _MODEL_TRAITS: dict[str, ModelTraits] = {
 
 
 def model_traits_for(model_id: str) -> ModelTraits:
-    """Traits for `model_id`'s checkpoint; a neutral record for anything else."""
-    return _MODEL_TRAITS.get(bare_model_name(model_id), _DEFAULT_MODEL)
+    """Traits for `model_id`'s checkpoint; a neutral record for anything else.
+
+    An aggregator names the checkpoint behind a vendor path, as in
+    "openrouter:anthropic/claude-opus-5-5". The traits are the checkpoint's on
+    every route, so the path is dropped here. Pricing keeps the full bare name,
+    since the aggregator's rate is its own.
+    """
+    name = bare_model_name(model_id).rsplit("/", 1)[-1]
+    return _MODEL_TRAITS.get(name, _DEFAULT_MODEL)
