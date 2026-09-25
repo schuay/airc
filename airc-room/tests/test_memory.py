@@ -130,6 +130,35 @@ def test_jail_entry_checks_the_resolved_path(tmp_path):
         jail_entry(tmp_path, "evil.md")
 
 
+def test_jail_follows_a_dangling_symlink(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "out.md").symlink_to(tmp_path / "created-outside.md")
+    with pytest.raises(Jailbreak):
+        jail(store, "out.md")
+
+
+def test_jail_entry_refuses_a_dangling_symlink_into_machinery(tmp_path):
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    (tmp_path / "hook.md").symlink_to(tmp_path / ".git" / "hooks" / "pre-commit")
+    with pytest.raises(Jailbreak):
+        jail_entry(tmp_path, "hook.md")
+
+
+def test_jail_entry_refuses_a_symlink_loop(tmp_path):
+    (tmp_path / "loop.md").symlink_to(tmp_path / "loop.md")
+    with pytest.raises(Jailbreak):
+        jail_entry(tmp_path, "loop.md")
+
+
+def test_jail_entry_refuses_a_hard_link(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "validate.py").write_text("import yaml\n")
+    os.link(tmp_path / "scripts" / "validate.py", tmp_path / "linked.md")
+    with pytest.raises(Jailbreak):
+        jail_entry(tmp_path, "linked.md")
+
+
 async def test_write_to_the_hook_cannot_run_code(tmp_path):
     # The exploit shape: overwrite the pre-commit hook, then let the next
     # legitimate write run it.

@@ -67,6 +67,13 @@ def jail_entry(root: Path, path: str) -> Path:
             f"path {path!r} is not a memory entry: use a lowercase name like"
             " prefers-explicit-types.md, directly in the store root"
         )
+    # Writes go through the file in place. A symlink left after resolution is a
+    # loop, and a second hard link shares its inode with a file elsewhere, so a
+    # write to either would land somewhere other than this entry.
+    if resolved.is_symlink():
+        raise Jailbreak(f"path {path!r} is a symlink loop")
+    if resolved.is_file() and resolved.stat().st_nlink > 1:
+        raise Jailbreak(f"path {path!r} is hard-linked to another file")
     return resolved
 
 
@@ -77,7 +84,9 @@ def _resolve_allowing_missing(p: Path) -> Path:
     target out of the tree -- without requiring the file to exist."""
     existing = p
     tail: list[str] = []
-    while not existing.exists():
+    # lexists, not exists: a dangling symlink must be resolved through to its
+    # target, or it passes as a plain name and a write creates the target.
+    while not os.path.lexists(existing):
         tail.append(existing.name)
         parent = existing.parent
         if parent == existing:  # reached the filesystem root
