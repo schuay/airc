@@ -145,10 +145,29 @@ def test_jail_entry_refuses_a_dangling_symlink_into_machinery(tmp_path):
         jail_entry(tmp_path, "hook.md")
 
 
-def test_jail_entry_refuses_a_symlink_loop(tmp_path):
+def test_jail_refuses_a_symlink_loop(tmp_path):
     (tmp_path / "loop.md").symlink_to(tmp_path / "loop.md")
-    with pytest.raises(Jailbreak):
+    with pytest.raises(Jailbreak, match="symlink loop"):
+        jail(tmp_path, "loop.md")
+    with pytest.raises(Jailbreak, match="symlink loop"):
         jail_entry(tmp_path, "loop.md")
+
+
+def test_jail_refuses_a_symlink_loop_when_resolve_raises(tmp_path, monkeypatch):
+    """Python before 3.13 raises RuntimeError on a loop instead of returning the
+    link; that must surface as a Jailbreak too."""
+    (tmp_path / "loop.md").symlink_to(tmp_path / "loop.md")
+
+    original = type(tmp_path).resolve
+
+    def raising_resolve(self, strict=False):
+        if self.name == "loop.md":
+            raise RuntimeError("Symlink loop")
+        return original(self, strict)
+
+    monkeypatch.setattr(type(tmp_path), "resolve", raising_resolve)
+    with pytest.raises(Jailbreak, match="symlink loop"):
+        jail(tmp_path, "loop.md")
 
 
 def test_jail_entry_refuses_a_hard_link(tmp_path):

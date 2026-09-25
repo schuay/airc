@@ -67,11 +67,8 @@ def jail_entry(root: Path, path: str) -> Path:
             f"path {path!r} is not a memory entry: use a lowercase name like"
             " prefers-explicit-types.md, directly in the store root"
         )
-    # Writes go through the file in place. A symlink left after resolution is a
-    # loop, and a second hard link shares its inode with a file elsewhere, so a
-    # write to either would land somewhere other than this entry.
-    if resolved.is_symlink():
-        raise Jailbreak(f"path {path!r} is a symlink loop")
+    # Writes go through the file in place. A second hard link shares its inode
+    # with a file elsewhere, so a write here would land there too.
     if resolved.is_file() and resolved.stat().st_nlink > 1:
         raise Jailbreak(f"path {path!r} is hard-linked to another file")
     return resolved
@@ -92,7 +89,15 @@ def _resolve_allowing_missing(p: Path) -> Path:
         if parent == existing:  # reached the filesystem root
             break
         existing = parent
-    base = existing.resolve()
+    # A symlink loop has no real path. Python 3.13 returns the link unresolved;
+    # earlier versions raise. Either way the caller gets a Jailbreak, not a path
+    # that reads as inside the root while pointing nowhere.
+    try:
+        base = existing.resolve()
+    except RuntimeError as error:
+        raise Jailbreak(f"path {p} is a symlink loop") from error
+    if base.is_symlink():
+        raise Jailbreak(f"path {p} is a symlink loop")
     for name in reversed(tail):
         base = base / name
     # Collapse any `..` in the non-existent tail lexically. The existing prefix is
