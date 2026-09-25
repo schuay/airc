@@ -17,12 +17,22 @@ string (never an exception into the turn).
 The root is a parameter, not a module global, so multiple stores can coexist in
 one process (a coding room and a grocery room, or a future per-space store) with
 no shared mutable state.
+
+Containment in the root is enough for reads but not for writes: the root also
+holds .git, the schema hook, and the validator the hook runs, so a write there
+executes on the next commit. `jail_entry` narrows a write to an entry file.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+# A lowercase .md file directly in the store root. The leading character keeps
+# out dotfiles, _templates, and the uppercase meta docs (AGENTS.md, README.md);
+# no separators keeps out every subdirectory, including a nested .git.
+_ENTRY_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\.md")
 
 
 class Jailbreak(Exception):
@@ -44,6 +54,19 @@ def jail(root: Path, path: str) -> Path:
     resolved = _resolve_allowing_missing(candidate)
     if resolved != root and root not in resolved.parents:
         raise Jailbreak(f"path {path!r} resolves outside the memory store ({root})")
+    return resolved
+
+
+def jail_entry(root: Path, path: str) -> Path:
+    """Resolve `path` like jail(), and also require an entry file: a name
+    matching _ENTRY_NAME directly in `root`. Checked on the resolved path, so an
+    entry-named symlink into the store's machinery is refused too."""
+    resolved = jail(root, path)
+    if resolved.parent != root.resolve() or not _ENTRY_NAME.fullmatch(resolved.name):
+        raise Jailbreak(
+            f"path {path!r} is not a memory entry: use a lowercase name like"
+            " prefers-explicit-types.md, directly in the store root"
+        )
     return resolved
 
 

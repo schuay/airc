@@ -15,7 +15,7 @@ from airc_room.memory import (
     make_memory_tools,
     memory_index,
 )
-from airc_room.memory.jail import Jailbreak, jail
+from airc_room.memory.jail import Jailbreak, jail, jail_entry
 from airc_room.memory.middleware import _REMINDER_TOKENS, _SRC
 from airc_room.runner import build_turn_content
 from langchain_core.messages import AIMessage, HumanMessage
@@ -87,6 +87,85 @@ def test_jail_blocks_symlink_out_of_tree(tmp_path):
     # symlink's parent is inside the store.
     with pytest.raises(Jailbreak):
         jail(store, "link/secret.md")
+
+
+# --- entry confinement -----------------------------------------------------
+
+# Paths inside the store that are not entries. Several run on commit: the hook,
+# the validator (and anything on its import path), and .git/config.
+_MACHINERY = [
+    ".git/hooks/pre-commit",
+    ".git/config",
+    ".githooks/pre-commit",
+    "scripts/validate.py",
+    "scripts/yaml.py",
+    "_templates/user.md",
+    "AGENTS.md",
+    ".gitattributes",
+    "sub/note.md",
+    "sub/.git/config",
+    "note.txt",
+    "./.hidden.md",
+]
+
+
+@pytest.mark.parametrize("path", _MACHINERY)
+def test_jail_entry_refuses_non_entries(tmp_path, path):
+    with pytest.raises(Jailbreak):
+        jail_entry(tmp_path, path)
+
+
+def test_jail_entry_accepts_a_flat_entry(tmp_path):
+    assert jail_entry(tmp_path, "prefers-explicit-types.md") == (
+        tmp_path.resolve() / "prefers-explicit-types.md"
+    )
+    assert jail_entry(tmp_path, "./a_b-2.md") == tmp_path.resolve() / "a_b-2.md"
+
+
+def test_jail_entry_checks_the_resolved_path(tmp_path):
+    (tmp_path / ".githooks").mkdir()
+    (tmp_path / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
+    (tmp_path / "evil.md").symlink_to(tmp_path / ".githooks" / "pre-commit")
+    with pytest.raises(Jailbreak):
+        jail_entry(tmp_path, "evil.md")
+
+
+async def test_write_to_the_hook_cannot_run_code(tmp_path):
+    # The exploit shape: overwrite the pre-commit hook, then let the next
+    # legitimate write run it.
+    _make_store(tmp_path)
+    tools = _tools(tmp_path)
+    marker = tmp_path.parent / f"{tmp_path.name}-pwned"
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    before = hook.read_text()
+    out = await tools["memory_write"].ainvoke(
+        {
+            "path": ".git/hooks/pre-commit",
+            "content": f"#!/bin/sh\ntouch {marker}\n",
+            "message": "m",
+        }
+    )
+    assert out.startswith("error")
+    assert hook.read_text() == before
+    out = await tools["memory_write"].ainvoke(
+        {"path": "note.md", "content": _VALID, "message": "m"}
+    )
+    assert out == "saved note.md"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("tool", ["memory_edit", "memory_delete"])
+async def test_edit_and_delete_refuse_machinery(tmp_path, tool):
+    _make_store(tmp_path)
+    (tmp_path / "scripts").mkdir()
+    script = tmp_path / "scripts" / "validate.py"
+    script.write_text("import yaml\n")
+    args = {"path": "scripts/validate.py", "message": "m"}
+    if tool == "memory_edit":
+        args |= {"search": "import yaml", "replace": "import os"}
+    out = await _tools(tmp_path)[tool].ainvoke(args)
+    assert out.startswith("error")
+    assert script.read_text() == "import yaml\n"
 
 
 # --- write / auto-commit / schema rejection --------------------------------
@@ -231,13 +310,14 @@ async def test_delete_refuses_a_directory(tmp_path):
     # The guard that matters most on a tool an LLM holds: entries are files, and
     # `git rm -r` on the store root would be one call away from erasing the whole
     # memory. Nothing legitimate needs it.
+    # Named like an entry so the directory check, not the name rule, refuses it.
     _make_store(tmp_path)
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "sub" / "keep.md").write_text(_VALID)
+    (tmp_path / "sub.md").mkdir()
+    (tmp_path / "sub.md" / "keep.md").write_text(_VALID)
     tools = _tools(tmp_path)
-    out = await tools["memory_delete"].ainvoke({"path": "sub", "message": "m"})
-    assert out.startswith("error")
-    assert (tmp_path / "sub" / "keep.md").exists()
+    out = await tools["memory_delete"].ainvoke({"path": "sub.md", "message": "m"})
+    assert "is a directory" in out
+    assert (tmp_path / "sub.md" / "keep.md").exists()
 
 
 async def test_delete_outside_the_jail_is_refused(tmp_path):
