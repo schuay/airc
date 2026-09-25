@@ -578,6 +578,12 @@ async def amain(args: argparse.Namespace) -> None:
     local_tool_groups: dict = {}
     if plugin and hasattr(plugin, "build_local_tools"):
         local_tool_groups = _call_local_tools(plugin, cfg, room) or {}
+    # TODO: re-enable memory once writes are reviewed. Every memory-enabled
+    # persona reads the store, so a persona steered by injected text (a CL
+    # description, a bug comment) could plant a note that another persona, one
+    # holding d8 or task tools, later acts on.
+    if cfg.memory.enabled:
+        raise SystemExit("[airc.memory] is disabled; set enabled = false")
     # Long-term memory is a CORE feature (config + per-turn injection live in
     # core), so core -- not a plugin -- provides its tool_group. On when
     # [airc.memory].enabled; a persona opts in by listing "memory" in tool_groups.
