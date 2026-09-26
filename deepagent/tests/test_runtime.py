@@ -4,11 +4,10 @@
 """Pure-seam coverage that needs no live model: the worktree-bound tools, the
 Report -> AgentResult flattening, and the skill-index renderer."""
 
-import inspect
-
 import pytest
+from airc_core import ToolBuildContext, ToolGrant, ToolSource
 from deepagent.harness import REPORT_TOOL_NAME
-from deepagent.langgraph_harness import _abs, worktree_tools
+from deepagent.langgraph_harness import _abs, worktree_tool_catalog
 
 from deepagent import Disposition, Report, render_skill_index, to_result
 
@@ -27,8 +26,20 @@ def _common(tmp_path):
     return common
 
 
-def test_worktree_tools_names(tmp_path):
-    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=5.0)}
+def _worktree_tools(tmp_path, *names, timeout=10.0):
+    resolved = ToolGrant(
+        worktree_tool_catalog(), required=tuple(names) or ("*",)
+    ).resolve(label="test")
+    return {
+        tool.name: tool
+        for tool in resolved.build(
+            ToolSource.WORKTREE, ToolBuildContext(tmp_path, timeout)
+        )
+    }
+
+
+def test_worktree_tool_catalog_names(tmp_path):
+    tools = _worktree_tools(tmp_path, timeout=5.0)
     assert set(tools) == {"shell", "read_file", "edit_file", "write_file"}
 
 
@@ -48,8 +59,7 @@ async def test_harness_selects_supplied_worktree_tools_by_allowlist(tmp_path):
 
     h = LangGraphHarness(
         _common(tmp_path),
-        tool_allowlist=("read_file", "shell"),
-        worktree_tools=worktree_tools,
+        tool_grant=ToolGrant(worktree_tool_catalog(), required=("read_file", "shell")),
     )
     await h._ensure_init()
     assert [tool.name for tool in h._tools_for(tmp_path)] == ["shell", "read_file"]
@@ -57,20 +67,20 @@ async def test_harness_selects_supplied_worktree_tools_by_allowlist(tmp_path):
 
 
 def test_bound_write_file_resolves_relative(tmp_path):
-    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=10.0)}
+    tools = _worktree_tools(tmp_path)
     tools["write_file"].invoke({"path": "sub/t.js", "content": "let x = 1;\n"})
     assert (tmp_path / "sub" / "t.js").read_text() == "let x = 1;\n"
 
 
 async def test_bound_shell_runs_in_worktree(tmp_path):
     (tmp_path / "marker").write_text("x")
-    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=10.0)}
+    tools = _worktree_tools(tmp_path)
     out = await tools["shell"].ainvoke({"command": "ls"})
     assert "marker" in out
 
 
 def test_bound_edit_and_read_resolve_relative(tmp_path):
-    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=10.0)}
+    tools = _worktree_tools(tmp_path)
     tools["edit_file"].invoke(
         {"path": "sub/new.py", "edits": [{"search": "", "replace": "x = 1\n"}]}
     )
@@ -79,13 +89,14 @@ def test_bound_edit_and_read_resolve_relative(tmp_path):
     assert "x = 1" in out
 
 
-def test_worktree_tools_take_no_confinement_argument():
+def test_worktree_catalog_marks_every_tool_as_worktree_bound():
     # The tools do no containment of their own -- the caller runs the whole loop
     # inside a bwrap worker, so the mount namespace is the boundary. Pinned as a
     # test because reintroducing a per-call sandbox argument would silently
     # recreate a second, unexercised copy of the policy (see worker.py).
-    params = inspect.signature(worktree_tools).parameters
-    assert list(params) == ["workdir", "shell_timeout_s"]
+    assert {spec.source for spec in worktree_tool_catalog().specs} == {
+        ToolSource.WORKTREE
+    }
 
 
 def test_abs(tmp_path):

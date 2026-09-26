@@ -28,7 +28,7 @@ import logging
 import time
 import zlib
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from airc_core import (
@@ -38,6 +38,11 @@ from airc_core import (
     GroundingReminderMiddleware,
     MCPToolset,
     TokenLog,
+    ToolBuildContext,
+    ToolCatalog,
+    ToolGrant,
+    ToolSource,
+    ToolSpec,
     UsageCollector,
     apply_gcp_env_defaults,
     base_middleware,
@@ -166,8 +171,104 @@ def _abs(workdir: Path, path: str) -> str:
     return str(p if p.is_absolute() else workdir / p)
 
 
-def worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
-    """airc-tools shell/read/edit bound to one job's worktree.
+def _workdir(context: ToolBuildContext) -> Path:
+    if context.workdir is None:
+        raise ValueError("worktree tool construction needs a workdir")
+    return Path(context.workdir)
+
+
+def _shell_tool(context: ToolBuildContext):
+    from langchain_core.tools import StructuredTool
+
+    wt = _workdir(context)
+    shell_timeout_s = context.shell_timeout_s
+
+    async def shell(command: str, timeout: float = shell_timeout_s) -> str:
+        return await _run_shell(command, cwd=str(wt), timeout=timeout)
+
+    return StructuredTool.from_function(
+        coroutine=shell,
+        name="shell",
+        description=(
+            "Run a command in a fresh `bash -lc` in the worktree (stateless:"
+            " no cd/env persists): builds, test binaries, git state, and"
+            " listing/searching files. Not the tool for writing file"
+            " content -- write_file/edit_file apply an exact edit and tell"
+            " you when it did not match, which a redirect cannot."
+            f" The default timeout is {shell_timeout_s:g}s: raise it for"
+            " work that is honestly long (a build, a test suite, a benchmark),"
+            " and lower it for a command that may hang (e.g. a repro)."
+        ),
+    )
+
+
+def _read_file_tool(context: ToolBuildContext):
+    from langchain_core.tools import StructuredTool
+
+    wt = _workdir(context)
+
+    def read_file(
+        path: str, offset: int = 1, limit: int = 2000, line_numbers: bool = False
+    ) -> str:
+        return _read_file(_abs(wt, path), offset, limit, line_numbers)
+
+    return StructuredTool.from_function(
+        func=read_file,
+        name="read_file",
+        description=(
+            "Read a file verbatim from 1-based line `offset` for `limit`"
+            " lines. Relative paths resolve in the worktree; other paths are"
+            " absolute. No line-number gutter, so output pastes into an edit"
+            " search. Pass line_numbers=True when you need to CITE a location"
+            " (a report, a review comment, an argument to another tool);"
+            " that output carries a gutter and is not edit-safe."
+        ),
+    )
+
+
+def _edit_file_tool(context: ToolBuildContext):
+    from langchain_core.tools import StructuredTool
+
+    wt = _workdir(context)
+
+    def edit_file(path: str, edits: list[_Edit]) -> str:
+        return _apply_edits(_abs(wt, path), [(e.search, e.replace) for e in edits])
+
+    return StructuredTool.from_function(
+        func=edit_file,
+        name="edit_file",
+        description=(
+            "Apply exact SEARCH/REPLACE `edits` to one file, all-or-nothing."
+            " Keep each search small and exact. For a whole new file or a full"
+            " rewrite, use write_file instead. If a SEARCH does not match,"
+            " read_file that region again and retry with the exact bytes --"
+            " a failed match is a stale search, not a reason to fall back to"
+            " a shell rewrite, which silently loses your other edits."
+        ),
+    )
+
+
+def _write_file_tool(context: ToolBuildContext):
+    from langchain_core.tools import StructuredTool
+
+    wt = _workdir(context)
+
+    def write_file(path: str, content: str) -> str:
+        return _write_file(_abs(wt, path), content)
+
+    return StructuredTool.from_function(
+        func=write_file,
+        name="write_file",
+        description=(
+            "Create or overwrite a whole file with `content`. Use for a new"
+            " file (a test, a scratch script) or a full rewrite; use"
+            " edit_file for a partial change."
+        ),
+    )
+
+
+def worktree_tool_catalog() -> ToolCatalog:
+    """Deferred shell/read/edit tools bound when a graph gets its worktree.
 
     cwd and relative-path resolution are bound in the closure (not tool args), so
     the tool schemas are identical across jobs -- the growing prefix cache sees a
@@ -175,9 +276,9 @@ def worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     tree. Per-thread binding also means no shared mutable cwd/env across the
     concurrent jobs a scheduler may run.
 
-    The application must supply this factory and explicitly allow each returned
-    tool. MCP groups remain separate because these tools are constructed for a
-    specific job after the MCP toolset is resolved.
+    The application includes this catalog only for a sandboxed worker. MCP groups
+    remain separate because these tools are constructed for a specific job after
+    the MCP toolset is resolved.
 
     These tools do no confinement of their own. Confinement is whole-process:
     the caller runs the entire loop inside a bwrap worker (see worker.py), so the
@@ -185,73 +286,14 @@ def worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     it. Do not reintroduce a per-tool sandbox argument -- an in-process turn is
     not a supported way to run untrusted work.
     """
-    from langchain_core.tools import StructuredTool
-
-    wt = Path(workdir)
-
-    async def shell(command: str, timeout: float = shell_timeout_s) -> str:
-        return await _run_shell(command, cwd=str(wt), timeout=timeout)
-
-    def read_file(
-        path: str, offset: int = 1, limit: int = 2000, line_numbers: bool = False
-    ) -> str:
-        return _read_file(_abs(wt, path), offset, limit, line_numbers)
-
-    def edit_file(path: str, edits: list[_Edit]) -> str:
-        return _apply_edits(_abs(wt, path), [(e.search, e.replace) for e in edits])
-
-    def write_file(path: str, content: str) -> str:
-        return _write_file(_abs(wt, path), content)
-
-    return [
-        StructuredTool.from_function(
-            coroutine=shell,
-            name="shell",
-            description=(
-                "Run a command in a fresh `bash -lc` in the worktree (stateless:"
-                " no cd/env persists): builds, test binaries, git state, and"
-                " listing/searching files. Not the tool for writing file"
-                " content -- write_file/edit_file apply an exact edit and tell"
-                " you when it did not match, which a redirect cannot."
-                f" The default timeout is {shell_timeout_s:g}s: raise it for"
-                " work that is honestly long (a build, a test suite, a benchmark),"
-                " and lower it for a command that may hang (e.g. a repro)."
-            ),
-        ),
-        StructuredTool.from_function(
-            func=read_file,
-            name="read_file",
-            description=(
-                "Read a file verbatim from 1-based line `offset` for `limit`"
-                " lines. Relative paths resolve in the worktree; other paths are"
-                " absolute. No line-number gutter, so output pastes into an edit"
-                " search. Pass line_numbers=True when you need to CITE a location"
-                " (a report, a review comment, an argument to another tool);"
-                " that output carries a gutter and is not edit-safe."
-            ),
-        ),
-        StructuredTool.from_function(
-            func=edit_file,
-            name="edit_file",
-            description=(
-                "Apply exact SEARCH/REPLACE `edits` to one file, all-or-nothing."
-                " Keep each search small and exact. For a whole new file or a full"
-                " rewrite, use write_file instead. If a SEARCH does not match,"
-                " read_file that region again and retry with the exact bytes --"
-                " a failed match is a stale search, not a reason to fall back to"
-                " a shell rewrite, which silently loses your other edits."
-            ),
-        ),
-        StructuredTool.from_function(
-            func=write_file,
-            name="write_file",
-            description=(
-                "Create or overwrite a whole file with `content`. Use for a new"
-                " file (a test, a scratch script) or a full rewrite; use"
-                " edit_file for a partial change."
-            ),
-        ),
-    ]
+    return ToolCatalog(
+        (
+            ToolSpec("shell", _shell_tool, ToolSource.WORKTREE),
+            ToolSpec("read_file", _read_file_tool, ToolSource.WORKTREE),
+            ToolSpec("edit_file", _edit_file_tool, ToolSource.WORKTREE),
+            ToolSpec("write_file", _write_file_tool, ToolSource.WORKTREE),
+        )
+    )
 
 
 class _JournalCallback(BaseCallbackHandler):
@@ -413,10 +455,7 @@ class LangGraphHarness:
         shell_timeout_s: float = 300.0,
         checkpoint_db: Path | str | None = None,
         reminders: Sequence[tuple[str, str, int]] = (),
-        tool_wrapper: Callable[[list], list] | None = None,
-        tools: Sequence[object] = (),
-        tool_allowlist: Sequence[str] = (),
-        worktree_tools: Callable[[Path, float], Sequence[object]] | None = None,
+        tool_grant: ToolGrant | None = None,
     ) -> None:
         self._common = common
         # The profile, not the id: `common.models` is ids alone, so resolving
@@ -441,23 +480,13 @@ class LangGraphHarness:
         # working tail. The prose stays with the application: this package is
         # domain-neutral, and a reminder naming a toolset names a domain.
         self._reminders = list(reminders)
-        # Last chance to transform the resolved MCP tools before they are bound
-        # into a graph. The application owns what that means -- this package
-        # holds no opinion about any tool's arguments -- but it cannot do it
-        # afterwards: the tools are resolved here and baked into cached graphs,
-        # so a consumer that needs them adapted has no seam of its own.
-        #
-        # A callable, not a declarative rule, for the layering: a rule
-        # expressive enough to be useful would have to name tools and arguments,
-        # and naming those is naming a domain.
-        self._tool_wrapper = tool_wrapper
-        # Application-built tools are candidates, not grants. One explicit
-        # allowlist selects both these and the workdir-bound candidates below.
-        # The wrapper then sees every selected source, which is how a native
-        # repo_git_* tool receives the same per-job pin as an MCP one.
-        self._tool_candidates = list(tools)
-        self._tool_allowlist = tuple(tool_allowlist)
-        self._worktree_tools = worktree_tools
+        # Resolve names now, before any factory runs. Required misspellings fail
+        # at harness construction; optional tools may be absent by deployment.
+        # The wrapper belongs to the grant because it must cover native,
+        # worktree and configured MCP tools with the same policy.
+        self._tool_grant = (tool_grant or ToolGrant()).resolve(
+            label="deepagent tool grant"
+        )
         self._tools: list = []
         self._init_lock = asyncio.Lock()
         self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
@@ -547,15 +576,8 @@ class LangGraphHarness:
             ts = MCPToolset(self._common.mcp_servers, self._common.tool_groups)
             await self._stack.enter_async_context(ts)
             self._v8_tools = ts.tools_for(ts.resolve_patterns(self._groups))
-            if self._tool_wrapper is not None:
-                self._v8_tools = self._tool_wrapper(self._v8_tools)
-            self._tools = select_tools(
-                self._tool_candidates,
-                self._tool_allowlist,
-                label="deepagent built-in tools",
-            )
-            if self._tool_wrapper is not None:
-                self._tools = self._tool_wrapper(self._tools)
+            self._v8_tools = self._tool_grant.wrap(self._v8_tools, ToolSource.MCP)
+            self._tools = self._tool_grant.build(ToolSource.NATIVE)
             if ts.instructions:
                 self._system = (
                     f"{self._system_base}\n\n## MCP server instructions\n\n"
@@ -572,16 +594,13 @@ class LangGraphHarness:
     def _tools_for(self, workdir) -> list:
         """Every tool a graph over `workdir` binds: MCP, application-built,
         then the worktree shell."""
-        local = list(self._tools)
-        if self._worktree_tools is not None:
-            dynamic = select_tools(
-                self._worktree_tools(Path(workdir), self._shell_timeout_s),
-                self._tool_allowlist,
-                label="deepagent worktree tools",
-            )
-            if self._tool_wrapper is not None:
-                dynamic = self._tool_wrapper(dynamic)
-            local.extend(dynamic)
+        local = [
+            *self._tools,
+            *self._tool_grant.build(
+                ToolSource.WORKTREE,
+                ToolBuildContext(Path(workdir), self._shell_timeout_s),
+            ),
+        ]
         return select_tools(
             [
                 *self._v8_tools,

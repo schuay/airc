@@ -17,7 +17,7 @@ def _ok_module(**extra):
         build_subscribers=lambda *a, **k: [],
         build_follow_ups=lambda *a, **k: {},
         build_transport=lambda *a, **k: None,
-        build_local_tools=lambda *a, **k: LocalTools(allowlist=()),
+        build_local_tools=lambda *a, **k: LocalTools(),
         PLUGIN_API_VERSION=PLUGIN_API_VERSION,
     )
     base.update(extra)

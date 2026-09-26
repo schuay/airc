@@ -4,6 +4,7 @@
 """The API-v2 built-in allowlist and persona-gated local tool groups."""
 
 import pytest
+from airc_core import ToolGrant
 from airc_room.cli import _call_local_tools
 from airc_room.config import Config
 from airc_room.personas import Persona
@@ -120,7 +121,10 @@ def test_no_local_tools_by_default(tmp_path):
 
 class _Plugin:
     def build_local_tools(self, cfg, *, room):
-        return LocalTools(allowlist=("search_chat",), groups={"icu_tasks": [room]})
+        return LocalTools(
+            tool_grant=ToolGrant(required=("search_chat",)),
+            groups={"icu_tasks": [room]},
+        )
 
 
 class _RaisingPlugin:
@@ -135,7 +139,7 @@ class _RaisingPlugin:
 def test_room_is_passed_to_the_v2_hook():
     room = object()
     policy = _call_local_tools(_Plugin(), None, room)
-    assert policy.allowlist == ("search_chat",)
+    assert policy.tool_grant.required == ("search_chat",)
     assert policy.groups == {"icu_tasks": [room]}
 
 

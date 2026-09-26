@@ -158,6 +158,8 @@ async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
     that needs them adapted -- an argument defaulted, a call bounded -- has no
     seam of its own once the harness is built. A callable, not a
     declarative rule, keeps this package free of any tool's vocabulary."""
+    from airc_core import ToolGrant
+
     from deepagent import LangGraphHarness
 
     seen = []
@@ -166,7 +168,7 @@ async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
         seen.append(list(tools))
         return []
 
-    h = LangGraphHarness(_common(tmp_path), tool_wrapper=wrapper)
+    h = LangGraphHarness(_common(tmp_path), tool_grant=ToolGrant(wrapper=wrapper))
     await h._ensure_init()
     assert seen, "the wrapper was never consulted"
     assert h._v8_tools == []  # what the wrapper returned, not what it was given
@@ -175,6 +177,7 @@ async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
 
 async def test_application_built_tools_are_allowlisted_and_wrapped(tmp_path):
     """Every non-MCP candidate passes through the explicit grant and wrapper."""
+    from airc_core import ToolCatalog, ToolGrant
     from langchain_core.tools import StructuredTool
 
     from deepagent import LangGraphHarness
@@ -188,9 +191,9 @@ async def test_application_built_tools_are_allowlisted_and_wrapped(tmp_path):
 
     h = LangGraphHarness(
         _common(tmp_path),
-        tools=[own],
-        tool_allowlist=("own",),
-        tool_wrapper=wrapper,
+        tool_grant=ToolGrant(
+            ToolCatalog.from_tools([own]), required=("own",), wrapper=wrapper
+        ),
     )
     await h._ensure_init()
     bound = h._tools_for(tmp_path)
@@ -201,12 +204,16 @@ async def test_application_built_tools_are_allowlisted_and_wrapped(tmp_path):
 
 
 async def test_application_candidate_not_in_allowlist_is_absent(tmp_path):
+    from airc_core import ToolCatalog, ToolGrant
     from langchain_core.tools import StructuredTool
 
     from deepagent import LangGraphHarness
 
     own = StructuredTool.from_function(lambda x: x, name="own", description="mine")
-    h = LangGraphHarness(_common(tmp_path), tools=[own])
+    h = LangGraphHarness(
+        _common(tmp_path),
+        tool_grant=ToolGrant(ToolCatalog.from_tools([own])),
+    )
     await h._ensure_init()
     assert h._tools_for(tmp_path) == []
     await h.aclose()
@@ -217,7 +224,7 @@ async def test_no_wrapper_leaves_the_tools_alone(tmp_path):
 
     h = LangGraphHarness(_common(tmp_path))
     await h._ensure_init()
-    assert h._tool_wrapper is None
+    assert h._tool_grant.wrapper is None
     await h.aclose()
 
 

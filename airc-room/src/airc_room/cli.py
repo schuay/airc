@@ -18,7 +18,7 @@ import signal
 import sys
 from pathlib import Path
 
-from airc_core import MCPToolset, TokenLog, quiet_noisy_loggers, select_tools
+from airc_core import MCPToolset, TokenLog, quiet_noisy_loggers
 from platformdirs import user_state_path
 
 from . import __version__
@@ -562,6 +562,8 @@ async def amain(args: argparse.Namespace) -> None:
     scheduler = TimerScheduler(store)
     # The plugin's explicit built-in allowlist selects from both core's
     # candidates and its own. Persona-gated feature groups remain separate.
+    from airc_core import ToolCatalog, ToolGrant, ToolSource, ToolSpec
+
     from .chat_search import make_search_chat_tool
     from .plugin import LocalTools
     from .timers import make_timer_tools
@@ -569,17 +571,31 @@ async def amain(args: argparse.Namespace) -> None:
     policy = (
         _call_local_tools(plugin, cfg, room)
         if plugin
-        else LocalTools(allowlist=("search_chat", "timer_*"))
+        else LocalTools(tool_grant=ToolGrant(required=("search_chat", "timer_*")))
     )
-    candidates = [
-        make_search_chat_tool(str(cfg.db_path)),
-        *make_timer_tools(scheduler),
-        *policy.candidates,
-    ]
-    try:
-        local_tools = select_tools(
-            candidates, policy.allowlist, label="room built-in tools"
+
+    def timer_factory(name):
+        def build(_context):
+            return {tool.name: tool for tool in make_timer_tools(scheduler)}[name]
+
+        return build
+
+    core_catalog = ToolCatalog(
+        (
+            ToolSpec(
+                "search_chat",
+                lambda _context: make_search_chat_tool(str(cfg.db_path)),
+            ),
+            *(
+                ToolSpec(name, timer_factory(name))
+                for name in ("timer_create", "timer_list", "timer_cancel")
+            ),
         )
+    )
+    try:
+        local_tools = policy.tool_grant.resolve(
+            core_catalog, label="room built-in tools"
+        ).build(ToolSource.NATIVE)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     local_tool_groups: dict = {

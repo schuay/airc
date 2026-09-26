@@ -82,6 +82,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from airc_core import ToolGrant
+
 # Bumped on an incompatible change to a required factory signature. Integer, so
 # the check is a simple equality (there is one contract at a time); a plugin
 # built against a different number is refused with a clear message instead of
@@ -100,15 +102,14 @@ _REQUIRED = (
 
 @dataclass(frozen=True)
 class LocalTools:
-    """A plugin's built-in candidates, allowlist, and persona-gated groups.
+    """A plugin's baseline grant and persona-gated groups.
 
-    `allowlist` selects from the union of core and plugin `candidates` for every
-    conversational persona. `groups` stays opt-in through agent.toml. Configured
-    MCP tools are separate and continue through their read/active groups.
+    The grant resolves against the union of core and plugin catalog entries for
+    every conversational persona. `groups` stays opt-in through agent.toml.
+    Configured MCP tools remain on their read/active group path.
     """
 
-    allowlist: tuple[str, ...]
-    candidates: tuple[object, ...] = ()
+    tool_grant: ToolGrant = field(default_factory=ToolGrant)
     groups: Mapping[str, Sequence[object]] = field(default_factory=dict)
 
 

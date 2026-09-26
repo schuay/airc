@@ -65,10 +65,10 @@ def build_transport(cfg, room, store, kind: str):
 
 
 def build_local_tools(cfg, *, room) -> LocalTools:
-    """Declare the plugin's built-in candidates and grants.
+    """Declare the plugin's baseline grant and feature groups.
 
-    `allowlist` selects the baseline tools available to every conversational
-    persona from the room's and plugin's combined candidates. `groups` contains
+    `tool_grant` selects the baseline tools available to every conversational
+    persona from the room's and plugin's combined catalogs. `groups` contains
     persona-gated feature tools. Configured MCP groups remain separate.
     """
 ```
@@ -113,31 +113,41 @@ API v2 makes every built-in grant explicit. Update a v1 plugin as follows:
 1. Set the literal `PLUGIN_API_VERSION = 2`.
 2. Define `build_local_tools(cfg, *, room)` even if the plugin has no tools.
 3. Return `airc_room.plugin.LocalTools`, not a group dictionary.
-4. Put tools every conversational persona may use in `candidates`, and list
-   their exact names or patterns in `allowlist`.
-5. Keep persona-gated feature tools in `groups`. Personas continue to opt into
+4. Put deferred constructors for baseline plugin tools in a `ToolCatalog`.
+5. Put names that must exist in `ToolGrant.required`; put deployment-dependent
+   names in `ToolGrant.optional`. Names and patterns are both accepted.
+6. Keep persona-gated feature tools in `groups`. Personas continue to opt into
    these groups through `agent.toml`.
 
 For example:
 
 ```python
+from airc_core import ToolCatalog, ToolGrant, ToolSpec
 from airc_room.plugin import LocalTools
 
 PLUGIN_API_VERSION = 2
 
 
 def build_local_tools(cfg, *, room):
+    catalog = ToolCatalog(
+        (
+            ToolSpec("lookup", lambda _context: build_lookup(cfg)),
+        )
+    )
     return LocalTools(
-        allowlist=("search_chat", "timer_*", "lookup"),
-        candidates=(build_lookup(cfg),),
+        tool_grant=ToolGrant(
+            catalog,
+            required=("search_chat", "timer_*", "lookup"),
+        ),
         groups={"memory": build_memory_tools(cfg)},
     )
 ```
 
-`search_chat` and `timer_*` are room-owned candidates. A plugin must grant them
+`search_chat` and `timer_*` are room-owned catalog entries. A plugin must grant them
 if its personas should retain them. Configured MCP `read` and `active` groups do
-not change in API v2. The room rejects duplicate tool names instead of choosing
-one by order.
+not change in API v2. Catalog names are resolved before factories run. A missing
+required name and duplicate tool names fail startup; a missing optional name is
+logged and omitted.
 
 ### Message handlers
 
