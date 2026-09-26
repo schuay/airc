@@ -54,7 +54,7 @@ async def test_harness_does_not_add_worktree_tools_unless_the_caller_supplies_th
     await h.aclose()
 
 
-async def test_harness_selects_supplied_worktree_tools_by_allowlist(tmp_path):
+async def test_harness_selects_granted_worktree_tools(tmp_path):
     from deepagent import LangGraphHarness
 
     h = LangGraphHarness(

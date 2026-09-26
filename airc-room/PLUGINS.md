@@ -109,6 +109,8 @@ def parse_config(cfg) -> object:
 ## Migrating a plugin from API v1 to v2
 
 API v2 makes every built-in grant explicit. Update a v1 plugin as follows:
+Existing v1 plugins migrate directly to the `ToolGrant` shape below; the earlier
+`allowlist` and `candidates` draft was not a deployed contract.
 
 1. Set the literal `PLUGIN_API_VERSION = 2`.
 2. Define `build_local_tools(cfg, *, room)` even if the plugin has no tools.
