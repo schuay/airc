@@ -423,6 +423,30 @@ class AgentRunner:
             return True
         return False
 
+    def _tools_for(self, persona: Persona, *, include_local: bool) -> list:
+        """Resolve one persona's MCP and local grants into one checked list."""
+        # A group can be defined by MCP config, a plugin, or both. Keep a
+        # plugin-only group out of the MCP resolver so it is not warned as
+        # unknown, but resolve both sources when they share a name.
+        mcp_groups = [
+            group
+            for group in persona.tool_groups
+            if group not in self._local_tool_groups or self._toolset.has_group(group)
+        ]
+        patterns = self._toolset.resolve_patterns(
+            mcp_groups, persona.tools, persona.name
+        )
+        tools = self._toolset.tools_for(patterns)
+        if not include_local:
+            return tools
+
+        local: list = list(self._local_tools)
+        for group in persona.tool_groups:
+            local.extend(self._local_tool_groups.get(group, []))
+        return select_tools(
+            [*tools, *local], ("*",), label=f"agent {persona.name} tools"
+        )
+
     def _build_agent(
         self,
         persona: Persona,
@@ -434,32 +458,10 @@ class AgentRunner:
     ) -> object:
         profile = self._cfg.resolve_profile(persona.model_id)
         model_id = profile.id
-        # A persona's tool_groups mix MCP groups (resolved to patterns below) and
-        # plugin-local groups (resolved to local tools further down). Keep the
-        # local ones out of the MCP resolver so they are not logged as unknown
-        # groups -- they are known, just to the plugin, not the MCP toolset.
-        mcp_groups = [
-            g for g in persona.tool_groups if g not in self._local_tool_groups
-        ]
-        patterns = self._toolset.resolve_patterns(
-            mcp_groups, persona.tools, persona.name
-        )
-        tools = self._toolset.tools_for(patterns)
         # Local tools (not MCP), added for conversational builds only (extra_system
         # marks the forced-JSON digest turn, where they have no place). They read
         # their thread/agent from the run config, so they need no ambient wiring.
-        if not extra_system:
-            local: list = list(self._local_tools)
-            # Plugin local tools, gated by the persona's tool_groups exactly like
-            # MCP tools: a persona gets a group's local tools only if it lists the
-            # group (e.g. "memory" for the grocery akbase tools). These groups are
-            # plugin-owned and separate from the MCP [tool_groups], so naming one
-            # here is not an unknown-MCP-group warning.
-            for group in persona.tool_groups:
-                local.extend(self._local_tool_groups.get(group, []))
-            tools = select_tools(
-                [*tools, *local], ("*",), label=f"agent {persona.name} tools"
-            )
+        tools = self._tools_for(persona, include_local=not extra_system)
         log.info(
             "agent %s: model=%s%s tools=%d",
             persona.name,

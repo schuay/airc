@@ -384,6 +384,10 @@ class MCPToolset:
     async def __aexit__(self, *exc) -> None:
         await self._stack.aclose()
 
+    def has_group(self, name: str) -> bool:
+        """Whether the MCP configuration defines `name`, including empty groups."""
+        return name in self._tool_groups
+
     def resolve_patterns(
         self,
         groups: Iterable[str],

@@ -29,13 +29,32 @@ def _persona(name, groups):
     )
 
 
-def _runner(tmp_path, local_tool_groups, local_tools=None):
+class _Toolset:
+    instructions = ""
+
+    def __init__(self, groups=None, tools=None):
+        self.groups = groups or {}
+        self.tools = tools or []
+
+    def has_group(self, name):
+        return name in self.groups
+
+    def resolve_patterns(self, groups, extra, label):
+        return [pattern for group in groups for pattern in self.groups[group]] + list(
+            extra
+        )
+
+    def tools_for(self, patterns):
+        return [tool for tool in self.tools if tool.name in patterns]
+
+
+def _runner(tmp_path, local_tool_groups, local_tools=None, toolset=None):
     cfg = Config()
     cfg.token_db_path = tmp_path / "tokens.db"
     return AgentRunner(
         cfg,
         {},
-        object(),
+        toolset or _Toolset(),
         object(),
         local_tools=local_tools,
         local_tool_groups=local_tool_groups,
@@ -57,13 +76,35 @@ def test_local_group_granted_only_to_persona_listing_it(tmp_path):
     assert local_for(withheld) == []
 
 
-def test_local_groups_excluded_from_mcp_resolution(tmp_path):
-    runner = _runner(tmp_path, {"memory": [_mem]})
+def test_local_only_groups_are_excluded_from_mcp_resolution(tmp_path):
+    toolset = _Toolset(groups={"read": ["mcp_read"]})
+    runner = _runner(tmp_path, {"memory": [_mem]}, toolset=toolset)
     persona = _persona("chef", ["read", "memory"])
-    mcp_groups = [
-        group for group in persona.tool_groups if group not in runner._local_tool_groups
+    assert runner._tools_for(persona, include_local=True) == [_mem]
+
+
+@tool
+def _mcp_read() -> str:
+    """a stub MCP read tool"""
+    return "ok"
+
+
+def test_same_named_local_and_mcp_groups_are_unioned(tmp_path):
+    toolset = _Toolset(groups={"read": [_mcp_read.name]}, tools=[_mcp_read])
+    runner = _runner(tmp_path, {"read": [_mem]}, toolset=toolset)
+
+    assert runner._tools_for(_persona("chef", ["read"]), include_local=True) == [
+        _mcp_read,
+        _mem,
     ]
-    assert mcp_groups == ["read"]
+
+
+def test_duplicate_names_across_local_and_mcp_groups_are_refused(tmp_path):
+    toolset = _Toolset(groups={"read": [_mem.name]}, tools=[_mem])
+    runner = _runner(tmp_path, {"read": [_mem]}, toolset=toolset)
+
+    with pytest.raises(ValueError, match="duplicate tool name '_mem'"):
+        runner._tools_for(_persona("chef", ["read"]), include_local=True)
 
 
 def test_built_in_tools_are_a_separate_baseline(tmp_path):

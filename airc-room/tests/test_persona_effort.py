@@ -20,6 +20,9 @@ from airc_room.runner import AgentRunner
 class _Toolset:
     instructions = ""
 
+    def has_group(self, name):
+        return False
+
     def resolve_patterns(self, groups, tools, name):
         return []
 
