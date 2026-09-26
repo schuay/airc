@@ -5,8 +5,14 @@
 
 from __future__ import annotations
 
+import pytest
 from airc_core import model as model_mod
-from airc_core.providers import STOP_REASON_KEYS, model_traits_for, traits_for
+from airc_core.providers import (
+    STOP_REASON_KEYS,
+    model_traits_for,
+    register_traits_alias,
+    traits_for,
+)
 
 
 def test_both_anthropic_routes_share_one_record():
@@ -111,3 +117,53 @@ def test_slow_to_converge_marks_the_long_running_checkpoint():
 
     assert model_traits_for("anthropic:claude-opus-5-5").slow_to_converge is False
     assert model_traits_for("some_new_provider:m").slow_to_converge is False
+
+
+@pytest.fixture
+def traits_table():
+    """A clean traits-alias table, restored afterwards: register_traits_alias
+    writes process-global module state that would otherwise leak between tests in
+    the order they happened to run."""
+    from airc_core import providers
+
+    saved = dict(providers._TRAITS_ALIASES)
+    providers._TRAITS_ALIASES.clear()
+    try:
+        yield
+    finally:
+        providers._TRAITS_ALIASES.clear()
+        providers._TRAITS_ALIASES.update(saved)
+
+
+def test_a_traits_alias_gives_a_model_its_targets_traits(traits_table):
+    """An unlisted model aliased onto a listed checkpoint takes its traits; the
+    alias by bare name covers every provider spelling of it."""
+    assert model_traits_for("mybackend:internal-pro").slow_to_converge is False
+    register_traits_alias("internal-pro", "gemini-3.1-pro-preview")
+    for mid in (
+        "mybackend:internal-pro",
+        "google_vertexai:internal-pro@20260901",
+        "internal-pro",
+    ):
+        assert model_traits_for(mid).slow_to_converge is True
+
+
+def test_a_full_id_traits_alias_claims_only_its_provider(traits_table):
+    register_traits_alias("mybackend:internal-pro", "gemini-3.1-pro-preview")
+    assert model_traits_for("mybackend:internal-pro").slow_to_converge is True
+    # A different provider's spelling of the same bare name is not aliased.
+    assert model_traits_for("other:internal-pro").slow_to_converge is False
+
+
+def test_a_traits_alias_onto_a_model_with_no_entry_is_refused(traits_table):
+    with pytest.raises(ValueError, match="no ModelTraits entry"):
+        register_traits_alias("internal-pro", "some-unlisted-model")
+
+
+def test_traits_alias_reregistration_same_is_noop_conflicting_raises(traits_table):
+    register_traits_alias("internal-pro", "gemini-3.1-pro-preview")
+    register_traits_alias("internal-pro", "gemini-3.1-pro-preview")  # same pair: fine
+    # Same target written as a full id resolves to the same bare name: still fine.
+    register_traits_alias("internal-pro", "google_vertexai:gemini-3.1-pro-preview")
+    with pytest.raises(ValueError, match="already takes the traits of"):
+        register_traits_alias("internal-pro", "claude-opus-5-5")
