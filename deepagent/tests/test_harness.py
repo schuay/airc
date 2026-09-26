@@ -173,6 +173,32 @@ async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
     await h.aclose()
 
 
+async def test_application_built_tools_are_bound_beside_the_mcp_ones(tmp_path):
+    """A consumer that builds its own tools in-process hands them over ready;
+    they reach every graph and are not passed through the wrapper, which is
+    for the MCP tools the harness resolved itself."""
+    from langchain_core.tools import StructuredTool
+
+    from deepagent import LangGraphHarness
+
+    own = StructuredTool.from_function(lambda x: x, name="own", description="mine")
+    seen = []
+
+    def wrapper(tools):
+        seen.append(list(tools))
+        return tools
+
+    h = LangGraphHarness(_common(tmp_path), tools=[own], tool_wrapper=wrapper)
+    await h._ensure_init()
+    bound = h._tools_for(tmp_path)
+    assert own in bound
+    assert own not in seen[0]
+    assert [t.name for t in bound].index("own") < [t.name for t in bound].index(
+        "run_shell"
+    )
+    await h.aclose()
+
+
 async def test_no_wrapper_leaves_the_tools_alone(tmp_path):
     from deepagent import LangGraphHarness
 

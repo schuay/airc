@@ -420,6 +420,7 @@ class LangGraphHarness:
         checkpoint_db: Path | str | None = None,
         reminders: Sequence[tuple[str, str, int]] = (),
         tool_wrapper: Callable[[list], list] | None = None,
+        tools: Sequence[object] = (),
     ) -> None:
         self._common = common
         # The profile, not the id: `common.models` is ids alone, so resolving
@@ -454,6 +455,10 @@ class LangGraphHarness:
         # expressive enough to be useful would have to name tools and arguments,
         # and naming those is naming a domain.
         self._tool_wrapper = tool_wrapper
+        # Tools the application built itself and hands over ready to bind. They
+        # sit beside the MCP tools in every graph and are not passed through the
+        # wrapper: the application that built them adapted them already.
+        self._tools = list(tools)
         self._init_lock = asyncio.Lock()
         self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
         self._saver_obj = None
@@ -551,10 +556,20 @@ class LangGraphHarness:
                 )
             self._toolset = ts
             log.info(
-                "langgraph harness: model=%s mcp-tools=%d",
+                "langgraph harness: model=%s mcp-tools=%d app-tools=%d",
                 self._model_id,
                 len(self._v8_tools),
+                len(self._tools),
             )
+
+    def _tools_for(self, workdir) -> list:
+        """Every tool a graph over `workdir` binds: MCP, application-built,
+        then the worktree shell."""
+        return [
+            *self._v8_tools,
+            *self._tools,
+            *_worktree_tools(workdir, self._shell_timeout_s),
+        ]
 
     async def aclose(self) -> None:
         await self._stack.aclose()
@@ -617,10 +632,7 @@ class LangGraphHarness:
         from langchain.agents.middleware import ModelCallLimitMiddleware
         from langchain.agents.structured_output import OutputToolBinding, ToolStrategy
 
-        tools = [
-            *self._v8_tools,
-            *_worktree_tools(workdir, self._shell_timeout_s),
-        ]
+        tools = self._tools_for(workdir)
         # ToolStrategy names the structured-output tool after the schema class
         # (DraftReport/ReviewReport/...). Override it to one fixed name so every
         # stage's prompt can name the exact tool -- schema_specs[0].name is what
