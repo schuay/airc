@@ -30,17 +30,19 @@ from .worker import (
 
 
 def __getattr__(name: str):
-    # LangGraphHarness is the only backend behind the Harness protocol, and the
-    # only thing here that costs langchain/langgraph/anthropic/mcp to import --
+    # LangGraphHarness and its tool factory are the only public objects here
+    # that cost langchain/langgraph/anthropic/mcp to import --
     # 785ms against 58-72ms for every other module in this package. Deferring it
     # lets a consumer that wants a Journal, a Report or a LoopCaps take
     # the protocol and the data types without paying for an implementation it
     # never builds. A missing langgraph install now fails when the harness is
     # first constructed instead of at import; that is still daemon startup.
-    if name == "LangGraphHarness":
-        from .langgraph_harness import LangGraphHarness
+    if name in {"LangGraphHarness", "worktree_tools"}:
+        from .langgraph_harness import LangGraphHarness, worktree_tools
 
-        return LangGraphHarness
+        return {"LangGraphHarness": LangGraphHarness, "worktree_tools": worktree_tools}[
+            name
+        ]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -64,5 +66,6 @@ __all__ = [
     "run_agent_loop",
     "run_loop_from_spec",
     "to_result",
+    "worktree_tools",
     "write_outcome",
 ]

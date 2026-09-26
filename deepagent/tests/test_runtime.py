@@ -8,7 +8,7 @@ import inspect
 
 import pytest
 from deepagent.harness import REPORT_TOOL_NAME
-from deepagent.langgraph_harness import _abs, _worktree_tools
+from deepagent.langgraph_harness import _abs, worktree_tools
 
 from deepagent import Disposition, Report, render_skill_index, to_result
 
@@ -28,7 +28,7 @@ def _common(tmp_path):
 
 
 def test_worktree_tools_names(tmp_path):
-    tools = {t.name: t for t in _worktree_tools(tmp_path, shell_timeout_s=5.0)}
+    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=5.0)}
     assert set(tools) == {"shell", "read_file", "edit_file", "write_file"}
 
 
@@ -49,7 +49,7 @@ async def test_harness_selects_supplied_worktree_tools_by_allowlist(tmp_path):
     h = LangGraphHarness(
         _common(tmp_path),
         tool_allowlist=("read_file", "shell"),
-        worktree_tools=_worktree_tools,
+        worktree_tools=worktree_tools,
     )
     await h._ensure_init()
     assert [tool.name for tool in h._tools_for(tmp_path)] == ["shell", "read_file"]
@@ -57,20 +57,20 @@ async def test_harness_selects_supplied_worktree_tools_by_allowlist(tmp_path):
 
 
 def test_bound_write_file_resolves_relative(tmp_path):
-    tools = {t.name: t for t in _worktree_tools(tmp_path, shell_timeout_s=10.0)}
+    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=10.0)}
     tools["write_file"].invoke({"path": "sub/t.js", "content": "let x = 1;\n"})
     assert (tmp_path / "sub" / "t.js").read_text() == "let x = 1;\n"
 
 
 async def test_bound_shell_runs_in_worktree(tmp_path):
     (tmp_path / "marker").write_text("x")
-    tools = {t.name: t for t in _worktree_tools(tmp_path, shell_timeout_s=10.0)}
+    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=10.0)}
     out = await tools["shell"].ainvoke({"command": "ls"})
     assert "marker" in out
 
 
 def test_bound_edit_and_read_resolve_relative(tmp_path):
-    tools = {t.name: t for t in _worktree_tools(tmp_path, shell_timeout_s=10.0)}
+    tools = {t.name: t for t in worktree_tools(tmp_path, shell_timeout_s=10.0)}
     tools["edit_file"].invoke(
         {"path": "sub/new.py", "edits": [{"search": "", "replace": "x = 1\n"}]}
     )
@@ -84,7 +84,7 @@ def test_worktree_tools_take_no_confinement_argument():
     # inside a bwrap worker, so the mount namespace is the boundary. Pinned as a
     # test because reintroducing a per-call sandbox argument would silently
     # recreate a second, unexercised copy of the policy (see worker.py).
-    params = inspect.signature(_worktree_tools).parameters
+    params = inspect.signature(worktree_tools).parameters
     assert list(params) == ["workdir", "shell_timeout_s"]
 
 

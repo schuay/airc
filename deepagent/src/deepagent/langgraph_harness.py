@@ -166,7 +166,7 @@ def _abs(workdir: Path, path: str) -> str:
     return str(p if p.is_absolute() else workdir / p)
 
 
-def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
+def worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     """airc-tools shell/read/edit bound to one job's worktree.
 
     cwd and relative-path resolution are bound in the closure (not tool args), so
