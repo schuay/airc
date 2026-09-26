@@ -401,6 +401,59 @@ def test_pricing_alias_errors_name_the_entry(priced):
         load_common({"pricing": {"aliases": {"mybackend:x": "other-listed"}}})
 
 
+# ── [traits] ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def traits_clean():
+    """A clean traits-alias table, restored afterwards -- load_common registers
+    aliases into process-global module state."""
+    from airc_core import providers
+
+    saved = dict(providers._TRAITS_ALIASES)
+    providers._TRAITS_ALIASES.clear()
+    try:
+        yield providers
+    finally:
+        providers._TRAITS_ALIASES.clear()
+        providers._TRAITS_ALIASES.update(saved)
+
+
+def test_traits_alias_is_registered_and_on_the_config(traits_clean):
+    raw = {
+        "traits": {"aliases": {"mybackend:internal-pro": "gemini-3.1-pro-preview"}},
+        "models": {"default": "mybackend:internal-pro"},
+    }
+    cfg = load_common(raw)
+    assert cfg.traits_aliases == {"mybackend:internal-pro": "gemini-3.1-pro-preview"}
+    assert traits_clean.model_traits_for("mybackend:internal-pro").slow_to_converge
+    # Reparse of the same file is what icompleteu does; must not conflict.
+    load_common(raw)
+
+
+def test_traits_absent_registers_nothing(traits_clean):
+    cfg = load_common({"models": {"default": "mybackend:internal-pro"}})
+    assert cfg.traits_aliases == {}
+    assert not traits_clean.model_traits_for("mybackend:internal-pro").slow_to_converge
+
+
+def test_traits_alias_errors_name_the_entry(traits_clean):
+    with pytest.raises(
+        SystemExit, match=r"\[traits.aliases\] mybackend:x.*no ModelTraits entry"
+    ):
+        load_common({"traits": {"aliases": {"mybackend:x": "nowhere-model"}}})
+    with pytest.raises(SystemExit, match=r"\[traits.aliases\] mybackend:x must name"):
+        load_common({"traits": {"aliases": {"mybackend:x": 3}}})
+    with pytest.raises(SystemExit, match=r"\[traits.aliases\] must be a table"):
+        load_common({"traits": {"aliases": "gemini-3.1-pro-preview"}})
+    with pytest.raises(SystemExit, match="aliasses"):
+        load_common({"traits": {"aliasses": {}}})
+    # Two configs in one process disagreeing about a name is a conflict.
+    load_common({"traits": {"aliases": {"mybackend:x": "gemini-3.1-pro-preview"}}})
+    with pytest.raises(SystemExit, match="already takes the traits of"):
+        load_common({"traits": {"aliases": {"mybackend:x": "claude-opus-5-5"}}})
+
+
 def test_enabling_the_explicit_vertex_cache_is_said_at_load(caplog):
     """The explicit Vertex cache path has been inactive since 2026-09 and its
     cost rule still carries a hand-tuned ratio; a config that would run it is

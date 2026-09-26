@@ -153,6 +153,11 @@ class ModelTraits:
     # False drops a forced tool_choice in bind_tools so the call goes out in
     # the provider's default "auto" mode instead of failing with 400.
     supports_forced_tool_choice: bool = True
+    # Whether the checkpoint tends to run long agentic trajectories, many tool
+    # calls before it concludes. A consumer that steers a run by call count can
+    # read this to converge such a model earlier; a checkpoint that finishes in
+    # a handful of calls needs no such pressure.
+    slow_to_converge: bool = False
 
 
 _DEFAULT_MODEL = ModelTraits(id="")
@@ -160,21 +165,64 @@ _DEFAULT_MODEL = ModelTraits(id="")
 # claude-opus-5-5 rejects tool_choice types "any" and "tool" with 400
 # ("tool_choice: type 'tool' and 'any' are not supported for this model"),
 # whether or not thinking is configured in the request.
+#
+# gemini-3.1-pro-preview runs long: it uses several times the tool calls a
+# Claude checkpoint spends on the same task before concluding.
 _MODEL_TRAITS: dict[str, ModelTraits] = {
     "claude-opus-5-5": ModelTraits(
         id="claude-opus-5-5",
         supports_forced_tool_choice=False,
     ),
+    "gemini-3.1-pro-preview": ModelTraits(
+        id="gemini-3.1-pro-preview",
+        slow_to_converge=True,
+    ),
 }
+
+
+# Names that inherit another checkpoint's traits. Keyed by what the deploy
+# wrote (a full "provider:name" id or a bare name) and valued by a bare name
+# _MODEL_TRAITS lists, never another alias, so model_traits_for stays one lookup.
+#
+# Same purpose and same home as pricing's aliases ([pricing.aliases]): a model
+# that is not its own listing but behaves like one -- a private deploy of a
+# released checkpoint under an internal label, a sibling served ahead of its
+# release -- can be told to take that checkpoint's traits without a code release.
+# Filled from config ([traits.aliases], via config.load_common).
+_TRAITS_ALIASES: dict[str, str] = {}
+
+
+def register_traits_alias(model: str, as_model: str) -> None:
+    """Give `model` (a full id or a bare name) `as_model`'s traits.
+
+    `as_model` must have a ModelTraits entry -- an alias onto the neutral record
+    resolves to the same default `model` already gets, so it is dead config and
+    refused, the way pricing refuses an alias to an unlisted name. Re-registering
+    the same pair is a no-op (load_common runs more than once per process in some
+    components); a CONFLICTING pair raises, since which traits applied would
+    otherwise depend on parse order.
+    """
+    target = bare_model_name(as_model).rsplit("/", 1)[-1]
+    if target not in _MODEL_TRAITS:
+        raise ValueError(
+            f"{model!r} cannot take the traits of {as_model!r}: no ModelTraits"
+            f" entry for {target!r} (have: {', '.join(_MODEL_TRAITS)})"
+        )
+    if (prior := _TRAITS_ALIASES.get(model)) is not None and prior != target:
+        raise ValueError(f"{model!r} already takes the traits of {prior!r}")
+    _TRAITS_ALIASES[model] = target
 
 
 def model_traits_for(model_id: str) -> ModelTraits:
     """Traits for `model_id`'s checkpoint; a neutral record for anything else.
 
-    An aggregator names the checkpoint behind a vendor path, as in
+    Aliases first, the full id before the bare name so an alias written for one
+    provider's spelling does not also claim another's; then the checkpoint name
+    itself. An aggregator names the checkpoint behind a vendor path, as in
     "openrouter:anthropic/claude-opus-5-5". The traits are the checkpoint's on
     every route, so the path is dropped here. Pricing keeps the full bare name,
     since the aggregator's rate is its own.
     """
     name = bare_model_name(model_id).rsplit("/", 1)[-1]
-    return _MODEL_TRAITS.get(name, _DEFAULT_MODEL)
+    key = _TRAITS_ALIASES.get(model_id) or _TRAITS_ALIASES.get(name) or name
+    return _MODEL_TRAITS.get(key, _DEFAULT_MODEL)

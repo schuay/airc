@@ -27,7 +27,7 @@ from pathlib import Path
 from platformdirs import user_data_path
 
 from .pricing import price_for, register_alias
-from .providers import EFFORT_LEVELS, traits_for
+from .providers import EFFORT_LEVELS, register_traits_alias, traits_for
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +253,11 @@ class CommonConfig:
     #: airc_core.pricing for the same reason too: price_for is a free function
     #: with no cfg in scope.
     pricing_aliases: dict[str, str] = field(default_factory=dict)
+    #: [traits.aliases] verbatim, model -> checkpoint it takes the traits of. On
+    #: the config and registered in airc_core.providers for the same reason
+    #: pricing_aliases is: model_traits_for is a free function with no cfg in
+    #: scope.
+    traits_aliases: dict[str, str] = field(default_factory=dict)
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     mcp_enable_in_sandbox: dict[str, bool] = field(default_factory=dict)
     tool_groups: dict[str, list[str]] = field(
@@ -344,6 +349,38 @@ def _load_pricing(raw: Mapping, cfg: CommonConfig) -> None:
             # entry the operator has to fix.
             raise SystemExit(f"{where}: {e}") from e
         cfg.pricing_aliases[str(model)] = priced_as
+
+
+def _load_traits_aliases(raw: Mapping, cfg: CommonConfig) -> None:
+    """Parse [traits.aliases] and register each with airc_core.providers.
+
+    Registering as a side effect of parsing, like _load_pricing and for the same
+    reason: model_traits_for is a free function every component reaches, and
+    load_common is the one point they all pass through.
+
+    The `aliases` table is user-keyed (the alias IS the key), so it is open; each
+    value must be a string naming a checkpoint with a ModelTraits entry, and
+    register_traits_alias decides whether it does. Only the section's own key set
+    is strict.
+    """
+    if not (traits := raw.get("traits")):
+        return
+    reject_unknown(traits, {"aliases"}, "[traits]")
+    aliases = traits.get("aliases") or {}
+    if not isinstance(aliases, Mapping):
+        raise SystemExit('[traits.aliases] must be a table of "model" = "as-model"')
+    for model, as_model in aliases.items():
+        where = f"[traits.aliases] {model}"
+        if not isinstance(as_model, str) or not as_model:
+            raise SystemExit(f"{where} must name a checkpoint (a string)")
+        try:
+            register_traits_alias(str(model), as_model)
+        except ValueError as e:
+            # SystemExit, like every other config error here: this runs during
+            # startup parsing, where a traceback buries the one line naming the
+            # entry the operator has to fix.
+            raise SystemExit(f"{where}: {e}") from e
+        cfg.traits_aliases[str(model)] = as_model
 
 
 def _warn_unpriced(models: Mapping[str, str]) -> None:
@@ -457,6 +494,7 @@ def load_common(raw: Mapping) -> CommonConfig:
     # aliases write to. Order here is the whole point of the section.
     _load_pricing(raw, cfg)
     _warn_unpriced(cfg.models)
+    _load_traits_aliases(raw, cfg)
     _load_model_providers(raw, cfg)
     if mcp := raw.get("mcp"):
         reject_unknown(mcp, {"servers"}, "[mcp]")
