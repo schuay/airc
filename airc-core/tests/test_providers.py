@@ -96,3 +96,18 @@ def test_model_traits_key_by_bare_name_across_providers_and_version_pins():
         is True
     )
     assert model_traits_for("some_new_provider:m").supports_forced_tool_choice is True
+
+
+def test_slow_to_converge_marks_the_long_running_checkpoint():
+    """gemini-3.1-pro-preview is flagged slow_to_converge across its routes and
+    version pins; other checkpoints and unlisted models are not."""
+    for mid in (
+        "google_vertexai:gemini-3.1-pro-preview",
+        "google_vertexai:gemini-3.1-pro-preview@20260901",
+    ):
+        t = model_traits_for(mid)
+        assert t.id == "gemini-3.1-pro-preview"
+        assert t.slow_to_converge is True
+
+    assert model_traits_for("anthropic:claude-opus-5-5").slow_to_converge is False
+    assert model_traits_for("some_new_provider:m").slow_to_converge is False

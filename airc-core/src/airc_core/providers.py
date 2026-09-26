@@ -153,6 +153,11 @@ class ModelTraits:
     # False drops a forced tool_choice in bind_tools so the call goes out in
     # the provider's default "auto" mode instead of failing with 400.
     supports_forced_tool_choice: bool = True
+    # Whether the checkpoint tends to run long agentic trajectories, many tool
+    # calls before it concludes. A consumer that steers a run by call count can
+    # read this to converge such a model earlier; a checkpoint that finishes in
+    # a handful of calls needs no such pressure.
+    slow_to_converge: bool = False
 
 
 _DEFAULT_MODEL = ModelTraits(id="")
@@ -160,10 +165,17 @@ _DEFAULT_MODEL = ModelTraits(id="")
 # claude-opus-5-5 rejects tool_choice types "any" and "tool" with 400
 # ("tool_choice: type 'tool' and 'any' are not supported for this model"),
 # whether or not thinking is configured in the request.
+#
+# gemini-3.1-pro-preview runs long: it uses several times the tool calls a
+# Claude checkpoint spends on the same task before concluding.
 _MODEL_TRAITS: dict[str, ModelTraits] = {
     "claude-opus-5-5": ModelTraits(
         id="claude-opus-5-5",
         supports_forced_tool_choice=False,
+    ),
+    "gemini-3.1-pro-preview": ModelTraits(
+        id="gemini-3.1-pro-preview",
+        slow_to_converge=True,
     ),
 }
 
