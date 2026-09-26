@@ -25,7 +25,7 @@ in the wiring.
 Declare the API version you build against as a literal:
 
 ```python
-PLUGIN_API_VERSION = 1  # the core contract version this plugin targets
+PLUGIN_API_VERSION = 2  # the core contract version this plugin targets
 ```
 
 `airc_room.plugin.PLUGIN_API_VERSION` is an integer core bumps on an
@@ -37,11 +37,11 @@ matches itself and the check can never fire. The literal
 freezes the contract version you coded against, so a core that has moved
 on rejects your stale plugin loudly instead of calling a changed signature.
 
-A plugin that declares no version at all is tolerated but forgoes the check.
+A plugin that declares no version is rejected.
 
 ## Required factories
 
-A plugin module MUST define all three (each callable):
+A plugin module MUST define all four (each callable):
 
 ```python
 def build_subscribers(cfg, room, store, toolset) -> list:
@@ -62,6 +62,15 @@ def build_transport(cfg, room, store, kind: str):
     for it. Core binds console/matrix itself and delegates any other kind here
     (the coding app owns 'gchat'). Returning None lets the caller raise one
     uniform 'unknown transport kind' error."""
+
+
+def build_local_tools(cfg, *, room) -> LocalTools:
+    """Declare the plugin's built-in candidates and grants.
+
+    `allowlist` selects the baseline tools available to every conversational
+    persona from the room's and plugin's combined candidates. `groups` contains
+    persona-gated feature tools. Configured MCP groups remain separate.
+    """
 ```
 
 ## Optional hooks (duck-typed)
@@ -82,25 +91,6 @@ def personas_dir() -> Path | None:
     ~/.config/airc/agents."""
 
 
-def build_local_tools(cfg, *, room=None) -> dict[str, list]:
-    """Local (non-MCP) langchain tools this plugin contributes, keyed by
-    tool_group name. The room grants a persona a group's tools iff the group is in
-    its tool_groups -- the same gate MCP tools use, so a persona's grants live in
-    one place (its agent.toml) regardless of tool kind. These groups are
-    plugin-owned and separate from the [tool_groups] MCP config, so a persona may
-    list one without it being a configured MCP group. Use for tools needing
-    in-process wiring an MCP server cannot get -- e.g. grocery's memory tools,
-    which close over an akbase path and a jail. Absent means the plugin ships no
-    local tools.
-
-    `room` is for a tool that must post, not just compute: the coding app's
-    task-proposal tool posts the spec itself so what a human reads is what was
-    stored, not the model's paraphrase of it. Keyword-optional, so a
-    plugin declaring the older build_local_tools(cfg) keeps working unchanged --
-    the room inspects the signature and passes `room` only to a hook that accepts
-    it, by name or through **kwargs."""
-
-
 def build_message_handlers(cfg, room, store) -> list[MessageHandler]:
     """Observers on arriving messages, run before the orchestrator routes. A
     handler returning CONSUMED ends the message there -- no mention parse, no
@@ -115,6 +105,39 @@ def parse_config(cfg) -> object:
     config. Reject unknown [airc] keys here -- core cannot know the plugin's key
     set, so the plugin owns that half of the strict-config check."""
 ```
+
+## Migrating a plugin from API v1 to v2
+
+API v2 makes every built-in grant explicit. Update a v1 plugin as follows:
+
+1. Set the literal `PLUGIN_API_VERSION = 2`.
+2. Define `build_local_tools(cfg, *, room)` even if the plugin has no tools.
+3. Return `airc_room.plugin.LocalTools`, not a group dictionary.
+4. Put tools every conversational persona may use in `candidates`, and list
+   their exact names or patterns in `allowlist`.
+5. Keep persona-gated feature tools in `groups`. Personas continue to opt into
+   these groups through `agent.toml`.
+
+For example:
+
+```python
+from airc_room.plugin import LocalTools
+
+PLUGIN_API_VERSION = 2
+
+
+def build_local_tools(cfg, *, room):
+    return LocalTools(
+        allowlist=("search_chat", "timer_*", "lookup"),
+        candidates=(build_lookup(cfg),),
+        groups={"memory": build_memory_tools(cfg)},
+    )
+```
+
+`search_chat` and `timer_*` are room-owned candidates. A plugin must grant them
+if its personas should retain them. Configured MCP `read` and `active` groups do
+not change in API v2. The room rejects duplicate tool names instead of choosing
+one by order.
 
 ### Message handlers
 

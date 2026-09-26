@@ -18,10 +18,11 @@ plus a compatibility version, so an external plugin codes against a typed
 contract instead of matching an undocumented convention by reading source, and a
 stale plugin fails loudly at load instead of mysteriously at first use.
 
-Required (a module without all three is rejected at load):
+Required:
 - build_subscribers(cfg, room, store, toolset) -> list[Subscriber]
 - build_follow_ups(cfg, store, *, agents_dir) -> dict[str, FollowUp]
 - build_transport(cfg, room, store, kind) -> Transport | None
+- build_local_tools(cfg, *, room) -> LocalTools
 
 Optional (duck-typed; absent means the room's default behavior):
 - default_transport_kind() -> str | None  -- the transport a headless deploy
@@ -29,8 +30,7 @@ Optional (duck-typed; absent means the room's default behavior):
   transport itself; this is how a plugin, not core, owns that default.
 - personas_dir(cfg=...) -> Path | None  -- the `agents/` directory this plugin
   supplies, so its personas travel with it instead of relying on the service
-  cwd. Takes the loaded Config when it declares the parameter (a compatible
-  addition, dispatched by signature like build_local_tools' `room`), for a
+  cwd. Takes the loaded Config when it declares the parameter, for a
   plugin whose personas come from a configured source instead of its package.
 - parse_config(cfg) -> object  -- validate and type the plugin's own [airc]
   sub-table (carried on cfg.plugin_config), returning the config object its
@@ -43,20 +43,6 @@ Optional (duck-typed; absent means the room's default behavior):
   valid TOML *after* core's half: core already opens [airc], and TOML forbids
   declaring a table twice, so contribute [airc.<name>] sub-tables (plus any
   top-level sections in _KNOWN_TOPLEVEL) instead of reopening [airc].
-- build_local_tools(cfg, *, room=None) -> dict[str, list[BaseTool]]  -- local (non-MCP)
-  langchain tools the plugin contributes, keyed by tool_group name. The room
-  grants a persona the tools under a group iff that group is in the persona's
-  tool_groups -- the same gate MCP tools use, so a persona's grants stay in its
-  agent.toml whether the tool is MCP or local. These groups live only in this
-  dict (not in the [tool_groups] config), so a persona may name one without it
-  being a configured MCP group. Used for tools that need in-process wiring an MCP
-  server cannot get (e.g. the grocery memory tools jailed to an akbase path).
-  `room` is passed by keyword for a tool that must post and not only compute
-  -- e.g. one whose integrity property is that the room, not the model's prose,
-  puts the text in the thread. Keyword-optional: an older plugin
-  declaring `build_local_tools(cfg)` keeps working, so this stays a compatible
-  addition and needs no PLUGIN_API_VERSION bump. The room inspects the hook and
-  passes `room` only to one that accepts it, by name or through `**kwargs`.
 - tool_instructions(cfg) -> str  -- prose about the plugin's local tools for every
   persona's system prompt, joined with the MCP servers' instructions under the
   same heading. Absent or empty means nothing is added.
@@ -83,16 +69,16 @@ here.
 
 PLUGIN_API_VERSION is bumped when a required signature changes incompatibly. An
 external plugin declares the version it was written against as a literal
-(PLUGIN_API_VERSION = 1), so a core that has moved on rejects it loudly rather
+(PLUGIN_API_VERSION = 2), so a core that has moved on rejects it loudly rather
 than calling a changed signature; importing and re-exporting core's constant
-defeats the check (it always matches itself) and is only correct for the in-tree
-plugin, versioned in lockstep with core. A plugin that declares none is tolerated
-but forgoes the check.
+defeats the check because it always matches itself. A plugin that declares no
+version is rejected.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -100,17 +86,35 @@ from typing import Protocol, runtime_checkable
 # the check is a simple equality (there is one contract at a time); a plugin
 # built against a different number is refused with a clear message instead of
 # blowing up on a renamed/removed argument deep in startup.
-PLUGIN_API_VERSION = 1
+PLUGIN_API_VERSION = 2
 
 # The names a plugin module must define to be loadable. Kept as data (not just
 # the Protocol) so the loader can name the exact missing attribute.
-_REQUIRED = ("build_subscribers", "build_follow_ups", "build_transport")
+_REQUIRED = (
+    "build_subscribers",
+    "build_follow_ups",
+    "build_transport",
+    "build_local_tools",
+)
+
+
+@dataclass(frozen=True)
+class LocalTools:
+    """A plugin's built-in candidates, allowlist, and persona-gated groups.
+
+    `allowlist` selects from the union of core and plugin `candidates` for every
+    conversational persona. `groups` stays opt-in through agent.toml. Configured
+    MCP tools are separate and continue through their read/active groups.
+    """
+
+    allowlist: tuple[str, ...]
+    candidates: tuple[object, ...] = ()
+    groups: Mapping[str, Sequence[object]] = field(default_factory=dict)
 
 
 @runtime_checkable
 class Plugin(Protocol):
-    """Structural type for a loaded plugin module. The three factories are
-    required; the rest are optional and duck-typed at their call sites."""
+    """Structural type for a loaded plugin module."""
 
     def build_subscribers(self, cfg, room, store, toolset) -> list: ...
 
@@ -120,9 +124,9 @@ class Plugin(Protocol):
 
     def build_transport(self, cfg, room, store, kind: str): ...
 
-    # Optional -- see the module docstring. Declared so the Protocol documents the
-    # full surface, but a plugin need not implement them (callers use getattr).
-    # aux_services is absent: it lives on the Transport, not here.
+    def build_local_tools(self, cfg, *, room) -> LocalTools: ...
+
+    # Optional hooks. aux_services is absent: it lives on the Transport.
     def default_transport_kind(self) -> str | None: ...
 
     def personas_dir(self, cfg=None) -> Path | None: ...
@@ -130,8 +134,6 @@ class Plugin(Protocol):
     def parse_config(self, cfg): ...
 
     def config_template(self) -> str | None: ...
-
-    def build_local_tools(self, cfg, *, room=None) -> dict: ...
 
     def build_message_handlers(self, cfg, room, store) -> list: ...
 
@@ -143,10 +145,8 @@ def validate_plugin(module, module_name: str) -> None:
     which part is wrong. Called right after import so a misconfigured
     plugin_module fails at startup, not at the first subscriber build.
 
-    Two checks: the three required factories must be present and callable, and the
-    plugin's declared API version (if it declares one) must match core's. A plugin
-    that declares no version is allowed for now -- an in-tree plugin predating the
-    field -- but a declared, mismatched one is a hard error."""
+    Required factories must be callable, and the plugin must declare the current
+    API version as a literal."""
     missing = [name for name in _REQUIRED if not callable(getattr(module, name, None))]
     if missing:
         raise SystemExit(
@@ -157,7 +157,13 @@ def validate_plugin(module, module_name: str) -> None:
     declared = getattr(
         module, "PLUGIN_API_VERSION", getattr(module, "plugin_api_version", None)
     )
-    if declared is not None and declared != PLUGIN_API_VERSION:
+    if declared is None:
+        raise SystemExit(
+            f"plugin {module_name!r} declares no PLUGIN_API_VERSION; this"
+            f" airc-room requires version {PLUGIN_API_VERSION}. Follow the"
+            " migration in airc-room/PLUGINS.md."
+        )
+    if declared != PLUGIN_API_VERSION:
         raise SystemExit(
             f"plugin {module_name!r} targets plugin API version {declared},"
             f" but this airc-room speaks {PLUGIN_API_VERSION}. Install a matching"

@@ -8,7 +8,7 @@ loudly at startup instead of mysteriously at first use."""
 from types import SimpleNamespace
 
 import pytest
-from airc_room.plugin import PLUGIN_API_VERSION, validate_plugin
+from airc_room.plugin import PLUGIN_API_VERSION, LocalTools, validate_plugin
 
 
 def _ok_module(**extra):
@@ -17,6 +17,8 @@ def _ok_module(**extra):
         build_subscribers=lambda *a, **k: [],
         build_follow_ups=lambda *a, **k: {},
         build_transport=lambda *a, **k: None,
+        build_local_tools=lambda *a, **k: LocalTools(allowlist=()),
+        PLUGIN_API_VERSION=PLUGIN_API_VERSION,
     )
     base.update(extra)
     return SimpleNamespace(**base)
@@ -48,7 +50,8 @@ def test_mismatched_version_is_rejected():
         validate_plugin(_ok_module(PLUGIN_API_VERSION=PLUGIN_API_VERSION + 1), "p")
 
 
-def test_absent_version_is_tolerated():
-    # A plugin predating the version field is allowed (in-tree, lockstep-versioned);
-    # only a declared, mismatched version is a hard error.
-    validate_plugin(_ok_module(), "some.plugin")
+def test_absent_version_is_rejected_with_the_migration():
+    mod = _ok_module()
+    del mod.PLUGIN_API_VERSION
+    with pytest.raises(SystemExit, match="declares no PLUGIN_API_VERSION"):
+        validate_plugin(mod, "some.plugin")

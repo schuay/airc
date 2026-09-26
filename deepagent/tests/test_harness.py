@@ -173,10 +173,8 @@ async def test_the_application_can_adapt_the_resolved_tools(tmp_path):
     await h.aclose()
 
 
-async def test_application_built_tools_are_bound_beside_the_mcp_ones(tmp_path):
-    """A consumer that builds its own tools in-process hands them over ready;
-    they reach every graph and are not passed through the wrapper, which is
-    for the MCP tools the harness resolved itself."""
+async def test_application_built_tools_are_allowlisted_and_wrapped(tmp_path):
+    """Every non-MCP candidate passes through the explicit grant and wrapper."""
     from langchain_core.tools import StructuredTool
 
     from deepagent import LangGraphHarness
@@ -188,13 +186,29 @@ async def test_application_built_tools_are_bound_beside_the_mcp_ones(tmp_path):
         seen.append(list(tools))
         return tools
 
-    h = LangGraphHarness(_common(tmp_path), tools=[own], tool_wrapper=wrapper)
+    h = LangGraphHarness(
+        _common(tmp_path),
+        tools=[own],
+        tool_allowlist=("own",),
+        tool_wrapper=wrapper,
+    )
     await h._ensure_init()
     bound = h._tools_for(tmp_path)
     assert own in bound
-    assert own not in seen[0]
-    names = [t.name for t in bound]
-    assert names.index("own") < names.index("shell")
+    assert any(own in call for call in seen)
+    assert [tool.name for tool in bound] == ["own"]
+    await h.aclose()
+
+
+async def test_application_candidate_not_in_allowlist_is_absent(tmp_path):
+    from langchain_core.tools import StructuredTool
+
+    from deepagent import LangGraphHarness
+
+    own = StructuredTool.from_function(lambda x: x, name="own", description="mine")
+    h = LangGraphHarness(_common(tmp_path), tools=[own])
+    await h._ensure_init()
+    assert h._tools_for(tmp_path) == []
     await h.aclose()
 
 

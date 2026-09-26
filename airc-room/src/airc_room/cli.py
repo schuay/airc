@@ -18,7 +18,7 @@ import signal
 import sys
 from pathlib import Path
 
-from airc_core import MCPToolset, TokenLog, quiet_noisy_loggers
+from airc_core import MCPToolset, TokenLog, quiet_noisy_loggers, select_tools
 from platformdirs import user_state_path
 
 from . import __version__
@@ -319,7 +319,7 @@ def _resolve_agents_dir(args: argparse.Namespace, plugin, cfg=None) -> Path:
     frees an out-of-tree app from staging personas into the process cwd.
 
     `cfg` is passed to the hook when it takes one, by the same signature
-    inspection _call_local_tools uses and for the same compatibility reason. A
+    inspection `_call_personas_dir` uses. A
     plugin whose personas come from a configured source and not from its own
     package -- the coding app resolves them out of a pinned project pack -- has
     no other way to reach the config: this runs before any plugin config is
@@ -336,7 +336,7 @@ def _resolve_agents_dir(args: argparse.Namespace, plugin, cfg=None) -> Path:
 
 
 def _call_personas_dir(hook, cfg):
-    """Call personas_dir with cfg only if it takes one; see _call_local_tools."""
+    """Call personas_dir with cfg only if it takes one."""
     if cfg is None:
         return hook()
     try:
@@ -349,30 +349,19 @@ def _call_personas_dir(hook, cfg):
     return hook(cfg=cfg) if takes_cfg else hook()
 
 
-def _call_local_tools(plugin, cfg, room) -> dict:
-    """Call the plugin's build_local_tools, passing `room` only if it takes one.
+def _call_local_tools(plugin, cfg, room):
+    """Build and type-check the plugin's API-v2 local-tool policy."""
+    from .plugin import LocalTools
 
-    `room` is a compatible addition to the hook (see plugin.py), so a plugin
-    written against build_local_tools(cfg) must keep contributing its tools.
-    Dispatch by inspecting the signature instead of calling with the keyword and
-    catching TypeError: the fallback would also swallow a TypeError raised inside
-    the hook's own body, silently reporting "this plugin ships no local tools"
-    for what is really a crash in it -- and would run the body twice.
-    """
-    hook = plugin.build_local_tools
-    try:
-        params = inspect.signature(hook).parameters.values()
-    except (TypeError, ValueError):
-        # A builtin or C-implemented callable has no introspectable signature.
-        # Not expected for a plugin module function; fall back to the old form
-        # instead of refusing to load any local tools at all.
-        return hook(cfg)
-    # **kwargs counts: it is the forward-compat idiom, so a plugin that wrote it
-    # to receive exactly this kind of later addition must actually receive it.
-    takes_room = any(
-        p.name == "room" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params
-    )
-    return hook(cfg, room=room) if takes_room else hook(cfg)
+    policy = plugin.build_local_tools(cfg, room=room)
+    if not isinstance(policy, LocalTools):
+        name = getattr(plugin, "__name__", type(plugin).__name__)
+        raise SystemExit(
+            f"plugin {name!r} build_local_tools() returned"
+            f" {type(policy).__name__}, not airc_room.plugin.LocalTools. Follow"
+            " the API-v2 migration in airc-room/PLUGINS.md."
+        )
+    return policy
 
 
 def _resolve_transport_kind(args: argparse.Namespace, cfg, plugin) -> str:
@@ -571,14 +560,32 @@ async def amain(args: argparse.Namespace) -> None:
     from .timers import TimerScheduler
 
     scheduler = TimerScheduler(store)
-    # Local (non-MCP) tools the plugin contributes, keyed by tool_group name (e.g.
-    # the grocery memory tools under "memory"). The runner grants each group to a
-    # persona that lists it, exactly as for MCP groups. A plugin without the hook
-    # (or a bare room) contributes none.
-    local_tool_groups: dict = {}
+    # The plugin's explicit built-in allowlist selects from both core's
+    # candidates and its own. Persona-gated feature groups remain separate.
+    from .chat_search import make_search_chat_tool
+    from .plugin import LocalTools
+    from .timers import make_timer_tools
+
+    policy = (
+        _call_local_tools(plugin, cfg, room)
+        if plugin
+        else LocalTools(allowlist=("search_chat", "timer_*"))
+    )
+    candidates = [
+        make_search_chat_tool(str(cfg.db_path)),
+        *make_timer_tools(scheduler),
+        *policy.candidates,
+    ]
+    try:
+        local_tools = select_tools(
+            candidates, policy.allowlist, label="room built-in tools"
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    local_tool_groups: dict = {
+        name: list(tools) for name, tools in policy.groups.items()
+    }
     tool_instructions = ""
-    if plugin and hasattr(plugin, "build_local_tools"):
-        local_tool_groups = _call_local_tools(plugin, cfg, room) or {}
     if plugin and hasattr(plugin, "tool_instructions"):
         tool_instructions = plugin.tool_instructions(cfg) or ""
     # TODO: re-enable memory once writes are reviewed. Every memory-enabled
@@ -603,7 +610,7 @@ async def amain(args: argparse.Namespace) -> None:
             store,
             on_event=on_event,
             room_prompt=room_prompt,
-            timer_scheduler=scheduler,
+            local_tools=local_tools,
             local_tool_groups=local_tool_groups,
             tool_instructions=tool_instructions,
         ) as runner,

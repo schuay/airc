@@ -18,9 +18,42 @@ class _DemoReport(Report):
     note: str = ""
 
 
+def _common(tmp_path):
+    from airc_core.config import CommonConfig
+
+    common = CommonConfig()
+    common.models = {"default": "google_genai:test"}
+    common.token_db_path = tmp_path / "tokens.db"
+    return common
+
+
 def test_worktree_tools_names(tmp_path):
     tools = {t.name: t for t in _worktree_tools(tmp_path, shell_timeout_s=5.0)}
     assert set(tools) == {"shell", "read_file", "edit_file", "write_file"}
+
+
+async def test_harness_does_not_add_worktree_tools_unless_the_caller_supplies_them(
+    tmp_path,
+):
+    from deepagent import LangGraphHarness
+
+    h = LangGraphHarness(_common(tmp_path))
+    await h._ensure_init()
+    assert h._tools_for(tmp_path) == []
+    await h.aclose()
+
+
+async def test_harness_selects_supplied_worktree_tools_by_allowlist(tmp_path):
+    from deepagent import LangGraphHarness
+
+    h = LangGraphHarness(
+        _common(tmp_path),
+        tool_allowlist=("read_file", "shell"),
+        worktree_tools=_worktree_tools,
+    )
+    await h._ensure_init()
+    assert [tool.name for tool in h._tools_for(tmp_path)] == ["shell", "read_file"]
+    await h.aclose()
 
 
 def test_bound_write_file_resolves_relative(tmp_path):

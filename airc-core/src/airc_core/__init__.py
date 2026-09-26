@@ -52,6 +52,7 @@ _LAZY = {
     "retrying": ".agent",
     "slug": ".artifacts",
     "supported_models_hint": ".model",
+    "select_tools": ".toolgrants",
 }
 
 
@@ -109,6 +110,7 @@ __all__ = [
     "quiet_noisy_loggers",
     "register_provider",
     "retrying",
+    "select_tools",
     "slug",
     "supported_models_hint",
 ]

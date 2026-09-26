@@ -27,6 +27,7 @@ from airc_core import (
     UsageCollector,
     make_model,
     missing_key,
+    select_tools,
 )
 from airc_core.agent import (
     CallBudgetMiddleware,
@@ -309,7 +310,7 @@ class AgentRunner:
         store: Store,
         on_event: EventHook | None = None,
         room_prompt: str = "",
-        timer_scheduler=None,
+        local_tools: list | None = None,
         local_tool_groups: dict | None = None,
         tool_instructions: str = "",
     ) -> None:
@@ -324,13 +325,13 @@ class AgentRunner:
         # persona gets a group's tools iff the group is in its tool_groups -- the
         # same gate MCP tools use. Empty for a bare room or a plugin that ships none.
         self._local_tool_groups = local_tool_groups or {}
+        # Built-in non-MCP tools selected once from the plugin's explicit room
+        # allowlist. Every conversational persona gets the same baseline.
+        self._local_tools = list(local_tools or ())
         self._store = store
         self._tokens = TokenLog(cfg.token_db_path)
         self._on_event = on_event
         self._room_prompt = room_prompt
-        # Optional TimerScheduler: when set, every chat persona gets the local
-        # (non-MCP) timer tools (create/list/cancel). None disables timers.
-        self._timer_scheduler = timer_scheduler
         self._stack = contextlib.AsyncExitStack()
         self._agents: dict[str, _AgentEntry] = {}
         # Per-persona structured-turn graphs (see run_structured_turn): a fresh
@@ -448,19 +449,7 @@ class AgentRunner:
         # marks the forced-JSON digest turn, where they have no place). They read
         # their thread/agent from the run config, so they need no ambient wiring.
         if not extra_system:
-            local: list = []
-            # timer tools: every chat persona (create steered to rare use by its
-            # docstring; list/cancel let it manage what it scheduled).
-            if self._timer_scheduler is not None:
-                from .timers import make_timer_tools
-
-                local.extend(make_timer_tools(self._timer_scheduler))
-            # search_chat: every chat persona gets it by default, no tool_groups
-            # grant needed. It is read-only over the room's own history and scopes
-            # to the caller's space, so there is nothing to gate on.
-            from .chat_search import make_search_chat_tool
-
-            local.append(make_search_chat_tool(str(self._cfg.db_path)))
+            local: list = list(self._local_tools)
             # Plugin local tools, gated by the persona's tool_groups exactly like
             # MCP tools: a persona gets a group's local tools only if it lists the
             # group (e.g. "memory" for the grocery akbase tools). These groups are
@@ -468,7 +457,9 @@ class AgentRunner:
             # here is not an unknown-MCP-group warning.
             for group in persona.tool_groups:
                 local.extend(self._local_tool_groups.get(group, []))
-            tools = [*tools, *local]
+            tools = select_tools(
+                [*tools, *local], ("*",), label=f"agent {persona.name} tools"
+            )
         log.info(
             "agent %s: model=%s%s tools=%d",
             persona.name,

@@ -44,6 +44,7 @@ from airc_core import (
     growing_cache_middleware,
     make_model,
     profile_for,
+    select_tools,
 )
 from airc_tools.edit import apply_edits as _apply_edits
 from airc_tools.edit import write_file as _write_file
@@ -144,10 +145,9 @@ _MAX_GRAPHS = 16
 # conventions + skill index) via LangGraphHarness(system_prompt=...).
 _DEFAULT_SYSTEM = f"""\
 You are an autonomous coding agent working in one git worktree. Understand the
-task, edit code, build and test in the worktree, and iterate until it is
-correct. shell/read_file/edit_file/write_file act in your worktree; end every turn by
-calling the `{REPORT_TOOL_NAME}` tool exactly once (with disposition `continue`
-if you need another turn -- the worktree and your context persist).
+task and use the tools the application grants. End every turn by calling the
+`{REPORT_TOOL_NAME}` tool exactly once (with disposition `continue` if you need
+another turn -- the worktree and your context persist).
 """
 
 
@@ -175,15 +175,9 @@ def _worktree_tools(workdir: Path, shell_timeout_s: float) -> list:
     tree. Per-thread binding also means no shared mutable cwd/env across the
     concurrent jobs a scheduler may run.
 
-    Granted unconditionally, not through tool_groups. Those
-    groups are MCP-only: MCPToolset expands a group name to patterns matched
-    against MCP tool names, and these are per-job StructuredTools closed over
-    `workdir`. Routing them through it would mean either a second non-MCP
-    registry inside the toolset or moving job-scoped construction into
-    suite-shared substrate. Neither is worth it for a knob with one setting --
-    every coding goal builds and runs, so a config that could withhold `shell`
-    only offers a way to boot an agent that cannot work, which is a failure mode
-    that has already happened once (see MCPToolset._expand's empty-group warning).
+    The application must supply this factory and explicitly allow each returned
+    tool. MCP groups remain separate because these tools are constructed for a
+    specific job after the MCP toolset is resolved.
 
     These tools do no confinement of their own. Confinement is whole-process:
     the caller runs the entire loop inside a bwrap worker (see worker.py), so the
@@ -421,6 +415,8 @@ class LangGraphHarness:
         reminders: Sequence[tuple[str, str, int]] = (),
         tool_wrapper: Callable[[list], list] | None = None,
         tools: Sequence[object] = (),
+        tool_allowlist: Sequence[str] = (),
+        worktree_tools: Callable[[Path, float], Sequence[object]] | None = None,
     ) -> None:
         self._common = common
         # The profile, not the id: `common.models` is ids alone, so resolving
@@ -455,10 +451,14 @@ class LangGraphHarness:
         # expressive enough to be useful would have to name tools and arguments,
         # and naming those is naming a domain.
         self._tool_wrapper = tool_wrapper
-        # Tools the application built itself and hands over ready to bind. They
-        # sit beside the MCP tools in every graph and are not passed through the
-        # wrapper: the application that built them adapted them already.
-        self._tools = list(tools)
+        # Application-built tools are candidates, not grants. One explicit
+        # allowlist selects both these and the workdir-bound candidates below.
+        # The wrapper then sees every selected source, which is how a native
+        # repo_git_* tool receives the same per-job pin as an MCP one.
+        self._tool_candidates = list(tools)
+        self._tool_allowlist = tuple(tool_allowlist)
+        self._worktree_tools = worktree_tools
+        self._tools: list = []
         self._init_lock = asyncio.Lock()
         self._checkpoint_db = Path(checkpoint_db) if checkpoint_db else None
         self._saver_obj = None
@@ -549,6 +549,13 @@ class LangGraphHarness:
             self._v8_tools = ts.tools_for(ts.resolve_patterns(self._groups))
             if self._tool_wrapper is not None:
                 self._v8_tools = self._tool_wrapper(self._v8_tools)
+            self._tools = select_tools(
+                self._tool_candidates,
+                self._tool_allowlist,
+                label="deepagent built-in tools",
+            )
+            if self._tool_wrapper is not None:
+                self._tools = self._tool_wrapper(self._tools)
             if ts.instructions:
                 self._system = (
                     f"{self._system_base}\n\n## MCP server instructions\n\n"
@@ -565,11 +572,24 @@ class LangGraphHarness:
     def _tools_for(self, workdir) -> list:
         """Every tool a graph over `workdir` binds: MCP, application-built,
         then the worktree shell."""
-        return [
-            *self._v8_tools,
-            *self._tools,
-            *_worktree_tools(workdir, self._shell_timeout_s),
-        ]
+        local = list(self._tools)
+        if self._worktree_tools is not None:
+            dynamic = select_tools(
+                self._worktree_tools(Path(workdir), self._shell_timeout_s),
+                self._tool_allowlist,
+                label="deepagent worktree tools",
+            )
+            if self._tool_wrapper is not None:
+                dynamic = self._tool_wrapper(dynamic)
+            local.extend(dynamic)
+        return select_tools(
+            [
+                *self._v8_tools,
+                *local,
+            ],
+            ("*",),
+            label="deepagent granted tools",
+        )
 
     async def aclose(self) -> None:
         await self._stack.aclose()
