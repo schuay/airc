@@ -23,3 +23,17 @@ def _restore_vertex_global_config():
         yield
     finally:
         cfg._credentials, cfg._location, cfg._project = saved
+
+
+@pytest.fixture
+def traits_table():
+    """Provide a clean traits-alias table and restore process state afterwards."""
+    from airc_core import providers
+
+    saved = dict(providers._TRAITS_ALIASES)
+    providers._TRAITS_ALIASES.clear()
+    try:
+        yield providers
+    finally:
+        providers._TRAITS_ALIASES.clear()
+        providers._TRAITS_ALIASES.update(saved)

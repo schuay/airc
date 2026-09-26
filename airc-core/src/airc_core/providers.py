@@ -192,8 +192,16 @@ _MODEL_TRAITS: dict[str, ModelTraits] = {
 _TRAITS_ALIASES: dict[str, str] = {}
 
 
+def _checkpoint_name(model_id: str) -> str:
+    """The checkpoint name after provider prefix, version and vendor path."""
+    return bare_model_name(model_id).rsplit("/", 1)[-1]
+
+
 def register_traits_alias(model: str, as_model: str) -> None:
     """Give `model` (a full id or a bare name) `as_model`'s traits.
+
+    A full-id alias is an exact key: versions and alternate vendor paths do not
+    inherit it. Use a bare alias when every provider spelling should match.
 
     `as_model` must have a ModelTraits entry -- an alias onto the neutral record
     resolves to the same default `model` already gets, so it is dead config and
@@ -202,7 +210,7 @@ def register_traits_alias(model: str, as_model: str) -> None:
     components); a CONFLICTING pair raises, since which traits applied would
     otherwise depend on parse order.
     """
-    target = bare_model_name(as_model).rsplit("/", 1)[-1]
+    target = _checkpoint_name(as_model)
     if target not in _MODEL_TRAITS:
         raise ValueError(
             f"{model!r} cannot take the traits of {as_model!r}: no ModelTraits"
@@ -223,6 +231,6 @@ def model_traits_for(model_id: str) -> ModelTraits:
     every route, so the path is dropped here. Pricing keeps the full bare name,
     since the aggregator's rate is its own.
     """
-    name = bare_model_name(model_id).rsplit("/", 1)[-1]
+    name = _checkpoint_name(model_id)
     key = _TRAITS_ALIASES.get(model_id) or _TRAITS_ALIASES.get(name) or name
     return _MODEL_TRAITS.get(key, _DEFAULT_MODEL)

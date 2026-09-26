@@ -119,22 +119,6 @@ def test_slow_to_converge_marks_the_long_running_checkpoint():
     assert model_traits_for("some_new_provider:m").slow_to_converge is False
 
 
-@pytest.fixture
-def traits_table():
-    """A clean traits-alias table, restored afterwards: register_traits_alias
-    writes process-global module state that would otherwise leak between tests in
-    the order they happened to run."""
-    from airc_core import providers
-
-    saved = dict(providers._TRAITS_ALIASES)
-    providers._TRAITS_ALIASES.clear()
-    try:
-        yield
-    finally:
-        providers._TRAITS_ALIASES.clear()
-        providers._TRAITS_ALIASES.update(saved)
-
-
 def test_a_traits_alias_gives_a_model_its_targets_traits(traits_table):
     """An unlisted model aliased onto a listed checkpoint takes its traits; the
     alias by bare name covers every provider spelling of it."""
