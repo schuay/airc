@@ -193,9 +193,8 @@ async def test_application_built_tools_are_bound_beside_the_mcp_ones(tmp_path):
     bound = h._tools_for(tmp_path)
     assert own in bound
     assert own not in seen[0]
-    assert [t.name for t in bound].index("own") < [t.name for t in bound].index(
-        "run_shell"
-    )
+    names = [t.name for t in bound]
+    assert names.index("own") < names.index("shell")
     await h.aclose()
 
 
