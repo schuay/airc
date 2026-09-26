@@ -127,3 +127,19 @@ def test_a_raising_hook_propagates_and_is_called_exactly_once():
     with pytest.raises(TypeError):
         _call_local_tools(plugin, None, object())
     assert plugin.calls == 1
+
+
+def test_plugin_tool_instructions_join_the_toolsets(tmp_path):
+    """A plugin that builds tools in-process describes them the way an MCP
+    server does through its instructions; both reach the prompt together."""
+    from airc_room.runner import AgentRunner
+
+    class _Toolset:
+        instructions = "from the server"
+
+    cfg = Config()
+    cfg.token_db_path = tmp_path / "tokens.db"
+    runner = AgentRunner(cfg, {}, _Toolset(), object(), tool_instructions="from us")
+    assert runner._instructions() == "from the server\n\nfrom us"
+    runner = AgentRunner(cfg, {}, _Toolset(), object())
+    assert runner._instructions() == "from the server"

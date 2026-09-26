@@ -119,7 +119,7 @@ def build_system_prompt(
         parts.append(room_prompt)
     parts.append(persona.system_prompt)
     if mcp_instructions:
-        parts.append(f"# MCP server instructions\n\n{mcp_instructions}")
+        parts.append(f"# Tool instructions\n\n{mcp_instructions}")
     # Voice goes last: it is a style overlay, and trailing position gives the tone
     # reference recency weight without displacing the role or the grounding rules.
     if voice:
@@ -311,10 +311,15 @@ class AgentRunner:
         room_prompt: str = "",
         timer_scheduler=None,
         local_tool_groups: dict | None = None,
+        tool_instructions: str = "",
     ) -> None:
         self._cfg = cfg
         self._personas = personas
         self._toolset = toolset
+        # Prose the plugin wants in every system prompt about its local tools,
+        # the way an MCP server's instructions describe its tools. Joined with
+        # the toolset's instructions under one heading.
+        self._tool_instructions = tool_instructions
         # Plugin-supplied local (non-MCP) tools, keyed by tool_group name. A
         # persona gets a group's tools iff the group is in its tool_groups -- the
         # same gate MCP tools use. Empty for a bare room or a plugin that ships none.
@@ -365,6 +370,12 @@ class AgentRunner:
                 log.warning("voice: %s: cannot read %s: %s", persona.name, path, e)
                 self._voice_cache[key] = ""
         return self._voice_cache[key]
+
+    def _instructions(self) -> str:
+        """The toolset's instructions and the plugin's, for the system prompt."""
+        return "\n\n".join(
+            s for s in (self._toolset.instructions, self._tool_instructions) if s
+        )
 
     def _memory_enabled(self, persona: Persona) -> bool:
         """Whether this persona gets long-term memory: the feature is on and the
@@ -468,7 +479,7 @@ class AgentRunner:
         system_prompt = build_system_prompt(
             persona,
             available,
-            self._toolset.instructions,
+            self._instructions(),
             self._room_prompt,
             voice=voice,
         )

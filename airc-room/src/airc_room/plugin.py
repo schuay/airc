@@ -57,6 +57,9 @@ Optional (duck-typed; absent means the room's default behavior):
   declaring `build_local_tools(cfg)` keeps working, so this stays a compatible
   addition and needs no PLUGIN_API_VERSION bump. The room inspects the hook and
   passes `room` only to one that accepts it, by name or through `**kwargs`.
+- tool_instructions(cfg) -> str  -- prose about the plugin's local tools for every
+  persona's system prompt, joined with the MCP servers' instructions under the
+  same heading. Absent or empty means nothing is added.
 - build_message_handlers(cfg, room, store) -> list[MessageHandler]  -- observers
   on arriving messages, run by the orchestrator before it routes anything (see
   orchestrator.MessageHandler / Disposition). A handler that returns CONSUMED

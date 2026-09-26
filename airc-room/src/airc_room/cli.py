@@ -576,8 +576,11 @@ async def amain(args: argparse.Namespace) -> None:
     # persona that lists it, exactly as for MCP groups. A plugin without the hook
     # (or a bare room) contributes none.
     local_tool_groups: dict = {}
+    tool_instructions = ""
     if plugin and hasattr(plugin, "build_local_tools"):
         local_tool_groups = _call_local_tools(plugin, cfg, room) or {}
+    if plugin and hasattr(plugin, "tool_instructions"):
+        tool_instructions = plugin.tool_instructions(cfg) or ""
     # TODO: re-enable memory once writes are reviewed. Every memory-enabled
     # persona reads the store, so a persona steered by injected text (a CL
     # description, a bug comment) could plant a note that another persona, one
@@ -602,6 +605,7 @@ async def amain(args: argparse.Namespace) -> None:
             room_prompt=room_prompt,
             timer_scheduler=scheduler,
             local_tool_groups=local_tool_groups,
+            tool_instructions=tool_instructions,
         ) as runner,
     ):
         if console:
