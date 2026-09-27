@@ -367,6 +367,8 @@ async def test_coordinator_prompt_is_cache_friendly(tmp_path, monkeypatch):
     # Full roster + rules in the stable prefix; no transcript leaks into it.
     assert "perf: perf expert" in system and "compiler: compiler expert" in system
     assert "Default to NOBODY" in system
+    assert "substantive claim or verdict" in system
+    assert "independently confirm, correct, or qualify" in system
     assert "is the regression real?" not in system
     # Variable transcript and the sender exclusion live in the user message.
     assert "is the regression real?" in user

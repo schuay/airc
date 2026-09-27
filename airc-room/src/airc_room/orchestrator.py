@@ -156,7 +156,9 @@ Rules, in priority order:
 - A [event] is an automated world signal (a perf change point, a CI result),
   not a person or agent. Pick an agent when it is worth an expert's take -- a
   regression worth investigating, a signal an agent can explain or act on with
-  its tools -- else NOBODY, exactly as for any other message.
+  its tools -- else NOBODY, exactly as for any other message. An event needs no
+  explicit question: a substantive claim or verdict that a best-fit agent can
+  independently confirm, correct, or qualify is enough to pick that agent.
 - Agents discussing with each other is healthy: allow a reply that disagrees,
   corrects, or adds a new angle to another agent's message, and let an
   exchange continue while it stays substantive. End it (NOBODY) once it turns
