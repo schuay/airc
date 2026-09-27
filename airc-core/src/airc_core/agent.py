@@ -46,6 +46,7 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import get_buffer_string
 from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.constants import TAG_NOSTREAM
+from langgraph.errors import GraphBubbleUp
 
 from .collector import book_aside
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
@@ -2385,6 +2386,45 @@ class _AnthropicVertexCaching(AgentMiddleware):
         return response
 
 
+class _ToolErrorBoundary(AgentMiddleware):
+    """Return ordinary tool failures to the model without swallowing control flow."""
+
+    @staticmethod
+    def _failure(request, error: Exception) -> ToolMessage:
+        call = request.tool_call
+        name = call["name"]
+        detail = f": {error}" if str(error) else ""
+        log.warning(
+            "tool %s failed with %s%s",
+            name,
+            type(error).__name__,
+            detail,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return ToolMessage(
+            content=f"Tool {name} failed with {type(error).__name__}{detail}",
+            tool_call_id=call["id"],
+            name=name,
+            status="error",
+        )
+
+    def wrap_tool_call(self, request, handler):
+        try:
+            return handler(request)
+        except GraphBubbleUp:
+            raise
+        except Exception as error:
+            return self._failure(request, error)
+
+    async def awrap_tool_call(self, request, handler):
+        try:
+            return await handler(request)
+        except GraphBubbleUp:
+            raise
+        except Exception as error:
+            return self._failure(request, error)
+
+
 def base_middleware(
     model_id: str,
     system_prompt: str,
@@ -2394,9 +2434,9 @@ def base_middleware(
     grounding_tokens: int = _GROUNDING_REMINDER_TOKENS,
     max_calls: int | None = None,
 ):
-    """The model-call middleware every agent graph shares: ceiling summarization,
-    context-window sizing, empty-response stripping, transient-error retry, and
-    prompt caching.
+    """The middleware every agent graph shares: tool-error containment, ceiling
+    summarization, context-window sizing, empty-response stripping,
+    transient-error retry, and prompt caching.
 
     Both agent builders (persona turns in AgentRunner, the commit-review graph
     in processors) compose this with their own control middleware so the cost
@@ -2431,6 +2471,12 @@ def base_middleware(
         # turn is shed to the last result and forced to wrap up (the backstop
         # when summarization could not bring it under).
         _ContextBudget(),
+        # A native tool has no MCP adapter to turn a runtime exception into an
+        # error result. Keep that failure inside its tool call so the model can
+        # correct or work around it without losing the whole turn. This stays
+        # outer to caller-appended tool policy middleware, while GraphBubbleUp
+        # remains graph control flow rather than model-visible error text.
+        _ToolErrorBoundary(),
         # Strip a terminal empty response so it never reaches the checkpoint and
         # poisons the next turn (Gemini rejects empty parts).
         _DropEmptyResponses(),

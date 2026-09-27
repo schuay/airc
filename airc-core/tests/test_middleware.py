@@ -20,6 +20,7 @@ from airc_core.agent import (
     RequireStructuredResultMiddleware,
     _DropEmptyResponses,
     _SkipOnSummaryFailure,
+    _ToolErrorBoundary,
     base_middleware,
     growing_cache_middleware,
     retrying,
@@ -272,6 +273,7 @@ def test_shared_stack_present_for_any_model():
     # mutually exclusive client types, so at most one acts on a given request.
     assert _names(base_middleware(_NON_VERTEX, "sys", [])) == [
         "_ContextBudget",
+        "_ToolErrorBoundary",
         "_DropEmptyResponses",
         "ModelRetryMiddleware",
         "_EmptyCandidateRetry",
@@ -1119,6 +1121,71 @@ async def test_empty_candidate_retries_then_succeeds(monkeypatch):
     state = await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert state["messages"][-1].content == "the answer"
     assert model.calls == 2
+
+
+async def test_runtime_tool_error_is_returned_to_the_model(caplog):
+    from langchain.agents import create_agent
+    from langchain_core.tools import tool
+
+    @tool
+    def fail() -> str:
+        """Fail like an in-process repository reader."""
+        raise ValueError("git grep failed: invalid regular expression")
+
+    model = _CandidateModel(
+        scripted=[
+            {
+                "content": "",
+                "tool_calls": [{"name": "fail", "args": {}, "id": "c1"}],
+            },
+            {"content": "recovered"},
+        ]
+    )
+    graph = create_agent(
+        model,
+        tools=[fail],
+        system_prompt="sys",
+        middleware=base_middleware(_NON_VERTEX, "sys", [fail]),
+    )
+
+    with pytest.raises(ValueError, match="invalid regular expression"):
+        await fail.ainvoke({})
+
+    with caplog.at_level(logging.WARNING, logger="airc_core.agent"):
+        state = await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
+
+    failure = next(m for m in state["messages"] if isinstance(m, ToolMessage))
+    assert failure.name == "fail"
+    assert failure.tool_call_id == "c1"
+    assert failure.status == "error"
+    assert "ValueError: git grep failed: invalid regular expression" in failure.text
+    assert state["messages"][-1].content == "recovered"
+    assert "tool fail failed with ValueError" in caplog.text
+
+
+def test_runtime_tool_error_is_returned_on_sync_invocation():
+    request = SimpleNamespace(tool_call={"name": "read", "args": {}, "id": "c1"})
+
+    def fail(_request):
+        raise RuntimeError("reader failed")
+
+    failure = _ToolErrorBoundary().wrap_tool_call(request, fail)
+    assert failure.status == "error"
+    assert failure.name == "read"
+    assert failure.tool_call_id == "c1"
+    assert failure.text == "Tool read failed with RuntimeError: reader failed"
+
+
+async def test_tool_error_boundary_preserves_graph_control():
+    from langgraph.errors import GraphInterrupt
+
+    request = SimpleNamespace(tool_call={"name": "read", "args": {}, "id": "c1"})
+
+    async def interrupt(_request):
+        raise GraphInterrupt("pause")
+
+    with pytest.raises(GraphInterrupt):
+        await _ToolErrorBoundary().awrap_tool_call(request, interrupt)
 
 
 async def test_empty_candidate_exhausts_and_raises_by_type(monkeypatch):
