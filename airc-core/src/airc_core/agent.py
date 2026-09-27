@@ -480,6 +480,14 @@ def compact_for_budget(messages: list, window: int) -> tuple[list, bool]:
     switched it off, so the shed does not fight a live cache. Below the
     threshold the request is returned intact; the return value is a pure function
     of the inputs.
+
+    TODO: stubbing earlier ToolMessages (and _ContextBudget dropping tools and
+    appending _TERMINATE_NUDGE to system_message) mutates the prefix before
+    later AIMessages. On Anthropic models that bind thinking block signatures
+    to system + tools + preceding messages, any kept thinking or
+    redacted_thinking block after the edit fails signature verification with a
+    400. Strip thinking and redacted_thinking blocks from the shed message list
+    when shedding fires.
     """
     est = _estimate_input_tokens(messages)
     if est < window * _HARD_FRACTION:
@@ -1940,7 +1948,15 @@ class _SkipOnSummaryFailure(SummarizationMiddleware):
 
     `model_id` is the configured id of `model`, tagged onto the summary call so
     the usage collector can price it: the call runs on the filter model, not
-    the turn's, and the callback sees only the request."""
+    the turn's, and the callback sees only the request.
+
+    TODO: keep-tail compaction replaces older messages with a summary while
+    keeping _SUMMARY_KEEP_TOKENS of recent messages verbatim. On Anthropic
+    models that bind thinking block signatures to system + tools + preceding
+    messages, any thinking or redacted_thinking block in the kept tail was
+    signed against the pre-compaction history and fails signature verification
+    with a 400 on the next call. Strip thinking and redacted_thinking blocks
+    from the kept tail when compaction fires."""
 
     def __init__(self, *args, model_id: str = "", **kwargs) -> None:
         super().__init__(*args, **kwargs)
