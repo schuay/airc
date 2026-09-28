@@ -146,6 +146,16 @@ def test_no_local_tools_by_default(tmp_path):
     assert runner._local_tool_groups == {}
 
 
+def test_structured_grants_do_not_change_existing_positional_fields():
+    grant = ToolGrant(required=("search_chat",))
+    groups = {"memory": [_mem]}
+    policy = LocalTools(grant, groups)
+
+    assert policy.tool_grant is grant
+    assert policy.groups is groups
+    assert policy.structured_grants == {}
+
+
 class _Plugin:
     def build_local_tools(self, cfg, *, room):
         return LocalTools(

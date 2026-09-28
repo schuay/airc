@@ -113,8 +113,8 @@ class LocalTools:
     """
 
     tool_grant: ToolGrant = field(default_factory=ToolGrant)
-    structured_grants: Mapping[str, ToolGrant] = field(default_factory=dict)
     groups: Mapping[str, Sequence[object]] = field(default_factory=dict)
+    structured_grants: Mapping[str, ToolGrant] = field(default_factory=dict)
 
 
 @runtime_checkable
