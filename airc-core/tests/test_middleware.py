@@ -15,6 +15,8 @@ from types import SimpleNamespace
 import pytest
 from airc_core.agent import (
     CallBudgetMiddleware,
+    ClassifierStopError,
+    ClassifierStopMiddleware,
     EmptyCandidateError,
     FinalAnswerMiddleware,
     RequireStructuredResultMiddleware,
@@ -1107,6 +1109,22 @@ def _candidate_agent(scripted):
     return model, agent
 
 
+def _classifier_agent(scripted):
+    from langchain.agents import create_agent
+
+    model = _CandidateModel(scripted=scripted)
+    agent = create_agent(
+        model,
+        tools=[],
+        system_prompt="sys",
+        middleware=[
+            *base_middleware(_NON_VERTEX, "sys", []),
+            ClassifierStopMiddleware(),
+        ],
+    )
+    return model, agent
+
+
 _EMPTY_STOP = {"content": "", "response_metadata": {"finish_reason": "STOP"}}
 
 
@@ -1227,6 +1245,48 @@ async def test_refusal_without_content_raises_without_nudge_retry(monkeypatch):
     assert model.calls == 1
 
 
+@pytest.mark.parametrize(
+    ("content", "key", "value", "reason"),
+    [
+        ("", "stop_reason", "refusal", "refusal"),
+        ("I cannot provide that.", "finish_reason", "SAFETY", "safety"),
+    ],
+)
+async def test_classifier_stop_is_typed_before_same_model_retries(
+    monkeypatch, content, key, value, reason
+):
+    from airc_core import agent
+
+    monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
+    model, graph = _classifier_agent(
+        [{"content": content, "response_metadata": {key: value}}]
+    )
+    with pytest.raises(ClassifierStopError) as raised:
+        await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
+    assert raised.value.reason == reason
+    assert model.calls == 1
+
+
+async def test_non_classifier_reasons_pass_through_classifier_middleware():
+    for reason in ("STOP", "MAX_TOKENS", "MALFORMED_FUNCTION_CALL", "other"):
+        response = type(
+            "R",
+            (),
+            {
+                "result": [
+                    AIMessage("answer", response_metadata={"finish_reason": reason})
+                ]
+            },
+        )()
+
+        async def handler(_request, response=response):
+            return response
+
+        assert (
+            await ClassifierStopMiddleware().awrap_model_call(None, handler) is response
+        )
+
+
 async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypatch):
     from airc_core import agent
 
@@ -1326,6 +1386,7 @@ async def test_an_empty_candidate_is_never_handed_back_to_the_retry_layer():
     for reason in ("STOP", "MODEL_OVERLOADED", "unavailable in region", "429 quota"):
         exc = agent.EmptyCandidateError(f"empty candidate (finish_reason={reason})")
         assert not agent._is_retryable(exc), reason
+    assert not agent._is_retryable(ClassifierStopError("503 model overloaded"))
     # A genuine transient still retries, by message.
     assert agent._is_retryable(RuntimeError("503 model overloaded"))
 

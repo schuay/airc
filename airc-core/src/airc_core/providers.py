@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,31 @@ STOP_REASON_KEYS: tuple[str, ...] = tuple(
 # with empty content and 0 output tokens). Shared by _EmptyCandidateRetry and
 # the reentry loop so neither layer retries a refused turn.
 REFUSAL_STOP_REASON = "refusal"
+
+# Structured provider stop reasons that identify a safety or policy classifier.
+# Values outside this set retain their existing handling. Numeric enum values are
+# intentionally not accepted because their meaning depends on the enum type.
+CLASSIFIER_STOP_REASONS = frozenset(
+    {
+        REFUSAL_STOP_REASON,
+        "safety",
+        "recitation",
+        "blocklist",
+        "prohibited_content",
+        "spii",
+        "model_armor",
+    }
+)
+
+
+def normalize_classifier_stop_reason(value: object) -> str:
+    """Return the normalized classifier reason, or ``""`` when unrecognized."""
+    if isinstance(value, Enum):
+        value = value.name
+    if not isinstance(value, str):
+        return ""
+    reason = value.strip().lower()
+    return reason if reason in CLASSIFIER_STOP_REASONS else ""
 
 
 # output_config.effort, in increasing depth. The Messages API's own vocabulary,

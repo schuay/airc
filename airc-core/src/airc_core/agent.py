@@ -50,7 +50,11 @@ from langgraph.errors import GraphBubbleUp
 
 from .collector import book_aside
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
-from .providers import REFUSAL_STOP_REASON, STOP_REASON_KEYS
+from .providers import (
+    REFUSAL_STOP_REASON,
+    STOP_REASON_KEYS,
+    normalize_classifier_stop_reason,
+)
 from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, _k
 
 log = logging.getLogger(__name__)
@@ -278,6 +282,14 @@ class EmptyCandidateError(Exception):
     """
 
 
+class ClassifierStopError(Exception):
+    """A provider classifier stopped a model response."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"model stopped by classifier ({reason})")
+
+
 def _is_retryable(exc: Exception) -> bool:
     """Retry policy for ModelRetryMiddleware: transient provider errors (429/503/
     overloaded) only. A zero-part empty candidate is not retried here:
@@ -292,7 +304,7 @@ def _is_retryable(exc: Exception) -> bool:
     finish_reason in the message, so a reason reading MODEL_OVERLOADED or
     naming an unavailable region would match _is_transient and hand the empty
     back to the retry layer for 14 model calls and the full backoff ladder."""
-    if isinstance(exc, EmptyCandidateError):
+    if isinstance(exc, (ClassifierStopError, EmptyCandidateError)):
         return False
     return _is_transient(exc)
 
@@ -949,6 +961,37 @@ def _finish_reason(msg: AIMessage) -> str:
         if value := metadata.get(key):
             return str(value)
     return "unknown"
+
+
+def classifier_stop_reason(response) -> str:
+    """Return the first structured classifier stop reason in a model response."""
+    model_response = getattr(response, "model_response", response)
+    messages = getattr(model_response, "result", None)
+    if messages is None:
+        messages = [model_response] if isinstance(model_response, AIMessage) else []
+    for message in messages or ():
+        if not isinstance(message, AIMessage):
+            continue
+        metadata = message.response_metadata or {}
+        for key in STOP_REASON_KEYS:
+            if reason := normalize_classifier_stop_reason(metadata.get(key)):
+                return reason
+    return ""
+
+
+def raise_for_classifier_stop(response) -> None:
+    """Raise the typed classifier-stop signal for a structured model response."""
+    if reason := classifier_stop_reason(response):
+        raise ClassifierStopError(reason)
+
+
+class ClassifierStopMiddleware(AgentMiddleware):
+    """Surface structured provider classifier stops without same-model retries."""
+
+    async def awrap_model_call(self, request, handler):
+        response = await handler(request)
+        raise_for_classifier_stop(response)
+        return response
 
 
 # Marks a persisted call-budget nudge in the message history, so a threshold

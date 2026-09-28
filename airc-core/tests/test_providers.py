@@ -5,14 +5,23 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 import pytest
 from airc_core import model as model_mod
 from airc_core.providers import (
+    CLASSIFIER_STOP_REASONS,
     STOP_REASON_KEYS,
     model_traits_for,
+    normalize_classifier_stop_reason,
     register_traits_alias,
     traits_for,
 )
+
+
+class _FinishReason(Enum):
+    SAFETY = 2
+    STOP = 1
 
 
 def test_both_anthropic_routes_share_one_record():
@@ -35,6 +44,28 @@ def test_stop_reason_keys_cover_every_provider_without_repeats():
     assert "finish_reason" in STOP_REASON_KEYS
     assert "stop_reason" in STOP_REASON_KEYS
     assert len(STOP_REASON_KEYS) == len(set(STOP_REASON_KEYS))
+
+
+def test_classifier_stop_reasons_are_exact_and_normalized():
+    assert {
+        "refusal",
+        "safety",
+        "recitation",
+        "blocklist",
+        "prohibited_content",
+        "spii",
+        "model_armor",
+    } == CLASSIFIER_STOP_REASONS
+    assert normalize_classifier_stop_reason("  SAFETY ") == "safety"
+    assert normalize_classifier_stop_reason(_FinishReason.SAFETY) == "safety"
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "STOP", "MAX_TOKENS", "MALFORMED_FUNCTION_CALL", 2]
+)
+def test_non_classifier_stop_reasons_do_not_normalize(value):
+    assert normalize_classifier_stop_reason(value) == ""
+    assert normalize_classifier_stop_reason(_FinishReason.STOP) == ""
 
 
 def test_the_stop_reason_is_read_under_every_providers_name():
