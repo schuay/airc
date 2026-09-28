@@ -1287,6 +1287,36 @@ async def test_non_classifier_reasons_pass_through_classifier_middleware():
         )
 
 
+async def test_classifier_stop_records_tool_history_counts():
+    response = type(
+        "R",
+        (),
+        {
+            "result": [
+                AIMessage("blocked", response_metadata={"finish_reason": "SAFETY"})
+            ]
+        },
+    )()
+    request = _Req(
+        1,
+        [
+            AIMessage(
+                "",
+                tool_calls=[{"name": "read", "args": {}, "id": "call-1"}],
+            ),
+            ToolMessage("four", tool_call_id="call-1", name="read"),
+        ],
+    )
+
+    async def handler(_request):
+        return response
+
+    with pytest.raises(ClassifierStopError) as raised:
+        await ClassifierStopMiddleware().awrap_model_call(request, handler)
+    assert raised.value.tool_calls == 1
+    assert raised.value.tool_result_chars == 4
+
+
 async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypatch):
     from airc_core import agent
 

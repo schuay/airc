@@ -285,8 +285,16 @@ class EmptyCandidateError(Exception):
 class ClassifierStopError(Exception):
     """A provider classifier stopped a model response."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        tool_calls: int = 0,
+        tool_result_chars: int = 0,
+    ) -> None:
         self.reason = reason
+        self.tool_calls = tool_calls
+        self.tool_result_chars = tool_result_chars
         super().__init__(f"model stopped by classifier ({reason})")
 
 
@@ -979,10 +987,22 @@ def classifier_stop_reason(response) -> str:
     return ""
 
 
-def raise_for_classifier_stop(response) -> None:
+def raise_for_classifier_stop(response, *, messages=()) -> None:
     """Raise the typed classifier-stop signal for a structured model response."""
     if reason := classifier_stop_reason(response):
-        raise ClassifierStopError(reason)
+        raise ClassifierStopError(
+            reason,
+            tool_calls=sum(
+                len(message.tool_calls or [])
+                for message in messages
+                if isinstance(message, AIMessage)
+            ),
+            tool_result_chars=sum(
+                len(message.text)
+                for message in messages
+                if isinstance(message, ToolMessage)
+            ),
+        )
 
 
 class ClassifierStopMiddleware(AgentMiddleware):
@@ -990,7 +1010,7 @@ class ClassifierStopMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         response = await handler(request)
-        raise_for_classifier_stop(response)
+        raise_for_classifier_stop(response, messages=getattr(request, "messages", ()))
         return response
 
 
