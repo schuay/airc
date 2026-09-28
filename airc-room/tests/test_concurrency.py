@@ -500,6 +500,10 @@ async def test_run_structured_turn_serializes_per_persona(tmp_path):
     from airc_core import UsageCollector
     from airc_room.personas import Persona
     from airc_room.runner import AgentRunner, _AgentEntry
+    from pydantic import BaseModel
+
+    class Result(BaseModel):
+        tag: str
 
     cfg = Config()
     cfg.token_db_path = tmp_path / "tokens.db"
@@ -516,24 +520,77 @@ async def test_run_structured_turn_serializes_per_persona(tmp_path):
             graph=None,
         )
     }
-    runner._structured_agents["Sonic"] = object()  # skip graph construction
+    key = ("Sonic", "structured", "x", Result)
+    runner._structured_agents[key] = object()  # skip graph construction
     active, max_active = 0, 0
 
-    async def stream(graph, name, input, config, model_id):
+    async def stream(graph, name, input, config, model_id, schema, label):
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
         await asyncio.sleep(0.02)
         active -= 1
-        return '{"tag": "SKIP", "summary": ""}', UsageCollector("Sonic", "turn", "m")
+        return Result(tag="SKIP"), UsageCollector("Sonic", label, "m")
 
-    runner._stream = stream
+    runner._stream_structured = stream
     results = await asyncio.gather(
-        runner.run_structured_turn("Sonic", "commit A", extra_system="x"),
-        runner.run_structured_turn("Sonic", "commit B", extra_system="x"),
+        runner.run_structured_turn(
+            "Sonic", "commit A", extra_system="x", schema=Result
+        ),
+        runner.run_structured_turn(
+            "Sonic", "commit B", extra_system="x", schema=Result
+        ),
     )
     assert all(r is not None for r in results)
     assert max_active == 1  # never overlapped
+
+
+async def test_structured_graph_cache_includes_instruction_and_schema(tmp_path):
+    from airc_core import UsageCollector
+    from airc_room.personas import Persona
+    from airc_room.runner import AgentRunner, _AgentEntry
+    from pydantic import BaseModel
+
+    class First(BaseModel):
+        value: str = "first"
+
+    class Second(BaseModel):
+        value: str = "second"
+
+    cfg = Config()
+    cfg.token_db_path = tmp_path / "tokens.db"
+    runner = AgentRunner(cfg, {}, object(), object())
+    persona = Persona(
+        name="Sonic",
+        display_name="Sonic",
+        description="d",
+        system_prompt="",
+        key="perf",
+    )
+    runner._agents = {"Sonic": _AgentEntry(persona=persona, graph=None)}
+    built = []
+
+    def build(*args, **kwargs):
+        graph = object()
+        built.append((graph, kwargs["extra_system"], kwargs["schema"]))
+        return graph
+
+    async def stream(graph, name, input, config, model_id, schema, label):
+        return schema(), UsageCollector(name, label, model_id)
+
+    runner._build_agent = build
+    runner._stream_structured = stream
+
+    await runner.run_structured_turn("Sonic", "a", extra_system="one", schema=First)
+    await runner.run_structured_turn("Sonic", "b", extra_system="one", schema=First)
+    await runner.run_structured_turn("Sonic", "c", extra_system="two", schema=First)
+    await runner.run_structured_turn("Sonic", "d", extra_system="one", schema=Second)
+
+    assert [(instruction, schema) for _, instruction, schema in built] == [
+        ("one", First),
+        ("two", First),
+        ("one", Second),
+    ]
 
 
 async def test_a_routed_turn_carries_the_message_that_triggered_it(

@@ -141,6 +141,9 @@ def build_local_tools(cfg, *, room):
             catalog,
             required=("search_chat", "timer_*", "lookup"),
         ),
+        structured_grants={
+            "digest": ToolGrant(catalog, required=("lookup",)),
+        },
         groups={"memory": build_memory_tools(cfg)},
     )
 ```
@@ -150,6 +153,11 @@ if its personas should retain them. Configured MCP `read` and `active` groups do
 not change in API v2. Catalog names are resolved before factories run. A missing
 required name and duplicate tool names fail startup; a missing optional name is
 logged and omitted.
+
+`structured_grants` is keyed by the label passed to
+`TurnContext.run_structured_turn`. These grants start empty: they do not inherit
+the conversational baseline, persona groups, or configured MCP groups. A plugin
+must list every tool that one structured operation may call.
 
 ### Message handlers
 

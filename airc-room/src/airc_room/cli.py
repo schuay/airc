@@ -596,6 +596,12 @@ async def amain(args: argparse.Namespace) -> None:
         local_tools = policy.tool_grant.resolve(
             core_catalog, label="room built-in tools"
         ).build(ToolSource.NATIVE)
+        structured_tools = {
+            name: grant.resolve(
+                core_catalog, label=f"room {name} structured tools"
+            ).build(ToolSource.NATIVE)
+            for name, grant in policy.structured_grants.items()
+        }
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     local_tool_groups: dict = {
@@ -627,6 +633,7 @@ async def amain(args: argparse.Namespace) -> None:
             on_event=on_event,
             room_prompt=room_prompt,
             local_tools=local_tools,
+            structured_tools=structured_tools,
             local_tool_groups=local_tool_groups,
             tool_instructions=tool_instructions,
         ) as runner,

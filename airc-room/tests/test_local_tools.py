@@ -49,7 +49,13 @@ class _Toolset:
         return [tool for tool in self.tools if tool.name in patterns]
 
 
-def _runner(tmp_path, local_tool_groups, local_tools=None, toolset=None):
+def _runner(
+    tmp_path,
+    local_tool_groups,
+    local_tools=None,
+    structured_tools=None,
+    toolset=None,
+):
     cfg = Config()
     cfg.token_db_path = tmp_path / "tokens.db"
     return AgentRunner(
@@ -58,6 +64,7 @@ def _runner(tmp_path, local_tool_groups, local_tools=None, toolset=None):
         toolset or _Toolset(),
         object(),
         local_tools=local_tools,
+        structured_tools=structured_tools,
         local_tool_groups=local_tool_groups,
     )
 
@@ -81,7 +88,7 @@ def test_local_only_groups_are_excluded_from_mcp_resolution(tmp_path):
     toolset = _Toolset(groups={"read": ["mcp_read"]})
     runner = _runner(tmp_path, {"memory": [_mem]}, toolset=toolset)
     persona = _persona("chef", ["read", "memory"])
-    assert runner._tools_for(persona, include_local=True) == [_mem]
+    assert runner._tools_for(persona) == [_mem]
 
 
 @tool
@@ -94,7 +101,7 @@ def test_same_named_local_and_mcp_groups_are_unioned(tmp_path):
     toolset = _Toolset(groups={"read": [_mcp_read.name]}, tools=[_mcp_read])
     runner = _runner(tmp_path, {"read": [_mem]}, toolset=toolset)
 
-    assert runner._tools_for(_persona("chef", ["read"]), include_local=True) == [
+    assert runner._tools_for(_persona("chef", ["read"])) == [
         _mcp_read,
         _mem,
     ]
@@ -105,12 +112,32 @@ def test_duplicate_names_across_local_and_mcp_groups_are_refused(tmp_path):
     runner = _runner(tmp_path, {"read": [_mem]}, toolset=toolset)
 
     with pytest.raises(ValueError, match="duplicate tool name '_mem'"):
-        runner._tools_for(_persona("chef", ["read"]), include_local=True)
+        runner._tools_for(_persona("chef", ["read"]))
 
 
 def test_built_in_tools_are_a_separate_baseline(tmp_path):
     runner = _runner(tmp_path, {"memory": [_mem]}, local_tools=[_mem])
     assert runner._local_tools == [_mem]
+
+
+def test_structured_grant_does_not_inherit_conversational_tools_or_groups(tmp_path):
+    runner = _runner(
+        tmp_path,
+        {"memory": [_mem]},
+        local_tools=[_mem],
+        structured_tools={"digest": [_mcp_read]},
+        toolset=object(),
+    )
+
+    assert runner._tools_for(
+        _persona("chef", ["read", "memory"]), structured_label="digest"
+    ) == [_mcp_read]
+    assert (
+        runner._tools_for(
+            _persona("chef", ["read", "memory"]), structured_label="other"
+        )
+        == []
+    )
 
 
 def test_no_local_tools_by_default(tmp_path):
@@ -123,6 +150,7 @@ class _Plugin:
     def build_local_tools(self, cfg, *, room):
         return LocalTools(
             tool_grant=ToolGrant(required=("search_chat",)),
+            structured_grants={"digest": ToolGrant(required=("lookup",))},
             groups={"icu_tasks": [room]},
         )
 
@@ -140,6 +168,7 @@ def test_room_is_passed_to_the_v2_hook():
     room = object()
     policy = _call_local_tools(_Plugin(), None, room)
     assert policy.tool_grant.required == ("search_chat",)
+    assert policy.structured_grants["digest"].required == ("lookup",)
     assert policy.groups == {"icu_tasks": [room]}
 
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from airc_room.runner import AgentRunner
 from langchain_core.messages import AIMessageChunk
+from pydantic import BaseModel
 
 
 def _chunk(
@@ -82,6 +83,39 @@ async def test_stream_keeps_a_plain_answer_with_no_tools():
         "m",
     )
     assert text == "Short answer."
+
+
+async def test_structured_stream_returns_typed_result_and_emits_only_read_tools():
+    class Digest(BaseModel):
+        summary: str
+
+    events = []
+
+    async def _emit(*args):
+        events.append(args)
+
+    result = Digest(summary="checked")
+
+    async def astream(input, config=None, stream_mode=None):
+        assert stream_mode == ["messages", "values"]
+        yield "messages", (_chunk(tool="repo_git_show", id="read"), {})
+        yield "messages", (_chunk(tool="Digest", id="result"), {})
+        yield "values", {"structured_response": result}
+
+    value, usage = await AgentRunner._stream_structured(
+        SimpleNamespace(_emit=_emit),
+        SimpleNamespace(astream=astream),
+        "perf",
+        {},
+        {},
+        "m",
+        Digest,
+        "digest",
+    )
+
+    assert value == result
+    assert usage._kind == "digest"
+    assert events == [("perf", "tool", "repo_git_show")]
 
 
 async def test_stream_drops_trailing_text_after_a_tool_call():

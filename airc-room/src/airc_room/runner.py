@@ -17,9 +17,10 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeVar
 
 from airc_core import (
     MCPToolset,
@@ -31,6 +32,7 @@ from airc_core import (
 )
 from airc_core.agent import (
     CallBudgetMiddleware,
+    RequireStructuredResultMiddleware,
     TimeBudgetMiddleware,
     base_middleware,
     growing_cache_middleware,
@@ -42,6 +44,7 @@ from langchain.agents.middleware import (
 from langchain_core.messages import (
     AIMessageChunk,
 )
+from pydantic import BaseModel
 from typing_extensions import Self
 
 from .config import Config
@@ -53,6 +56,12 @@ log = logging.getLogger(__name__)
 
 # Event callback: (agent_name, event, detail) — e.g. ("perf", "tool", "run_d8").
 EventHook = Callable[[str, str, str], Awaitable[None]]
+T = TypeVar("T", bound=BaseModel)
+
+_REQUIRE_STRUCTURED_RESULT = (
+    "Your previous answer was not recorded because it did not use the required"
+    " structured response. Return the required structured response now."
+)
 
 
 # What holds for any room, whatever it is about and however it is rendered.
@@ -311,6 +320,7 @@ class AgentRunner:
         on_event: EventHook | None = None,
         room_prompt: str = "",
         local_tools: list | None = None,
+        structured_tools: Mapping[str, Sequence[object]] | None = None,
         local_tool_groups: dict | None = None,
         tool_instructions: str = "",
     ) -> None:
@@ -328,16 +338,21 @@ class AgentRunner:
         # Built-in non-MCP tools selected once from the plugin's explicit room
         # allowlist. Every conversational persona gets the same baseline.
         self._local_tools = list(local_tools or ())
+        # Structured operations get an explicit per-label baseline. They do not
+        # inherit conversational, persona-gated, or configured MCP tools.
+        self._structured_tools = {
+            name: list(tools) for name, tools in (structured_tools or {}).items()
+        }
         self._store = store
         self._tokens = TokenLog(cfg.token_db_path)
         self._on_event = on_event
         self._room_prompt = room_prompt
         self._stack = contextlib.AsyncExitStack()
         self._agents: dict[str, _AgentEntry] = {}
-        # Per-persona structured-turn graphs (see run_structured_turn): a fresh
-        # JSON-forcing graph kept off the chat checkpointer, built lazily, reused.
-        self._structured_agents: dict[str, object] = {}
-        self._structured_locks: dict[str, asyncio.Lock] = {}
+        # Typed operation graphs stay off the chat checkpointer and are reused
+        # only when their persona, label, instruction, and schema all match.
+        self._structured_agents: dict[tuple, object] = {}
+        self._structured_locks: dict[tuple, asyncio.Lock] = {}
         self._voice_cache: dict[str, str] = {}  # state_key -> cleaned voice body
 
     @property
@@ -423,8 +438,17 @@ class AgentRunner:
             return True
         return False
 
-    def _tools_for(self, persona: Persona, *, include_local: bool) -> list:
-        """Resolve one persona's MCP and local grants into one checked list."""
+    def _tools_for(
+        self, persona: Persona, *, structured_label: str | None = None
+    ) -> list:
+        """Resolve a conversational persona or one structured operation."""
+        if structured_label is not None:
+            return select_tools(
+                self._structured_tools.get(structured_label, ()),
+                ("*",),
+                label=f"agent {persona.name} {structured_label} tools",
+            )
+
         # A group can be defined by MCP config, a plugin, or both. Keep a
         # plugin-only group out of the MCP resolver so it is not warned as
         # unknown, but resolve both sources when they share a name.
@@ -437,9 +461,6 @@ class AgentRunner:
             mcp_groups, persona.tools, persona.name
         )
         tools = self._toolset.tools_for(patterns)
-        if not include_local:
-            return tools
-
         local: list = list(self._local_tools)
         for group in persona.tool_groups:
             local.extend(self._local_tool_groups.get(group, []))
@@ -455,13 +476,15 @@ class AgentRunner:
         *,
         extra_system: str = "",
         voice: str = "",
+        structured_label: str | None = None,
+        schema: type[BaseModel] | None = None,
     ) -> object:
         profile = self._cfg.resolve_profile(persona.model_id)
         model_id = profile.id
-        # Local tools (not MCP), added for conversational builds only (extra_system
-        # marks the forced-JSON digest turn, where they have no place). They read
-        # their thread/agent from the run config, so they need no ambient wiring.
-        tools = self._tools_for(persona, include_local=not extra_system)
+        if (structured_label is None) != (schema is None):
+            raise ValueError("structured_label and schema must be supplied together")
+        structured = schema is not None
+        tools = self._tools_for(persona, structured_label=structured_label)
         log.info(
             "agent %s: model=%s%s tools=%d",
             persona.name,
@@ -476,19 +499,31 @@ class AgentRunner:
             self._room_prompt,
             voice=voice,
         )
-        # Memory write-discipline: appended (cached with the prefix) for a
-        # conversational build whose persona holds the memory tools. Skipped on the
-        # forced-JSON digest turn (extra_system), which has no tools and no memory.
-        if not extra_system and self._memory_enabled(persona):
+        # Memory write-discipline is part of conversational state, not an
+        # independent structured operation.
+        if not structured and self._memory_enabled(persona):
             from .memory import MEMORY_RULES
 
             system_prompt = f"{system_prompt}\n\n{MEMORY_RULES}"
         if extra_system:
             system_prompt = f"{system_prompt}\n\n{extra_system}"
+        cached_tools = tools
+        strategy = None
+        if schema is not None:
+            from langchain.agents.structured_output import (
+                OutputToolBinding,
+                ToolStrategy,
+            )
+
+            strategy = ToolStrategy(schema=schema, handle_errors=True)
+            cached_tools = [
+                *tools,
+                OutputToolBinding.from_schema_spec(strategy.schema_specs[0]).tool,
+            ]
         middleware = base_middleware(
             model_id,
             system_prompt,
-            tools,
+            cached_tools,
             summarizer_model_id=self._cfg.filter_model,
             grounding_tokens=self._cfg.grounding_reminder_tokens,
         )
@@ -497,7 +532,7 @@ class AgentRunner:
         # in the same pass instead of the next one. Only correctness-neutral
         # ordering -- absence is re-checked every call either way -- but it keeps
         # the persona from spending a call without the index it just lost.
-        if not extra_system and self._memory_enabled(persona):
+        if not structured and self._memory_enabled(persona):
             from .memory import MemoryIndexMiddleware
 
             middleware.append(MemoryIndexMiddleware())
@@ -507,13 +542,17 @@ class AgentRunner:
         if cache := growing_cache_middleware(
             model_id,
             system_prompt,
-            tools,
+            cached_tools,
             self._cfg.caching_explicit,
             self._cfg.cache_ttl_minutes,
             _TURN_MAX_MODEL_CALLS,
         ):
             middleware.append(cache)
         turn_timeout = self._cfg.orchestrator.turn_timeout
+        if structured:
+            middleware.append(
+                RequireStructuredResultMiddleware(_REQUIRE_STRUCTURED_RESULT)
+            )
         middleware += [
             # Converge a sprawling tool-using turn before it spins to the
             # recursion limit (a single turn re-sends its whole growing history
@@ -546,6 +585,7 @@ class AgentRunner:
             system_prompt=system_prompt,
             middleware=middleware,
             checkpointer=checkpointer,
+            response_format=strategy,
             name=persona.name,
         ).with_config({"recursion_limit": 500})
 
@@ -643,49 +683,53 @@ class AgentRunner:
         content: str,
         *,
         extra_system: str,
+        schema: type[T],
         label: str = "structured",
-    ) -> str | None:
-        """Run a structured turn (extra_system forces a machine-readable result)
-        and return the raw model text; None if the agent is unknown.
+    ) -> T | None:
+        """Run a tool-using turn and return its validated result.
 
-        A separate fresh graph from the persona's conversational one (it forces a
-        structured result, so it must not share the chat checkpointer), built once
-        per persona and reused -- its [persona system prompt + tools] prefix is
-        constant across a stream of these turns, so it caches. The caller supplies
-        the instruction (extra_system) and parses the returned text: the graph,
-        lock, cache, and token accounting here are domain-neutral, the prompt and
-        parse are the caller's. label tags token accounting for the caller's use.
+        A structured graph has no chat checkpointer and receives only the tools
+        granted to `label`. Graphs are cached by every input that fixes their
+        system prefix and result contract, so a second operation cannot reuse the
+        first one's instruction or schema. `label` also tags token accounting.
         """
         entry = self._agents.get(agent_name)
         if entry is None:
             log.warning("%s: unknown agent %s", label, agent_name)
             return None
-        graph = self._structured_agents.get(agent_name)
+        key = (agent_name, label, extra_system, schema)
+        graph = self._structured_agents.get(key)
         if graph is None:
             available = {n: e.persona for n, e in self._agents.items()}
             graph = self._build_agent(
-                entry.persona, available, None, extra_system=extra_system
+                entry.persona,
+                available,
+                None,
+                extra_system=extra_system,
+                structured_label=label,
+                schema=schema,
             )
-            self._structured_agents[agent_name] = graph
+            self._structured_agents[key] = graph
         config = {
-            "configurable": {"thread_id": f"structured:{entry.persona.state_key}"}
+            "configurable": {
+                "thread_id": f"structured:{entry.persona.state_key}:{label}"
+            }
         }
-        # One structured turn at a time per persona: the shared thread id is what
-        # lets the prefix cache accumulate across the stream, but the growing-cache
-        # middleware keys its state on it -- two concurrent runs would interleave
-        # one _PrefixState, trip each other's shrink detection, and worst case
-        # send one turn's tail on top of a cache built from the other's prefix.
-        lock = self._structured_locks.setdefault(agent_name, asyncio.Lock())
+        # Runs sharing a graph also share its growing-cache state. Serialize them
+        # so two tails cannot advance the same prefix concurrently.
+        lock = self._structured_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            text, usage = await self._stream(
+            result, usage = await self._stream_structured(
                 graph,
                 agent_name,
                 {"messages": [{"role": "user", "content": content}]},
                 config,
                 self._cfg.resolve_model(entry.persona.model_id),
+                schema,
+                label,
             )
         self._book(usage, 0, agent_name, label)
-        return text
+        return result
 
     def _book(self, usage: UsageCollector, thread_id: int, agent: str, kind: str):
         """The turn's own calls under `kind`, and whatever the invocation spent
@@ -769,3 +813,46 @@ class AgentRunner:
                     ):
                         parts.append(text)
         return "".join(parts), usage
+
+    async def _stream_structured(
+        self,
+        graph,
+        agent_name: str,
+        input: dict,
+        config: dict,
+        model_id: str,
+        schema: type[T],
+        label: str,
+    ) -> tuple[T | None, UsageCollector]:
+        """Drive a typed graph while retaining ordinary tool activity events."""
+        usage = UsageCollector(agent_name, label, model_id)
+        config = {**config, "callbacks": [usage]}
+        result: T | None = None
+        seen_tool_ids: set[str | None] = set()
+        with usage.active():
+            async for mode, data in graph.astream(
+                input, config=config, stream_mode=["messages", "values"]
+            ):
+                if mode == "values":
+                    candidate = data.get("structured_response")
+                    if isinstance(candidate, schema):
+                        result = candidate
+                    continue
+                chunk, meta = data
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                if (meta or {}).get("lc_source") == "summarization":
+                    continue
+                for tc in chunk.tool_call_chunks or []:
+                    name = tc.get("name")
+                    call_id = tc.get("id")
+                    # The result tool is protocol, not agent activity. Read tools
+                    # still surface while the typed turn runs.
+                    if (
+                        name
+                        and name != schema.__name__
+                        and call_id not in seen_tool_ids
+                    ):
+                        seen_tool_ids.add(call_id)
+                        await self._emit(agent_name, "tool", name)
+        return result, usage

@@ -102,14 +102,18 @@ _REQUIRED = (
 
 @dataclass(frozen=True)
 class LocalTools:
-    """A plugin's baseline grant and persona-gated groups.
+    """A plugin's conversational, structured-turn, and persona-gated grants.
 
-    The grant resolves against the union of core and plugin catalog entries for
-    every conversational persona. `groups` stays opt-in through agent.toml.
-    Configured MCP tools remain on their read/active group path.
+    Each grant resolves against the union of core and its own catalog entries.
+    `tool_grant` is the baseline for every conversational persona.
+    `structured_grants` is keyed by the structured turn's label and does not
+    inherit conversational or persona-gated tools. `groups` stays opt-in through
+    agent.toml. Configured MCP tools remain on their read/active group path for
+    conversational turns.
     """
 
     tool_grant: ToolGrant = field(default_factory=ToolGrant)
+    structured_grants: Mapping[str, ToolGrant] = field(default_factory=dict)
     groups: Mapping[str, Sequence[object]] = field(default_factory=dict)
 
 

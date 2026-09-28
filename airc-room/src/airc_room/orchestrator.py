@@ -56,7 +56,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 from airc_core import (
     TokenLog,
@@ -64,6 +64,7 @@ from airc_core import (
     make_model,
     retrying,
 )
+from pydantic import BaseModel
 
 from .config import Config
 from .personas import persona_handles
@@ -75,6 +76,7 @@ from .store import Message, MessageKind, Store
 # message's follow_up string. It owns the response (prompt, parse, render, side
 # effects) via the TurnContext the room lends it; the room stays domain-blind.
 FollowUp = Callable[["TurnContext"], Awaitable[None]]
+T = TypeVar("T", bound=BaseModel)
 
 
 class Disposition(StrEnum):
@@ -361,12 +363,20 @@ class TurnContext:
         )
 
     async def run_structured_turn(
-        self, content: str, *, extra_system: str, label: str = "structured"
-    ) -> str | None:
-        """A structured (result-forcing) turn; returns raw text for the handler
-        to parse. The graph/lock/cache/token plumbing is the runner's."""
+        self,
+        content: str,
+        *,
+        extra_system: str,
+        schema: type[T],
+        label: str = "structured",
+    ) -> T | None:
+        """Run a typed turn under the handler's schema and tool grant."""
         return await self._orch._guarded_structured(
-            self.responder, content, extra_system=extra_system, label=label
+            self.responder,
+            content,
+            extra_system=extra_system,
+            schema=schema,
+            label=label,
         )
 
     async def post(self, body: str) -> None:
@@ -824,9 +834,15 @@ class Orchestrator:
             return None
 
     async def _guarded_structured(
-        self, name: str, content: str, *, extra_system: str, label: str
-    ) -> str | None:
-        """A structured turn under the shared timeout; returns raw text or None.
+        self,
+        name: str,
+        content: str,
+        *,
+        extra_system: str,
+        schema: type[T],
+        label: str,
+    ) -> T | None:
+        """A structured turn under the shared timeout; returns a value or None.
         Unlike _guarded_turn it posts no NOTICE (a structured follow-up's failure
         is the handler's to surface or swallow), only logs -- matching the old
         digest path, which logged and returned on error."""
@@ -834,7 +850,11 @@ class Orchestrator:
         try:
             async with asyncio.timeout(timeout):
                 return await self._runner.run_structured_turn(
-                    name, content, extra_system=extra_system, label=label
+                    name,
+                    content,
+                    extra_system=extra_system,
+                    schema=schema,
+                    label=label,
                 )
         except Exception:
             log.exception("%s turn for agent %s failed", label, name)
