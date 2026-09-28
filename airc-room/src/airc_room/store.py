@@ -892,6 +892,19 @@ class Store:
         )
         self._db.commit()
 
+    def forget_result_delivered(self, job_id: str) -> bool:
+        """Drop the delivered marker for a job; return True if one was removed.
+
+        For an operator re-running a job under the same job_id: with the marker
+        in place, the rerun's result is skipped as a redelivery and never
+        reaches the room. Only the room post is re-enabled; bug filing keeps
+        its own dedup record and is not affected."""
+        cur = self._db.execute(
+            "DELETE FROM delivered_results WHERE job_id = ?", (job_id,)
+        )
+        self._db.commit()
+        return cur.rowcount > 0
+
     def mark_handover(self, job_id: str) -> bool:
         """Claim a job_id for handover to icompleteu; return True if newly claimed.
 

@@ -393,6 +393,17 @@ def test_result_delivery_is_recorded_after_the_fact_and_survives_reopen(tmp_path
     assert Store(tmp_path / "test.db").result_delivered("v8-abc-repro-1")
 
 
+def test_forget_result_delivered_reenables_the_post(tmp_path):
+    s = make_store(tmp_path)
+    s.mark_result_delivered("v8-abc-repro-1")
+    s.mark_result_delivered("v8-abc-repro-2")
+    assert s.forget_result_delivered("v8-abc-repro-1")
+    assert not s.result_delivered("v8-abc-repro-1")
+    assert s.result_delivered("v8-abc-repro-2")  # other jobs keep theirs
+    assert not s.forget_result_delivered("v8-abc-repro-1")  # nothing left to drop
+    assert not Store(tmp_path / "test.db").result_delivered("v8-abc-repro-1")
+
+
 # ── plugin_state: thread-scoped state a plugin owns ──────────────────────────
 
 
