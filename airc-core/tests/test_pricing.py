@@ -55,6 +55,17 @@ def test_gemini_pro_tier_switches_on_the_calls_own_prompt():
     assert p.cost(prompt_tokens=300_000).total == pytest.approx(300_000 * 4.0 / 1e6)
 
 
+def test_gemini_4_pro_is_listed_with_opus_ratio_cache_rates():
+    p = price_for("google_vertexai:gemini-4-pro")
+    assert not p.generic and p.long_context is None
+    r = p.rate
+    assert (r.input, r.output) == (4.0, 20.0)
+    # TODO: update with the published cache rates; these are Opus's ratios.
+    assert r.cache_read == pytest.approx(0.1 * r.input)
+    assert r.cache_write_5m == pytest.approx(1.25 * r.input)
+    assert r.cache_write_1h == pytest.approx(2.0 * r.input)
+
+
 def test_cost_bills_each_part_at_its_own_rate():
     p = price_for("anthropic:claude-opus-5")
     # 1000 uncached + 8000 read + 1000 written (5m) + 500 out.
