@@ -51,6 +51,7 @@ from ..store import Message, MessageKind, Store
 
 log = logging.getLogger(__name__)
 
+
 # Personas write markdown; Matrix clients render the HTML `formatted_body`, not
 # markdown, so the body is converted here. escape=True neutralizes any raw HTML a
 # message contains (it becomes text, never live tags) -- the only sanitization we
@@ -58,7 +59,14 @@ log = logging.getLogger(__name__)
 # table, a, h1-6) is exactly what a Matrix client's allowlist renders and mistune
 # emits nothing outside it. Tables and strikethrough are GFM extensions, on
 # because FluffyChat (the operator's client) renders both natively.
-_md = mistune.create_markdown(escape=True, plugins=["strikethrough", "table"])
+class _MatrixHTMLRenderer(mistune.HTMLRenderer):
+    def softbreak(self) -> str:
+        return " "
+
+
+_md = mistune.create_markdown(
+    renderer=_MatrixHTMLRenderer(escape=True), plugins=["strikethrough", "table"]
+)
 
 # mistune wraps output in block <p> tags. For a one-paragraph message (the common
 # agent line) that block wrapper only adds vertical space, so a lone wrapping <p>

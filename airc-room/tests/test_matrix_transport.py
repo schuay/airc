@@ -146,6 +146,28 @@ async def test_deliver_converts_markdown_to_html(tmp_path, monkeypatch):
     assert "<em>fresh</em>" in html
 
 
+async def test_deliver_joins_soft_breaks_and_preserves_explicit_breaks(
+    tmp_path, monkeypatch
+):
+    t, room, _store, client = _make(tmp_path, monkeypatch)
+    tid = room.default_thread().id
+    body = (
+        "## Preparation\n\n"
+        "1. Pour in\n   the egg; remove and set\n   aside.\n\n"
+        "Another\nparagraph.\n\n"
+        "Keep this  \nline break.\n\n"
+        "```text\nfirst\nsecond\n```"
+    )
+    await t.deliver(_msg(tid, "recipe", MessageKind.NOTICE, body))
+    content = client.sent[0][1]
+    assert content["body"] == body
+    html = content["formatted_body"]
+    assert "<li>Pour in the egg; remove and set aside.</li>" in html
+    assert "<p>Another paragraph.</p>" in html
+    assert "<p>Keep this<br />\nline break.</p>" in html
+    assert '<pre><code class="language-text">first\nsecond\n</code></pre>' in html
+
+
 async def test_deliver_renders_list_and_code_and_table(tmp_path, monkeypatch):
     # The block constructs the personas actually use -- a shopping list, a code
     # fence, a price table -- must reach the client as real HTML blocks.
