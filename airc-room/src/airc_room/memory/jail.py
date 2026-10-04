@@ -33,6 +33,8 @@ from pathlib import Path
 # out dotfiles, _templates, and the uppercase meta docs (AGENTS.md, README.md);
 # no separators keeps out every subdirectory, including a nested .git.
 _ENTRY_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\.md")
+_NESTED_ENTRY_NAME = re.compile(r"_?[a-z0-9][a-z0-9_-]*\.md")
+_ENTRY_DIR = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
 
 class Jailbreak(Exception):
@@ -57,15 +59,27 @@ def jail(root: Path, path: str) -> Path:
     return resolved
 
 
-def jail_entry(root: Path, path: str) -> Path:
+def jail_entry(root: Path, path: str, *, entry_dirs: tuple[str, ...] = ()) -> Path:
     """Resolve `path` like jail(), and also require an entry file: a name
-    matching _ENTRY_NAME directly in `root`. Checked on the resolved path, so an
+    matching _ENTRY_NAME directly in `root`, or a .md entry directly in one
+    of the plugin's explicit entry_dirs. Checked on the resolved path, so an
     entry-named symlink into the store's machinery is refused too."""
+    if any(not _ENTRY_DIR.fullmatch(name) for name in entry_dirs):
+        raise ValueError(
+            "memory entry directories must be lowercase names without separators"
+        )
     resolved = jail(root, path)
-    if resolved.parent != root.resolve() or not _ENTRY_NAME.fullmatch(resolved.name):
+    rel = resolved.relative_to(root.resolve())
+    flat = resolved.parent == root.resolve() and _ENTRY_NAME.fullmatch(resolved.name)
+    nested = (
+        len(rel.parts) == 2
+        and rel.parts[0] in entry_dirs
+        and _NESTED_ENTRY_NAME.fullmatch(resolved.name)
+    )
+    if not (flat or nested):
         raise Jailbreak(
             f"path {path!r} is not a memory entry: use a lowercase name like"
-            " prefers-explicit-types.md, directly in the store root"
+            " prefers-explicit-types.md, in the store root or an allowed entry directory"
         )
     # Writes go through the file in place. A second hard link shares its inode
     # with a file elsewhere, so a write here would land there too.

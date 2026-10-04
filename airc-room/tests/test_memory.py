@@ -681,3 +681,51 @@ def test_reminder_interval_stays_inside_the_compaction_keep_window():
     from airc_core.agent import _SUMMARY_KEEP_TOKENS
 
     assert _REMINDER_TOKENS < _SUMMARY_KEEP_TOKENS
+
+
+async def test_explicit_entry_directories_preserve_confinement(tmp_path):
+    from airc_room.memory import make_memory_tools
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@test"], check=True
+    )
+    tools = {
+        t.name: t
+        for t in make_memory_tools(tmp_path, entry_dirs=("cooking", "conversations"))
+    }
+    args = {
+        "path": "cooking/preference.md",
+        "content": "a preference",
+        "message": "record preference",
+    }
+    assert await tools["memory_write"].ainvoke(args) == "saved cooking/preference.md"
+    assert "a preference" in await tools["memory_read"].ainvoke({"path": args["path"]})
+    assert (
+        await tools["memory_write"].ainvoke(
+            {**args, "path": "conversations/_thread-1.md"}
+        )
+        == "saved conversations/_thread-1.md"
+    )
+    for path in (
+        "scripts/validator.md",
+        ".git/config.md",
+        "cooking/nested/note.md",
+        "_templates/cooking.md",
+    ):
+        assert (await tools["memory_write"].ainvoke({**args, "path": path})).startswith(
+            "error:"
+        )
+    # A permitted-looking link into store machinery must not grant that target.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "validator.md").write_text("machinery")
+    (tmp_path / "cooking" / "linked.md").symlink_to("../scripts/validator.md")
+    assert (
+        await tools["memory_write"].ainvoke({**args, "path": "cooking/linked.md"})
+    ).startswith("error:")
+    assert (tmp_path / "scripts" / "validator.md").read_text() == "machinery"
+    default = {t.name: t for t in make_memory_tools(tmp_path)}
+    assert (await default["memory_write"].ainvoke(args)).startswith("error:")

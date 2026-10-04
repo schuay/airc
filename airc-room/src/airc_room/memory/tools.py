@@ -115,13 +115,14 @@ async def _git(root: Path, *args: str) -> tuple[int, str]:
     return await asyncio.to_thread(_git_sync, root, *args)
 
 
-def make_memory_tools(store_root: Path) -> list:
+def make_memory_tools(store_root: Path, *, entry_dirs: tuple[str, ...] = ()) -> list:
     """The memory tool set bound to a store checkout. Returned as a list the runner
     grants to a persona that lists the "memory" tool_group.
 
     Closes over the resolved root and a per-store commit lock; every path routes
-    through jail(), confined to the root. A path escape comes back as a plain error
-    string, never an exception into the turn."""
+    through jail(), confined to the root. Writes are root-only unless the plugin
+    grants explicit entry_dirs; all other subdirectories stay read-only. A path
+    escape comes back as a plain error string, never an exception into the turn."""
     root = store_root.expanduser().resolve()
     # Serializes write+stage+commit across concurrent persona turns sharing this
     # toolset, so two writers cannot collide on the git index (index.lock) or fold
@@ -198,7 +199,7 @@ def make_memory_tools(store_root: Path) -> list:
     @tool
     async def memory_write(path: str, content: str, message: str) -> str:
         """Create or fully overwrite a memory entry with `content` (`path` is a
-        lowercase file name in the memory root, e.g. "prefers-explicit-types.md"),
+        lowercase file name in the memory root or a permitted entry directory),
         then commit it with `message` (short, imperative, e.g.
         "record explicit-types preference"). Use for a NEW entry (copy a
         _templates/<type>.md shape so the frontmatter validates) or a full rewrite;
@@ -206,7 +207,7 @@ def make_memory_tools(store_root: Path) -> list:
         hook: if the entry is malformed the commit is REJECTED and the validator
         errors come back here -- fix the entry and write again."""
         try:
-            target = jail_entry(root, path)
+            target = jail_entry(root, path, entry_dirs=entry_dirs)
         except Jailbreak as e:
             return f"error: {e}"
         out = await asyncio.to_thread(_write_file, str(target), content)
@@ -225,7 +226,7 @@ def make_memory_tools(store_root: Path) -> list:
         failure so you can fix and resend. For a new file use memory_write. A
         schema-hook rejection comes back here to fix and retry."""
         try:
-            target = jail_entry(root, path)
+            target = jail_entry(root, path, entry_dirs=entry_dirs)
         except Jailbreak as e:
             return f"error: {e}"
         out = await asyncio.to_thread(apply_edits, str(target), [(search, replace)])
@@ -245,7 +246,7 @@ def make_memory_tools(store_root: Path) -> list:
         memory_edit or memory_write so the note keeps its history in one place.
         The entry stays recoverable from git history after deletion."""
         try:
-            target = jail_entry(root, path)
+            target = jail_entry(root, path, entry_dirs=entry_dirs)
         except Jailbreak as e:
             return f"error: {e}"
         rel = _rel(target)

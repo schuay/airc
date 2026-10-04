@@ -167,6 +167,12 @@ core's memory tools and per-turn index for personas listing the `memory` group.
 It is an explicit acceptance of persistent shared memory in the plugin's domain;
 other plugins retain the default refusal.
 
+`LocalTools.memory_entry_dirs` optionally grants immediate subdirectories holding
+entries, for stores with a folder-based schema. Names must be lowercase without
+separators. Writes remain confined to `.md` entry files, directly in those
+directories; machinery, deeper subdirectories, escaping symlinks and hard-linked
+files remain refused. The empty default retains root-only writes.
+
 ### Message handlers
 
 The room delivers messages to exactly one kind of consumer: a persona woken by a

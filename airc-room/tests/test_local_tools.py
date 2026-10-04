@@ -225,3 +225,13 @@ def test_memory_requires_plugin_opt_in(enabled, allow):
             _validate_memory_policy(cfg, policy)
     else:
         _validate_memory_policy(cfg, policy)
+
+
+def test_memory_default_is_refused():
+    from airc_room.cli import _validate_memory_policy
+    from airc_room.config import MemoryConfig
+
+    policy = LocalTools()
+    assert policy.memory_entry_dirs == ()
+    with pytest.raises(SystemExit, match="allow_memory_writes"):
+        _validate_memory_policy(Config(memory=MemoryConfig(enabled=True)), policy)

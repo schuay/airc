@@ -626,7 +626,9 @@ async def amain(args: argparse.Namespace) -> None:
     if cfg.memory.enabled:
         from .memory import MEMORY_GROUP, make_memory_tools
 
-        local_tool_groups[MEMORY_GROUP] = make_memory_tools(cfg.memory.path)
+        local_tool_groups[MEMORY_GROUP] = make_memory_tools(
+            cfg.memory.path, entry_dirs=policy.memory_entry_dirs
+        )
     async with (
         MCPToolset(cfg.mcp_servers, cfg.tool_groups) as toolset,
         AgentRunner(
