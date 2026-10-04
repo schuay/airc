@@ -210,3 +210,18 @@ def test_plugin_tool_instructions_join_the_toolsets(tmp_path):
     assert runner._instructions() == "from the server\n\nfrom us"
     runner = AgentRunner(cfg, {}, _Toolset(), object())
     assert runner._instructions() == "from the server"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("allow", [False, True])
+def test_memory_requires_plugin_opt_in(enabled, allow):
+    from airc_room.cli import _validate_memory_policy
+    from airc_room.config import MemoryConfig
+
+    cfg = Config(memory=MemoryConfig(enabled=enabled))
+    policy = LocalTools(allow_memory_writes=allow)
+    if enabled and not allow:
+        with pytest.raises(SystemExit, match="allow_memory_writes"):
+            _validate_memory_policy(cfg, policy)
+    else:
+        _validate_memory_policy(cfg, policy)

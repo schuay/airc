@@ -159,6 +159,14 @@ logged and omitted.
 the conversational baseline, persona groups, or configured MCP groups. A plugin
 must list every tool that one structured operation may call.
 
+### Memory writes
+
+`LocalTools.allow_memory_writes` defaults to `False`. A plugin must set it to
+`True` before `[airc.memory] enabled = true` can start the room. This enables
+core's memory tools and per-turn index for personas listing the `memory` group.
+It is an explicit acceptance of persistent shared memory in the plugin's domain;
+other plugins retain the default refusal.
+
 ### Message handlers
 
 The room delivers messages to exactly one kind of consumer: a persona woken by a

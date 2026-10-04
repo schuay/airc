@@ -115,6 +115,7 @@ class LocalTools:
     tool_grant: ToolGrant = field(default_factory=ToolGrant)
     groups: Mapping[str, Sequence[object]] = field(default_factory=dict)
     structured_grants: Mapping[str, ToolGrant] = field(default_factory=dict)
+    allow_memory_writes: bool = False
 
 
 @runtime_checkable

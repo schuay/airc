@@ -349,6 +349,15 @@ def _call_personas_dir(hook, cfg):
     return hook(cfg=cfg) if takes_cfg else hook()
 
 
+def _validate_memory_policy(cfg, policy) -> None:
+    # Memory is shared by personas. Plugins must explicitly accept persistent
+    # writes for their domain before enabling the tools and index injection.
+    if cfg.memory.enabled and not policy.allow_memory_writes:
+        raise SystemExit(
+            "[airc.memory] requires a plugin with allow_memory_writes = true"
+        )
+
+
 def _call_local_tools(plugin, cfg, room):
     """Build and type-check the plugin's API-v2 local-tool policy."""
     from .plugin import LocalTools
@@ -610,12 +619,7 @@ async def amain(args: argparse.Namespace) -> None:
     tool_instructions = ""
     if plugin and hasattr(plugin, "tool_instructions"):
         tool_instructions = plugin.tool_instructions(cfg) or ""
-    # TODO: re-enable memory once writes are reviewed. Every memory-enabled
-    # persona reads the store, so a persona steered by injected text (a CL
-    # description, a bug comment) could plant a note that another persona, one
-    # holding d8 or task tools, later acts on.
-    if cfg.memory.enabled:
-        raise SystemExit("[airc.memory] is disabled; set enabled = false")
+    _validate_memory_policy(cfg, policy)
     # Long-term memory is a CORE feature (config + per-turn injection live in
     # core), so core -- not a plugin -- provides its tool_group. On when
     # [airc.memory].enabled; a persona opts in by listing "memory" in tool_groups.
