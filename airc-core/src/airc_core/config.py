@@ -225,6 +225,135 @@ def _parse_model_profile(key: str, value: object) -> ModelProfile:
     return ModelProfile(key=key, id=str(model_id), effort=effort)
 
 
+# ── [identity] ───────────────────────────────────────────────────────────────
+#
+# Who the suite acts as, per outbound system. Every credentialed call names a
+# use; the use maps to a declared principal. Without the section every use is
+# the operator's host login, which is what a single-developer deploy had before
+# the section existed.
+#
+#   [identity]
+#   bot      = { impersonate = "x@p.iam.gserviceaccount.com", gerrit_account = 123 }
+#   operator = { luci_auth = true }          # implicit when not declared
+#   gerrit   = "bot"
+#   pinpoint = "operator"
+#   rbe      = "operator"
+#
+# A table value declares a principal, a string value maps a use. `rbe` is
+# parsed here so the whole picture is in one section, and refused for an
+# impersonated principal unless it is marked rbe_allowlisted: a bot token handed
+# to reclient fails every compile, and that should be a config error.
+
+IDENTITY_USES = ("gerrit", "pinpoint", "cas", "rbe")
+OPERATOR = "operator"
+_PRINCIPAL_KEYS = {"impersonate", "luci_auth", "gerrit_account", "rbe_allowlisted"}
+
+
+@dataclass(frozen=True)
+class Principal:
+    name: str
+    kind: str  # "luci_auth" | "impersonate"
+    service_account: str | None = None
+    gerrit_account: int | None = None
+    rbe_allowlisted: bool = False
+
+    def describe(self) -> str:
+        if self.kind == "impersonate":
+            return f"{self.service_account} (impersonated)"
+        return "the host luci-auth login"
+
+
+@dataclass(frozen=True)
+class IdentityConfig:
+    principals: Mapping[str, Principal]
+    uses: Mapping[str, str]  # every IDENTITY_USES entry -> principal name
+
+    def principal_for(self, use: str) -> Principal:
+        return self.principals[self.uses[use]]
+
+    @property
+    def gerrit_email(self) -> str | None:
+        """The address Gerrit calls run under, when it is a service account.
+        None for the host login, whose address is not known from config."""
+        return self.principal_for("gerrit").service_account
+
+
+def default_identity() -> IdentityConfig:
+    op = Principal(name=OPERATOR, kind="luci_auth")
+    return IdentityConfig(
+        principals={OPERATOR: op}, uses=dict.fromkeys(IDENTITY_USES, OPERATOR)
+    )
+
+
+def _parse_principal(name: str, spec: Mapping) -> Principal:
+    where = f"[identity] {name}"
+    reject_unknown(spec, _PRINCIPAL_KEYS, where)
+    sa = spec.get("impersonate")
+    luci = spec.get("luci_auth")
+    if (sa is None) == (not luci):
+        raise SystemExit(
+            f'{where} must declare exactly one of impersonate = "<service account>"'
+            " or luci_auth = true"
+        )
+    if luci is not None and luci is not True:
+        raise SystemExit(f"{where}: luci_auth must be true when present")
+    if sa is not None and (not isinstance(sa, str) or "@" not in sa):
+        raise SystemExit(f"{where}: impersonate must be a service account email")
+    acct = spec.get("gerrit_account")
+    if acct is not None and (isinstance(acct, bool) or not isinstance(acct, int)):
+        raise SystemExit(f"{where}: gerrit_account must be an integer account id")
+    allow = spec.get("rbe_allowlisted", False)
+    if not isinstance(allow, bool):
+        raise SystemExit(f"{where}: rbe_allowlisted must be a boolean")
+    return Principal(
+        name=name,
+        kind="impersonate" if sa is not None else "luci_auth",
+        service_account=sa,
+        gerrit_account=acct,
+        rbe_allowlisted=allow,
+    )
+
+
+def load_identity(raw: Mapping) -> IdentityConfig:
+    """Parse `[identity]`, or the defaults when the section is absent."""
+    section = raw.get("identity")
+    if not section:
+        return default_identity()
+    if not isinstance(section, Mapping):
+        raise SystemExit("[identity] must be a table")
+    principals: dict[str, Principal] = {}
+    uses: dict[str, str] = {}
+    for key, value in section.items():
+        if isinstance(value, Mapping):
+            if key in IDENTITY_USES:
+                raise SystemExit(f"[identity] {key} is a use, not a principal name")
+            principals[key] = _parse_principal(key, value)
+        elif isinstance(value, str):
+            if key not in IDENTITY_USES:
+                raise SystemExit(
+                    f"[identity] unknown use {key!r} (known: {', '.join(IDENTITY_USES)})"
+                )
+            uses[key] = value
+        else:
+            raise SystemExit(
+                f"[identity] {key} must be a principal table or a use string"
+            )
+    principals.setdefault(OPERATOR, Principal(name=OPERATOR, kind="luci_auth"))
+    for use in IDENTITY_USES:
+        name = uses.setdefault(use, OPERATOR)
+        if name not in principals:
+            raise SystemExit(f"[identity] {use} = {name!r} names no declared principal")
+    rbe = principals[uses["rbe"]]
+    if rbe.kind == "impersonate" and not rbe.rbe_allowlisted:
+        raise SystemExit(
+            f"[identity] rbe = {rbe.name!r} is an impersonated service account; RBE"
+            " rejects a token for an account that is not allowlisted on the"
+            " instance, which fails every compile. Point rbe at a luci_auth"
+            " principal, or mark the account rbe_allowlisted = true once it is."
+        )
+    return IdentityConfig(principals=principals, uses=uses)
+
+
 @dataclass
 class CommonConfig:
     """The sections shared across every component config.
@@ -264,6 +393,10 @@ class CommonConfig:
         default_factory=lambda: {k: list(v) for k, v in DEFAULT_TOOL_GROUPS.items()}
     )
     gcp: dict[str, str] = field(default_factory=dict)
+    #: [identity]: who each outbound system is called as. Parsed here so every
+    #: component reads the same mapping; applied to the clients (v8-utils) by
+    #: the component that owns them, since core imports none of them.
+    identity: IdentityConfig = field(default_factory=default_identity)
     bus_root: Path = field(default_factory=lambda: DEFAULT_BUS_ROOT)
     token_db_path: Path = field(default_factory=lambda: DEFAULT_TOKEN_DB)
     #: Root for ArtifactLog renderings (a review trail, a report for work that
@@ -513,6 +646,7 @@ def load_common(raw: Mapping) -> CommonConfig:
     if gcp := raw.get("gcp"):
         reject_unknown(gcp, {"project", "location", "quota_project"}, "[gcp]")
     cfg.gcp = {k: str(v) for k, v in raw.get("gcp", {}).items()}
+    cfg.identity = load_identity(raw)
     if v := raw.get("bus_root"):
         cfg.bus_root = Path(v).expanduser()
     if v := raw.get("token_db_path"):

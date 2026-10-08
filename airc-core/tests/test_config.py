@@ -531,3 +531,73 @@ def test_profile_for_accepts_an_ids_only_config():
     common = CommonConfig(models={"judge": "test:model"})
     profile = profile_for(common, "judge", "")
     assert profile.id == "test:model" and profile.call_kwargs == {}
+
+
+# ── [identity] ───────────────────────────────────────────────────────────────
+
+
+def test_identity_defaults_to_the_operator_everywhere():
+    from airc_core import IDENTITY_USES
+
+    ident = load_common({}).identity
+    for use in IDENTITY_USES:
+        assert ident.principal_for(use).kind == "luci_auth"
+    assert ident.gerrit_email is None
+
+
+def test_identity_declares_principals_and_maps_uses():
+    raw = {
+        "identity": {
+            "bot": {
+                "impersonate": "bot@p.iam.gserviceaccount.com",
+                "gerrit_account": 123,
+            },
+            "gerrit": "bot",
+            "pinpoint": "operator",
+        }
+    }
+    ident = load_common(raw).identity
+    bot = ident.principal_for("gerrit")
+    assert bot.kind == "impersonate"
+    assert bot.service_account == "bot@p.iam.gserviceaccount.com"
+    assert bot.gerrit_account == 123
+    assert ident.gerrit_email == "bot@p.iam.gserviceaccount.com"
+    # `operator` need not be declared; unmapped uses fall back to it.
+    assert ident.principal_for("pinpoint").kind == "luci_auth"
+    assert ident.principal_for("rbe").kind == "luci_auth"
+    assert ident.principal_for("cas").kind == "luci_auth"
+
+
+@pytest.mark.parametrize(
+    "section, match",
+    [
+        ({"gerrit": "ghost"}, "names no declared principal"),
+        (
+            {"bot": {"impersonate": "x@p.iam.gserviceaccount.com"}, "bb": "bot"},
+            "unknown use",
+        ),
+        ({"bot": {"impersonate": "x@p.iam.gserviceaccount.com", "typo": 1}}, "unknown"),
+        ({"bot": {}}, "exactly one of"),
+        ({"bot": {"impersonate": "x@p", "luci_auth": True}}, "exactly one of"),
+        ({"bot": {"impersonate": "not-an-email"}}, "service account email"),
+        ({"bot": {"luci_auth": False}}, "exactly one of"),
+        ({"bot": {"impersonate": "x@p", "gerrit_account": "123"}}, "integer"),
+        ({"gerrit": {"impersonate": "x@p"}}, "is a use, not a principal"),
+        ({"bot": 3}, "principal table or a use string"),
+    ],
+)
+def test_identity_rejects_malformed_sections(section, match):
+    with pytest.raises(SystemExit, match=match):
+        load_common({"identity": section})
+
+
+def test_identity_refuses_an_impersonated_rbe_unless_allowlisted():
+    """A bot token handed to reclient fails every compile; the config should
+    be the thing that fails."""
+    bot = {"impersonate": "bot@p.iam.gserviceaccount.com"}
+    with pytest.raises(SystemExit, match="rbe_allowlisted"):
+        load_common({"identity": {"bot": bot, "rbe": "bot"}})
+    ok = load_common(
+        {"identity": {"bot": {**bot, "rbe_allowlisted": True}, "rbe": "bot"}}
+    )
+    assert ok.identity.principal_for("rbe").service_account == bot["impersonate"]

@@ -60,7 +60,9 @@ from pathlib import Path
 import tomllib
 from airc_core import (
     DEFAULT_TOOL_GROUPS,
+    IdentityConfig,
     ModelProfile,
+    default_identity,
     load_common,
     parse_handover_fields,
 )
@@ -95,6 +97,7 @@ _KNOWN_TOPLEVEL = frozenset(
         "traits",
         "mcp",
         "gcp",
+        "identity",
         "tool_groups",
         "caching",
         "bus_root",
@@ -440,6 +443,8 @@ class Config:
     # announcement (so a handover off that thread can recover the path).
     repos: dict[str, str] = field(default_factory=dict)
     gcp: dict[str, str] = field(default_factory=dict)
+    # [identity], parsed in airc_core; the app plugin applies it to its clients.
+    identity: IdentityConfig = field(default_factory=default_identity)
     # Which transport the room binds. "console" and "" (unset) are core; every
     # other kind is supplied by the app plugin's build_transport (the coding app
     # ships "gchat", a future deploy "matrix"). Core never names a plugin
@@ -609,6 +614,7 @@ def load_config(path: Path | None = None) -> Config:
         mcp_servers=common.mcp_servers,
         tool_groups=common.tool_groups,
         gcp=common.gcp,
+        identity=common.identity,
     )
     cfg.bus_root = common.bus_root
     cfg.token_db_path = common.token_db_path
