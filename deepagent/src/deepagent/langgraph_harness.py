@@ -33,10 +33,13 @@ from pathlib import Path
 
 from airc_core import (
     STOP_REASON_KEYS,
+    ClassifierStopError,
+    ClassifierStopMiddleware,
     CommonConfig,
     EmptyCandidateError,
     GroundingReminderMiddleware,
     MCPToolset,
+    ModelProfile,
     TokenLog,
     ToolBuildContext,
     ToolCatalog,
@@ -451,6 +454,7 @@ class LangGraphHarness:
         system_prompt: str = _DEFAULT_SYSTEM,
         schemas: Mapping[str, type[Report]] | None = None,
         coding_model_key: str = "default",
+        coding_profile: ModelProfile | None = None,
         coding_tool_groups: tuple[str, ...] = ("read", "active"),
         shell_timeout_s: float = 300.0,
         checkpoint_db: Path | str | None = None,
@@ -464,7 +468,7 @@ class LangGraphHarness:
         # provider default, and nothing anywhere said so. Thinking is billed at
         # the output rate, so that is a cheaper and worse job than the operator
         # asked for.
-        self._profile = profile_for(common, coding_model_key, "")
+        self._profile = coding_profile or profile_for(common, coding_model_key, "")
         self._model_id = self._profile.id
         self._groups = list(coding_tool_groups)
         self._shell_timeout_s = shell_timeout_s
@@ -739,6 +743,8 @@ class LangGraphHarness:
             ),
             ModelCallLimitMiddleware(run_limit=_MAX_MODEL_CALLS, exit_behavior="end"),
         ]
+        # Innermost: classify before empty-response and transient retries.
+        mw.append(ClassifierStopMiddleware())
         graph = create_agent(
             make_model(self._model_id, **self._profile.call_kwargs),
             tools=tools,
@@ -835,6 +841,7 @@ class LangGraphHarness:
         start = time.monotonic()
         result: AgentResult | None = None
         code = 0
+        classifier_stop = ""
         try:
             with usage.active():
                 state = await asyncio.wait_for(
@@ -871,6 +878,10 @@ class LangGraphHarness:
         except TimeoutError:
             log.warning("%s: turn timed out after %.0fs", agent or "turn", timeout_s)
             code = -1
+        except ClassifierStopError as exc:
+            classifier_stop = exc.reason
+            code = 1
+            log.warning("%s: classifier stop: %s", agent or "turn", exc.reason)
         except EmptyCandidateError:
             # _EmptyCandidateRetry retried the zero-part candidate through the
             # shared backoff and exhausted it. Surface a named diagnostic (not a
@@ -959,6 +970,7 @@ class LangGraphHarness:
             result=result,
             log_path=log_path,
             duration_s=time.monotonic() - start,
+            classifier_stop=classifier_stop,
             finish_reason=stop_cb.finish_reason,
             empty_candidate=stop_cb.empty,
             usage=usage.total + usage.aside,

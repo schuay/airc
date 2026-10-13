@@ -268,6 +268,12 @@ async def run_agent_loop(
             journal=journal,
         )
         spent = spent + run.usage
+        if run.classifier_stop:
+            return AgentResult(
+                disposition=Disposition.ABANDON,
+                reason=f"model stopped by classifier ({run.classifier_stop})",
+                classifier_stop=run.classifier_stop,
+            )
         # Whether the NEXT turn is the last this step can afford, measured in
         # turns like the one just made instead of in a count that means
         # something different at a 20k context and a 600k one. Sticky, because a

@@ -54,6 +54,8 @@ class AgentResult(BaseModel):
     reason: str = ""
     friction: str = ""  # operator diagnostics; see Report.friction
     data: dict = {}
+    # Runtime metadata, deliberately absent from the model-authored Report.
+    classifier_stop: str = ""
 
 
 class Report(BaseModel):
@@ -97,6 +99,7 @@ class HarnessRun:
     # signal that distinguishes why a turn produced no report -- a model-call-cap
     # stop from a provider-side empty candidate (SAFETY/RECITATION/MALFORMED_
     # FUNCTION_CALL/MAX_TOKENS) -- which otherwise both surface as exit_code 1.
+    classifier_stop: str = ""
     finish_reason: str = ""
     # The terminating candidate carried no text and no tool calls: a zero-part
     # reply. This is the silent dead turn: a provider-side empty candidate that
