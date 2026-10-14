@@ -238,6 +238,38 @@ async def test_turn_timeout_cuts_off_stuck_turn(tmp_path, monkeypatch):
     assert replies(store, t.id) == []  # no reply ever landed
 
 
+async def test_classifier_stop_is_named_in_notice(tmp_path, monkeypatch):
+    # A provider classifier stop is not an airc failure; the notice carries
+    # the provider's reason instead of the generic "errored; see logs".
+    from airc_core import ClassifierStopError
+
+    class StoppedRunner(FakeRunner):
+        async def run_turn(
+            self, name, thread_id, *, addressed=False, task_prompt=None, trigger_id=None
+        ):
+            raise ClassifierStopError("recitation", model_id="m")
+
+    monkeypatch.setattr(orch_mod, "make_model", lambda mid: object())
+    store = Store(tmp_path / "t.db")
+    room = Room(store)
+    orch = Orchestrator(Config(), room, StoppedRunner(("perf",)), store)
+    t = room.create_thread("main")
+    await room.post(t.id, "alice", "human", "perf: go")
+
+    def stopped():
+        msgs = store.thread_messages(t.id)
+        return any(
+            m.kind == "notice"
+            and m.text == "(perf: model stopped by provider classifier: recitation (m))"
+            for m in msgs
+        )
+
+    await drive(orch, stopped)
+    assert not any(
+        "errored" in m.text for m in store.thread_messages(t.id) if m.kind == "notice"
+    )
+
+
 async def test_busy_agent_does_not_block_idle_agent(tmp_path, monkeypatch):
     # The regression: A finishes fast, B is slow on the same message. A new
     # message addressed to A must be answered while B still grinds -- A is not

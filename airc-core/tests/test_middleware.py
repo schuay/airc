@@ -279,6 +279,7 @@ def test_shared_stack_present_for_any_model():
         "_DropEmptyResponses",
         "ModelRetryMiddleware",
         "_EmptyCandidateRetry",
+        "ClassifierStopMiddleware",  # inner to the retries: a stop is never resent
         "AnthropicPromptCachingMiddleware",
         "_AnthropicVertexCaching",
         "_GeminiVertexSession",
@@ -1110,19 +1111,9 @@ def _candidate_agent(scripted):
 
 
 def _classifier_agent(scripted):
-    from langchain.agents import create_agent
-
-    model = _CandidateModel(scripted=scripted)
-    agent = create_agent(
-        model,
-        tools=[],
-        system_prompt="sys",
-        middleware=[
-            *base_middleware(_NON_VERTEX, "sys", []),
-            ClassifierStopMiddleware(),
-        ],
-    )
-    return model, agent
+    # base_middleware alone: the classifier middleware is part of the shared
+    # stack, no caller appends it.
+    return _candidate_agent(scripted)
 
 
 _EMPTY_STOP = {"content": "", "response_metadata": {"finish_reason": "STOP"}}
@@ -1230,41 +1221,66 @@ async def test_refusal_without_content_raises_without_nudge_retry(monkeypatch):
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     # Anthropic's stop_reason="refusal" arrives with empty content. It is a
-    # deterministic classifier refusal, not a zero-part STOP flake, so
-    # _EmptyCandidateRetry raises EmptyCandidateError on the first call without
-    # spending an uncached nudge call.
+    # deterministic classifier refusal, not a zero-part STOP flake:
+    # ClassifierStopMiddleware (inside _EmptyCandidateRetry) raises the typed
+    # error on the first call, and no uncached nudge call is spent.
     refusal = {"content": "", "response_metadata": {"stop_reason": "refusal"}}
     model, graph = _candidate_agent([refusal])
-    try:
+    with pytest.raises(ClassifierStopError) as raised:
         await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
-        raised = False
-    except EmptyCandidateError as e:
-        raised = True
-        assert "finish_reason=refusal" in str(e)
-    assert raised
+    assert raised.value.reason == "refusal"
+    assert raised.value.stop.model_id == _NON_VERTEX
     assert model.calls == 1
 
 
 @pytest.mark.parametrize(
-    ("content", "key", "value", "reason"),
+    ("content", "metadata", "reason"),
     [
-        ("", "stop_reason", "refusal", "refusal"),
-        ("I cannot provide that.", "finish_reason", "SAFETY", "safety"),
+        ("", {"stop_reason": "refusal"}, "refusal"),
+        ("I cannot provide that.", {"finish_reason": "SAFETY"}, "safety"),
+        # A zero-part SAFETY used to take the nudged retry first.
+        ("", {"finish_reason": "SAFETY"}, "safety"),
+        # A prompt-side block: no candidate, genai dumps the feedback into
+        # response_metadata instead of raising.
+        (
+            "",
+            {"prompt_feedback": {"block_reason": "PROHIBITED_CONTENT"}},
+            "prompt_blocked:prohibited_content",
+        ),
     ],
 )
 async def test_classifier_stop_is_typed_before_same_model_retries(
-    monkeypatch, content, key, value, reason
+    monkeypatch, content, metadata, reason
 ):
     from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
     model, graph = _classifier_agent(
-        [{"content": content, "response_metadata": {key: value}}]
+        [{"content": content, "response_metadata": metadata}]
     )
     with pytest.raises(ClassifierStopError) as raised:
         await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert raised.value.reason == reason
     assert model.calls == 1
+
+
+def test_classifier_stop_line_is_the_shared_wording():
+    from airc_core import ClassifierStop
+
+    stop = ClassifierStop("recitation", "gemini-x", tool_calls=4, tool_result_chars=9)
+    assert stop.line() == (
+        "model stopped by provider classifier: recitation (gemini-x, after 4 tool calls)"
+    )
+    assert ClassifierStop("safety", "m").line() == (
+        "model stopped by provider classifier: safety (m)"
+    )
+    assert str(ClassifierStopError(stop)) == stop.line()
+    assert stop.asdict() == {
+        "reason": "recitation",
+        "model_id": "gemini-x",
+        "tool_calls": 4,
+        "tool_result_chars": 9,
+    }
 
 
 async def test_non_classifier_reasons_pass_through_classifier_middleware():
@@ -1321,16 +1337,17 @@ async def test_a_candidate_with_content_or_tool_calls_is_never_retried(monkeypat
     from airc_core import agent
 
     monkeypatch.setattr(agent.asyncio, "sleep", _noop_sleep)
-    # The discrimination the detection scope rests on: a SAFETY/RECITATION block
-    # that CARRIES content is a genuine refusal, not the zero-part flake, so it
-    # passes through untouched on the first call.
-    refusal = {
-        "content": "I cannot help with that.",
-        "response_metadata": {"finish_reason": "SAFETY"},
+    # A MAX_TOKENS cut that carries content is an answer, not the zero-part
+    # flake, so it passes through untouched on the first call. (A SAFETY stop
+    # with content is the classifier middleware's case: it raises, and the
+    # partial text is dropped with it; see the typed-stop tests.)
+    cut = {
+        "content": "I was about to say",
+        "response_metadata": {"finish_reason": "MAX_TOKENS"},
     }
-    model, graph = _candidate_agent([refusal])
+    model, graph = _candidate_agent([cut])
     state = await graph.ainvoke({"messages": [{"role": "user", "content": "go"}]})
-    assert state["messages"][-1].content == "I cannot help with that."
+    assert state["messages"][-1].content == "I was about to say"
     assert model.calls == 1
     # Likewise a tool-calling step: empty text, but parts are present.
     model, graph = _candidate_agent(

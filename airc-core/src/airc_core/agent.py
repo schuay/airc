@@ -51,9 +51,9 @@ from langgraph.errors import GraphBubbleUp
 from .collector import book_aside
 from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
 from .providers import (
-    REFUSAL_STOP_REASON,
     STOP_REASON_KEYS,
     normalize_classifier_stop_reason,
+    normalize_prompt_block_reason,
 )
 from .usage import MODEL_KEY, SOURCE_KEY, SUMMARIZATION, Usage, _k
 
@@ -282,20 +282,67 @@ class EmptyCandidateError(Exception):
     """
 
 
-class ClassifierStopError(Exception):
-    """A provider classifier stopped a model response."""
+@dataclass(frozen=True)
+class ClassifierStop:
+    """One provider classifier stop, as every surface reports it.
 
-    def __init__(
-        self,
-        reason: str,
-        *,
-        tool_calls: int = 0,
-        tool_result_chars: int = 0,
-    ) -> None:
-        self.reason = reason
-        self.tool_calls = tool_calls
-        self.tool_result_chars = tool_result_chars
-        super().__init__(f"model stopped by classifier ({reason})")
+    The record behind ClassifierStopError. line() is the one place the human
+    wording lives: the room's NOTICE, the review artifact, the deepagent
+    disposition reason and the middleware's log line all print it verbatim, so
+    a reader sees the same sentence wherever the stop shows up. asdict() is for
+    artifacts and structured logs that want the fields.
+    """
+
+    reason: str  # normalized: refusal | safety | recitation | prompt_blocked:* ...
+    model_id: str  # the graph's configured model id (distinguishes a fallback)
+    tool_calls: int = 0  # AI tool calls in the request history at the stop
+    tool_result_chars: int = 0  # ToolMessage chars in the request history
+
+    def line(self) -> str:
+        detail = self.model_id or "unknown model"
+        if self.tool_calls:
+            calls = "call" if self.tool_calls == 1 else "calls"
+            detail += f", after {self.tool_calls} tool {calls}"
+        return f"model stopped by provider classifier: {self.reason} ({detail})"
+
+    def asdict(self) -> dict:
+        return {
+            "reason": self.reason,
+            "model_id": self.model_id,
+            "tool_calls": self.tool_calls,
+            "tool_result_chars": self.tool_result_chars,
+        }
+
+
+class ClassifierStopError(Exception):
+    """A provider classifier stopped a model response.
+
+    Raised by ClassifierStopMiddleware, part of base_middleware, so every agent
+    graph in the suite raises it and none sees a same-model retry for it
+    (_is_retryable rejects it by type, and the middleware sits inside
+    _EmptyCandidateRetry so the nudged resend never runs). Consumers catch it by
+    type and print stop.line().
+    """
+
+    def __init__(self, stop: ClassifierStop | str, **fields) -> None:
+        # A bare reason string is accepted for tests and callers that have no
+        # model id; the record is still what travels.
+        if isinstance(stop, str):
+            stop = ClassifierStop(stop, fields.pop("model_id", ""), **fields)
+        self.stop = stop
+        super().__init__(stop.line())
+
+    @property
+    def reason(self) -> str:
+        return self.stop.reason
+
+    @property
+    def tool_calls(self) -> int:
+        return self.stop.tool_calls
+
+    @property
+    def tool_result_chars(self) -> int:
+        return self.stop.tool_result_chars
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -600,10 +647,10 @@ class _EmptyCandidateRetry(AgentMiddleware):
     empty candidate) instead of going silent.
 
     Detection scope: an empty candidate (0 parts: no text and no tool calls)
-    and STOP with no content. A SAFETY/RECITATION block with content is a
-    genuine refusal, not a flake, and is not retried here; Anthropic's
-    stop_reason="refusal" carries no content at all and raises
-    EmptyCandidateError immediately without the uncached nudge retry. Nor is a
+    and STOP with no content. A classifier stop (SAFETY, RECITATION, Anthropic's
+    refusal, a blocked prompt) never reaches here: ClassifierStopMiddleware sits
+    inside this one and raises first, so the nudge is spent only on the
+    zero-part flake it exists for. Nor is a
     tool call the provider truncated, which looks zero-part to a check on
     content and tool_calls alone: that has its own retry and its own wording
     (see _unparsable_tool_call and _retry_unparsable).
@@ -636,8 +683,6 @@ class _EmptyCandidateRetry(AgentMiddleware):
                 _empty_retry.set(0)
             return resp
         reason = _finish_reason(empty)
-        if reason.strip().lower() == REFUSAL_STOP_REASON:
-            raise EmptyCandidateError(f"empty candidate (finish_reason={reason})")
         # Still empty. Do not raise for an identical retry: the cache (nested
         # inside) would re-read the same prefix and the model would reproduce the
         # zero-part candidate. Mutate, once: set _empty_retry so the growing
@@ -980,7 +1025,13 @@ def _finish_reason(msg: AIMessage) -> str:
 
 
 def classifier_stop_reason(response) -> str:
-    """Return the first structured classifier stop reason in a model response."""
+    """Return the first structured classifier stop reason in a model response.
+
+    Two shapes: a candidate the classifier cut (finish_reason / stop_reason in
+    the allowlist) and a prompt the classifier refused before any candidate
+    existed (prompt_feedback.block_reason, genai only), reported as
+    prompt_blocked:<reason>.
+    """
     model_response = getattr(response, "model_response", response)
     messages = getattr(model_response, "result", None)
     if messages is None:
@@ -992,33 +1043,60 @@ def classifier_stop_reason(response) -> str:
         for key in STOP_REASON_KEYS:
             if reason := normalize_classifier_stop_reason(metadata.get(key)):
                 return reason
+        if reason := normalize_prompt_block_reason(metadata):
+            return reason
     return ""
 
 
-def raise_for_classifier_stop(response, *, messages=()) -> None:
+def raise_for_classifier_stop(response, *, messages=(), model_id: str = "") -> None:
     """Raise the typed classifier-stop signal for a structured model response."""
     if reason := classifier_stop_reason(response):
         raise ClassifierStopError(
-            reason,
-            tool_calls=sum(
-                len(message.tool_calls or [])
-                for message in messages
-                if isinstance(message, AIMessage)
-            ),
-            tool_result_chars=sum(
-                len(message.text)
-                for message in messages
-                if isinstance(message, ToolMessage)
-            ),
+            ClassifierStop(
+                reason,
+                model_id,
+                tool_calls=sum(
+                    len(message.tool_calls or [])
+                    for message in messages
+                    if isinstance(message, AIMessage)
+                ),
+                tool_result_chars=sum(
+                    len(message.text)
+                    for message in messages
+                    if isinstance(message, ToolMessage)
+                ),
+            )
         )
 
 
 class ClassifierStopMiddleware(AgentMiddleware):
-    """Surface structured provider classifier stops without same-model retries."""
+    """Surface structured provider classifier stops without same-model retries.
+
+    Part of base_middleware, listed after _EmptyCandidateRetry so it is inner
+    to it: a stopped candidate raises here before the empty-candidate nudge
+    could resend it, and ModelRetryMiddleware further out refuses the type. The
+    one WARNING per stop is logged here so every stop in the suite has the same
+    log line, whatever the consumer does with the exception.
+
+    Partial text on a stopped candidate (Gemini can return some text with
+    finish_reason=SAFETY) is dropped with the raise. A half-reply that looks
+    complete is worse than a notice that names the stop.
+    """
+
+    def __init__(self, model_id: str = "") -> None:
+        self._model_id = model_id
 
     async def awrap_model_call(self, request, handler):
         response = await handler(request)
-        raise_for_classifier_stop(response, messages=getattr(request, "messages", ()))
+        try:
+            raise_for_classifier_stop(
+                response,
+                messages=getattr(request, "messages", ()),
+                model_id=self._model_id,
+            )
+        except ClassifierStopError as exc:
+            log.warning("%s", exc.stop.line())
+            raise
         return response
 
 
@@ -2515,7 +2593,7 @@ def base_middleware(
 ):
     """The middleware every agent graph shares: tool-error containment, ceiling
     summarization, context-window sizing, empty-response stripping,
-    transient-error retry, and prompt caching.
+    transient-error retry, classifier-stop surfacing, and prompt caching.
 
     Both agent builders (persona turns in AgentRunner, the commit-review graph
     in processors) compose this with their own control middleware so the cost
@@ -2578,6 +2656,11 @@ def base_middleware(
         # retryable, so the retry layer passes it straight through to the
         # harness instead of resending.
         _EmptyCandidateRetry(),
+        # Inside _EmptyCandidateRetry: a classifier stop raises here first, so
+        # the nudged resend is never spent on a response the provider refused
+        # (it reproduces), and ModelRetryMiddleware refuses the type. Every
+        # graph gets it here so no caller has to remember to append it.
+        ClassifierStopMiddleware(model_id),
         # One caching middleware per Anthropic transport: upstream's gates on
         # ChatAnthropic, ours on ChatAnthropicVertex. At most one fires.
         AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),

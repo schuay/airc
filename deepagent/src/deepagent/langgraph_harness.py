@@ -33,8 +33,8 @@ from pathlib import Path
 
 from airc_core import (
     STOP_REASON_KEYS,
+    ClassifierStop,
     ClassifierStopError,
-    ClassifierStopMiddleware,
     CommonConfig,
     EmptyCandidateError,
     GroundingReminderMiddleware,
@@ -818,8 +818,6 @@ class LangGraphHarness:
             ),
             ModelCallLimitMiddleware(run_limit=_MAX_MODEL_CALLS, exit_behavior="end"),
         ]
-        # Innermost: classify before empty-response and transient retries.
-        mw.append(ClassifierStopMiddleware())
         graph = create_agent(
             make_model(self._model_id, **self._profile.call_kwargs),
             tools=tools,
@@ -920,7 +918,7 @@ class LangGraphHarness:
         start = time.monotonic()
         result: AgentResult | None = None
         code = 0
-        classifier_stop = ""
+        classifier_stop: ClassifierStop | None = None
         try:
             with usage.active():
                 state = await asyncio.wait_for(
@@ -958,9 +956,9 @@ class LangGraphHarness:
             log.warning("%s: turn timed out after %.0fs", agent or "turn", timeout_s)
             code = -1
         except ClassifierStopError as exc:
-            classifier_stop = exc.reason
+            # Already logged by ClassifierStopMiddleware in the shared wording.
+            classifier_stop = exc.stop
             code = 1
-            log.warning("%s: classifier stop: %s", agent or "turn", exc.reason)
         except EmptyCandidateError:
             # _EmptyCandidateRetry retried the zero-part candidate through the
             # shared backoff and exhausted it. Surface a named diagnostic (not a

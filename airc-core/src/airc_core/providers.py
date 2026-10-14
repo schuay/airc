@@ -149,6 +149,37 @@ def normalize_classifier_stop_reason(value: object) -> str:
     return reason if reason in CLASSIFIER_STOP_REASONS else ""
 
 
+# Where langchain-google-genai puts a prompt-side block: the API returns no
+# candidate and a prompt_feedback with block_reason set, and the wrapper hands
+# that back as an empty AIMessage with the feedback dumped into
+# response_metadata under this key rather than raising. The Vertex wrapper does
+# not surface prompt feedback at all, so this path is genai-only.
+PROMPT_FEEDBACK_KEY = "prompt_feedback"
+PROMPT_BLOCK_PREFIX = "prompt_blocked:"
+
+
+def normalize_prompt_block_reason(metadata: dict | None) -> str:
+    """Return ``prompt_blocked:<reason>`` for a blocked prompt, else ``""``.
+
+    The block reason is an open enum (SAFETY, OTHER, BLOCKLIST,
+    PROHIBITED_CONTENT, IMAGE_SAFETY, MODEL_ARMOR, JAILBREAK, ...); any set
+    value other than the unspecified sentinel means the input was refused, so
+    there is no allowlist here, unlike the candidate stop reasons.
+    """
+    feedback = (metadata or {}).get(PROMPT_FEEDBACK_KEY)
+    if not isinstance(feedback, dict):
+        return ""
+    value = feedback.get("block_reason")
+    if isinstance(value, Enum):
+        value = value.name
+    if not isinstance(value, str):
+        return ""
+    reason = value.strip().lower()
+    if not reason or reason == "blocked_reason_unspecified":
+        return ""
+    return PROMPT_BLOCK_PREFIX + reason
+
+
 # output_config.effort, in increasing depth. The Messages API's own vocabulary,
 # so it is repeated here instead of derived: the SDK exposes it as a Literal
 # that cannot be iterated, and config validation needs the set before any

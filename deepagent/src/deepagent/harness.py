@@ -16,7 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from airc_core import Usage
+from airc_core import ClassifierStop, Usage
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -55,6 +55,10 @@ class AgentResult(BaseModel):
     friction: str = ""  # operator diagnostics; see Report.friction
     data: dict = {}
     # Runtime metadata, deliberately absent from the model-authored Report.
+    # The normalized classifier reason ("refusal", "recitation", ...), not the
+    # record: this model is serialized to result.*.json and copied into
+    # persisted job state by consumers, so the field stays a plain string.
+    # `reason` carries the record's one-line wording.
     classifier_stop: str = ""
 
 
@@ -99,7 +103,9 @@ class HarnessRun:
     # signal that distinguishes why a turn produced no report -- a model-call-cap
     # stop from a provider-side empty candidate (SAFETY/RECITATION/MALFORMED_
     # FUNCTION_CALL/MAX_TOKENS) -- which otherwise both surface as exit_code 1.
-    classifier_stop: str = ""
+    # classifier_stop is the typed record when the provider's classifier ended
+    # the turn (see airc_core.ClassifierStop); the loop prints its line().
+    classifier_stop: ClassifierStop | None = None
     finish_reason: str = ""
     # The terminating candidate carried no text and no tool calls: a zero-part
     # reply. This is the silent dead turn: a provider-side empty candidate that

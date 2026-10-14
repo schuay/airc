@@ -59,6 +59,8 @@ from enum import StrEnum
 from typing import Protocol, TypeVar, runtime_checkable
 
 from airc_core import (
+    ClassifierStopError,
+    EmptyCandidateError,
     TokenLog,
     Usage,
     make_model,
@@ -377,6 +379,7 @@ class TurnContext:
             extra_system=extra_system,
             schema=schema,
             label=label,
+            thread_id=self.thread_id,
         )
 
     async def post(self, body: str) -> None:
@@ -826,6 +829,23 @@ class Orchestrator:
                 f"({name} gave up after {timeout:.0f}s)",
             )
             return None
+        except ClassifierStopError as exc:
+            # Not an airc failure: the provider's classifier stopped the
+            # response. Named in the thread, in the suite's one wording, so a
+            # reader can tell it from a crash without opening the logs. The
+            # middleware already logged it.
+            await self._room.post(
+                thread_id, name, MessageKind.NOTICE, f"({name}: {exc.stop.line()})"
+            )
+            return None
+        except EmptyCandidateError as exc:
+            # The model returned nothing twice (see _EmptyCandidateRetry); the
+            # finish_reason is in the message.
+            log.warning("agent %s: %s in thread %d", name, exc, thread_id)
+            await self._room.post(
+                thread_id, name, MessageKind.NOTICE, f"({name} got no reply: {exc})"
+            )
+            return None
         except Exception:
             log.exception("agent %s failed in thread %d", name, thread_id)
             await self._room.post(
@@ -841,11 +861,14 @@ class Orchestrator:
         extra_system: str,
         schema: type[T],
         label: str,
+        thread_id: int | None = None,
     ) -> T | None:
         """A structured turn under the shared timeout; returns a value or None.
         Unlike _guarded_turn it posts no NOTICE (a structured follow-up's failure
         is the handler's to surface or swallow), only logs -- matching the old
-        digest path, which logged and returned on error."""
+        digest path, which logged and returned on error. The one exception is a
+        classifier stop: the handler gets None and cannot name the reason, so
+        it is posted here when the caller passed a thread_id."""
         timeout = self._cfg.orchestrator.turn_timeout
         try:
             async with asyncio.timeout(timeout):
@@ -856,6 +879,12 @@ class Orchestrator:
                     schema=schema,
                     label=label,
                 )
+        except ClassifierStopError as exc:
+            if thread_id is not None:
+                await self._room.post(
+                    thread_id, name, MessageKind.NOTICE, f"({name}: {exc.stop.line()})"
+                )
+            return None
         except Exception:
             log.exception("%s turn for agent %s failed", label, name)
             return None
