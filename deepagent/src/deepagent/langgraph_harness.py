@@ -437,6 +437,81 @@ async def _thread_live(graph, thread_id: str) -> bool:
     return bool(getattr(snap, "values", None))
 
 
+# Content of the ToolMessage stitched in for a tool call whose result never
+# reached the thread. Worded for the model: it says what happened and what to
+# do, since the model otherwise has no way to tell a lost result from one that
+# is still coming.
+_INTERRUPTED_TOOL_RESULT = (
+    "Tool call interrupted: the turn ended (timeout or error) before this call"
+    " returned. Its side effects may or may not have happened; check before"
+    " repeating it."
+)
+
+
+async def _close_pending_tool_calls(graph, config: dict) -> int:
+    """Append a ToolMessage for every tool call in the thread's last AIMessage
+    that has no ToolMessage after it. Returns how many were added.
+
+    A turn that dies mid-tool-call (the per-turn wall clock cancels `ainvoke`
+    while a tool is still running, or the tool node raises) leaves the
+    checkpoint ending in an AIMessage whose tool_calls have no results. The
+    provider rejects any later request on that history (a tool_use with no
+    tool_result in the next message is a 400), so a resume that just appends
+    the continue prompt fails deterministically on every retry and burns the
+    loop's dead-turn cap on a thread that was one call from done. Closing the
+    calls with a synthetic result makes the history valid again and tells the
+    model the call did not complete.
+
+    Failure to read or write the checkpoint is logged and returns 0: the turn
+    then runs as before, and the provider's own error says what is wrong.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    try:
+        snap = await graph.aget_state(config)
+    except Exception as e:
+        log.warning("could not read thread state to close tool calls: %s", e)
+        return 0
+    messages = (getattr(snap, "values", None) or {}).get("messages") or []
+    last_ai = None
+    answered: set[str] = set()
+    for m in reversed(messages):
+        if isinstance(m, ToolMessage):
+            answered.add(m.tool_call_id)
+        elif isinstance(m, AIMessage):
+            last_ai = m
+            break
+        else:
+            break
+    if last_ai is None:
+        return 0
+    pending = [tc for tc in last_ai.tool_calls if tc.get("id") not in answered]
+    if not pending:
+        return 0
+    results = [
+        ToolMessage(
+            content=_INTERRUPTED_TOOL_RESULT,
+            tool_call_id=tc["id"],
+            name=tc.get("name") or "",
+            status="error",
+        )
+        for tc in pending
+    ]
+    # Written as the tools node so the update reads as the tool results it
+    # stands in for, and so langgraph does not have to guess the writer.
+    try:
+        await graph.aupdate_state(config, {"messages": results}, as_node="tools")
+    except Exception as e:
+        log.warning("could not close %d pending tool call(s): %s", len(pending), e)
+        return 0
+    log.warning(
+        "closed %d pending tool call(s) left by an interrupted turn: %s",
+        len(pending),
+        ", ".join(f"{tc.get('name')}({tc.get('id')})" for tc in pending),
+    )
+    return len(pending)
+
+
 class LangGraphHarness:
     """Runs one bounded coding turn per run_once against a per-stage thread.
 
@@ -837,6 +912,10 @@ class LangGraphHarness:
         # bound is an UntrackedValue counter (per-turn, resets each ainvoke), so
         # the budget is already fresh on resume -- nothing to clear here.
         if resume and thread_live:
+            # Order matters: the tool-call repair writes as the tools node and
+            # must land before the channel clear, which leaves as_node to be
+            # inferred from the latest checkpoint.
+            await _close_pending_tool_calls(graph, config)
             await graph.aupdate_state(config, {"structured_response": None})
         start = time.monotonic()
         result: AgentResult | None = None
