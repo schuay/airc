@@ -16,10 +16,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from airc_core import ClassifierStop, Usage
+from airc_core import Usage
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    # Annotation only: resolving the name through airc_core loads
+    # airc_core.agent and with it langchain, which the CLI's parser-building
+    # path (see icompleteu's import-cost test) must not pay for.
+    from airc_core import ClassifierStop
+
     from .journal import Journal
 
 log = logging.getLogger(__name__)
