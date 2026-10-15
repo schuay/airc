@@ -3,6 +3,7 @@
 
 """Core long-term memory: jail, auto-committing tools, derived index, injection."""
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -14,6 +15,7 @@ from airc_room.memory import (
     MemoryIndexMiddleware,
     make_memory_tools,
     memory_index,
+    update_memory_entry,
 )
 from airc_room.memory.jail import Jailbreak, jail, jail_entry
 from airc_room.memory.middleware import _REMINDER_TOKENS, _SRC
@@ -729,3 +731,70 @@ async def test_explicit_entry_directories_preserve_confinement(tmp_path):
     assert (tmp_path / "scripts" / "validator.md").read_text() == "machinery"
     default = {t.name: t for t in make_memory_tools(tmp_path)}
     assert (await default["memory_write"].ainvoke(args)).startswith("error:")
+
+
+@pytest.mark.parametrize("operation", ["memory_write", "memory_edit", "memory_delete"])
+async def test_independent_memory_writers_share_the_whole_transaction(
+    tmp_path, monkeypatch, operation
+):
+    from airc_room.memory import tools as module
+
+    _make_store(tmp_path)
+    assert (
+        await update_memory_entry(tmp_path, "note.md", lambda _: _VALID, "seed") is None
+    )
+    original_git, original_lock = module._git, module._store_lock
+    committing, release, attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def git(root, *args):
+        if args == ("add", "--", "note.md") and not committing.is_set():
+            committing.set()
+            await release.wait()
+        return await original_git(root, *args)
+
+    def lock(root):
+        if committing.is_set():
+            attempted.set()
+        return original_lock(root)
+
+    monkeypatch.setattr(module, "_git", git)
+    monkeypatch.setattr(module, "_store_lock", lock)
+    first = asyncio.create_task(
+        update_memory_entry(tmp_path, "note.md", lambda s: s + "first\n", "first")
+    )
+    await asyncio.wait_for(committing.wait(), 5)
+    other = _tools(tmp_path / ".")
+    args = {"path": "note.md", "message": "second"}
+    if operation == "memory_write":
+        args["content"] = _VALID + "second\n"
+    elif operation == "memory_edit":
+        args.update(search="first", replace="second")
+    second = asyncio.create_task(other[operation].ainvoke(args))
+    await asyncio.wait_for(attempted.wait(), 5)
+    release.set()
+    results = await asyncio.gather(first, second)
+    assert results[0] is None
+    assert results[1].startswith(("saved ", "updated ", "deleted "))
+    assert _git(tmp_path, "show", "HEAD^:note.md") == _VALID + "first\n"
+    assert _commit_count(tmp_path) == 3
+
+
+async def test_memory_updates_retry_dirty_entries_without_duplicate_commits(tmp_path):
+    _make_store(tmp_path)
+    hook = tmp_path / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    err = await update_memory_entry(tmp_path, "note.md", lambda _: _VALID, "record")
+    assert "commit rejected" in err
+    assert _commit_count(tmp_path) == 0
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    assert await update_memory_entry(tmp_path, "note.md", lambda s: s, "retry") is None
+    assert _git(tmp_path, "show", "HEAD:note.md") == _VALID
+    assert await update_memory_entry(tmp_path, "note.md", lambda s: s, "again") is None
+    assert _commit_count(tmp_path) == 1
+
+
+async def test_programmatic_updates_obey_the_memory_jail(tmp_path):
+    _make_store(tmp_path)
+    err = await update_memory_entry(tmp_path, ".git/hook.md", lambda _: _VALID, "write")
+    assert err.startswith("error:")
+    assert not (tmp_path / ".git/hook.md").exists()

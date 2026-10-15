@@ -21,7 +21,7 @@ which in a toolset shared across personas would be cross-persona mutable state).
 Each write/edit stages exactly its own path and commits that path under a
 per-store lock, so concurrent persona turns cannot race on the git index and an
 unrelated file staged in the shared checkout cannot fail the hook for everyone
-(see _commit_path). A commit rejected by the store's pre-commit schema hook is
+(see _commit_entry). A commit rejected by the store's pre-commit schema hook is
 unstaged and its file left on disk, so the agent can read, fix, and rewrite it --
 the validator errors come back as the tool result, led by whether they concern
 the agent's own entry or something else in the store.
@@ -31,10 +31,13 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 from airc_tools.edit import apply_edits
 from airc_tools.edit import write_file as _write_file
+from airc_tools.limits import MAX_EDIT_FILE_BYTES
 from airc_tools.read import read_file as _read_file
 from langchain_core.tools import tool
 
@@ -44,6 +47,14 @@ from .jail import Jailbreak, jail, jail_entry
 # a turn; the agent narrows the query for the rest.
 _MAX_OUTPUT = 60_000
 _GIT_TIMEOUT_S = 20.0
+_STORE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Path, asyncio.Lock]] = (
+    WeakKeyDictionary()
+)
+
+
+def _store_lock(root: Path) -> asyncio.Lock:
+    locks = _STORE_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(root, asyncio.Lock())
 
 
 def _clip(text: str, limit: int = _MAX_OUTPUT) -> str:
@@ -75,7 +86,7 @@ def _rejection(rel: str, hook_output: str, *, deleting: bool = False) -> str:
     has one accurate thing to say regardless of whose fault it was, so say that.
     """
     if deleting:
-        # _commit_path has already unstaged, so the removal is uncommitted; git
+        # _commit_entry has already unstaged, so the removal is uncommitted; git
         # restores it. Naming the command matters -- the agent cannot rewrite
         # content it no longer holds.
         return (
@@ -115,62 +126,87 @@ async def _git(root: Path, *args: str) -> tuple[int, str]:
     return await asyncio.to_thread(_git_sync, root, *args)
 
 
+async def _commit_entry(
+    root: Path, target: Path, message: str, *, deleting: bool = False
+) -> str | None:
+    """Commit one path under the caller's store lock, preserving unrelated staging.
+
+    Scope the commit to the path so an unrelated staged entry cannot reject this
+    write or become part of its commit. Rejected content stays on disk, unstaged,
+    for repair and retry. An unchanged entry may still need a previous failed
+    commit retried; check the staged diff rather than only comparing file content.
+    """
+    rel = str(target.relative_to(root))
+    code, out = await _git(root, "add", "--", rel)
+    if code != 0:
+        return f"could not stage {rel}:\n{_clip(out)}"
+    code, out = await _git(root, "diff", "--cached", "--quiet", "--", rel)
+    if code == 0:
+        return None
+    if code != 1:
+        return f"could not check {rel}:\n{_clip(out)}"
+    code, out = await _git(root, "commit", "-m", message, "--", rel)
+    if code == 0:
+        return None
+    await _git(root, "reset", "--quiet", "--", rel)
+    return _rejection(rel, out, deleting=deleting)
+
+
+async def update_memory_entry(
+    store_root: Path,
+    path: str,
+    update: Callable[[str], str],
+    message: str,
+    *,
+    entry_dirs: tuple[str, ...] = (),
+) -> str | None:
+    """Read, transform, write and commit an entry under the memory tools' lock.
+
+    A missing entry starts as an empty string. The synchronous callback runs off
+    the event loop; unchanged content is not rewritten but is committed if dirty.
+    Return None on success, or the same error text as a rejected memory write.
+    Coordination covers writers in the same event loop, not other processes.
+    """
+    root = store_root.expanduser().resolve()
+    async with _store_lock(root):
+        try:
+            target = jail_entry(root, path, entry_dirs=entry_dirs)
+        except Jailbreak as e:
+            return f"error: {e}"
+
+        def transform() -> str:
+            if target.exists() and not target.is_file():
+                return f"error: {path} is not a regular file"
+            if target.exists() and target.stat().st_size > MAX_EDIT_FILE_BYTES:
+                return (
+                    f"error: {path} exceeds the {MAX_EDIT_FILE_BYTES} byte edit limit"
+                )
+            content = target.read_text(encoding="utf-8") if target.exists() else ""
+            updated = update(content)
+            if updated == content:
+                return ""
+            return _write_file(str(target), updated)
+
+        out = await asyncio.to_thread(transform)
+        if out.startswith("error"):
+            return out
+        return await _commit_entry(root, target, message)
+
+
 def make_memory_tools(store_root: Path, *, entry_dirs: tuple[str, ...] = ()) -> list:
     """The memory tool set bound to a store checkout. Returned as a list the runner
     grants to a persona that lists the "memory" tool_group.
 
-    Closes over the resolved root and a per-store commit lock; every path routes
+    Uses a shared lock for the resolved store root; every path routes
     through jail(), confined to the root. Writes are root-only unless the plugin
     grants explicit entry_dirs; all other subdirectories stay read-only. A path
     escape comes back as a plain error string, never an exception into the turn."""
     root = store_root.expanduser().resolve()
-    # Serializes write+stage+commit across concurrent persona turns sharing this
-    # toolset, so two writers cannot collide on the git index (index.lock) or fold
-    # one another's staged path into the wrong commit.
-    commit_lock = asyncio.Lock()
 
     def _rel(abs_path: Path) -> str:
         """A store-relative path for messages and staging (the jailed absolute
         path is what the airc-tools primitives see; the agent thinks in relatives)."""
         return str(abs_path.relative_to(root))
-
-    async def _commit_path(
-        abs_path: Path, message: str, *, deleting: bool = False
-    ) -> str | None:
-        """Commit exactly `abs_path` with `message`, running the store's pre-commit
-        schema hook. Returns None on success, or an error string (hook rejection or
-        git failure) with the file left on disk and unstaged so the agent can fix
-        and retry.
-
-        The commit is pathspec-scoped (`git commit -- <path>`) instead of a plain
-        commit of the index, because a store is a shared checkout an operator also
-        touches by hand. A plain commit takes everything staged, so one unrelated
-        malformed file sitting in the index fails the hook for every write: the
-        agent is handed a rejection naming a file it never wrote, and no amount of
-        fixing its own entry can clear it (observed: a stray frontmatter-less file
-        blocked every persona write and compaction for a week). Scoping the
-        commit means a polluted index cannot block the tools, and the operator's
-        staged work is left as they left it.
-
-        `git add` still runs first: the pathspec form commits the worktree state,
-        and staging keeps a delete (a write that emptied the file) covered.
-        """
-        rel = _rel(abs_path)
-        async with commit_lock:
-            # -- ends the option list so a path that looks like a flag is still a
-            # pathspec; `git add` stages a deletion too (a write that emptied the
-            # file is covered).
-            code, out = await _git(root, "add", "--", rel)
-            if code != 0:
-                return f"could not stage {rel}:\n{_clip(out)}"
-            code, out = await _git(root, "commit", "-m", message, "--", rel)
-            if code == 0:
-                return None
-            # The pre-commit schema hook (or another git error) rejected it. Unstage
-            # so the bad entry does not ride along on the next unrelated commit; the
-            # hook's per-file errors are in `out` for the agent to act on.
-            await _git(root, "reset", "--quiet", "--", rel)
-            return _rejection(rel, out, deleting=deleting)
 
     @tool
     async def memory_search(query: str, context: int = 0) -> str:
@@ -206,15 +242,16 @@ def make_memory_tools(store_root: Path, *, entry_dirs: tuple[str, ...] = ()) -> 
         for a partial change use memory_edit. The commit runs the store's schema
         hook: if the entry is malformed the commit is REJECTED and the validator
         errors come back here -- fix the entry and write again."""
-        try:
-            target = jail_entry(root, path, entry_dirs=entry_dirs)
-        except Jailbreak as e:
-            return f"error: {e}"
-        out = await asyncio.to_thread(_write_file, str(target), content)
-        if out.startswith("error"):
-            return out
-        if err := await _commit_path(target, message):
-            return err
+        async with _store_lock(root):
+            try:
+                target = jail_entry(root, path, entry_dirs=entry_dirs)
+            except Jailbreak as e:
+                return f"error: {e}"
+            out = await asyncio.to_thread(_write_file, str(target), content)
+            if out.startswith("error"):
+                return out
+            if err := await _commit_entry(root, target, message):
+                return err
         return f"saved {_rel(target)}"
 
     @tool
@@ -225,17 +262,16 @@ def make_memory_tools(store_root: Path, *, entry_dirs: tuple[str, ...] = ()) -> 
         Nothing is written or committed on a mismatch -- the result names the
         failure so you can fix and resend. For a new file use memory_write. A
         schema-hook rejection comes back here to fix and retry."""
-        try:
-            target = jail_entry(root, path, entry_dirs=entry_dirs)
-        except Jailbreak as e:
-            return f"error: {e}"
-        out = await asyncio.to_thread(apply_edits, str(target), [(search, replace)])
-        # apply_edits returns "applied N edit(s) to <path>" on success, a failure
-        # report otherwise; only commit a real change.
-        if not out.startswith("applied"):
-            return out
-        if err := await _commit_path(target, message):
-            return err
+        async with _store_lock(root):
+            try:
+                target = jail_entry(root, path, entry_dirs=entry_dirs)
+            except Jailbreak as e:
+                return f"error: {e}"
+            out = await asyncio.to_thread(apply_edits, str(target), [(search, replace)])
+            if not out.startswith("applied"):
+                return out
+            if err := await _commit_entry(root, target, message):
+                return err
         return f"updated {_rel(target)}"
 
     @tool
@@ -245,6 +281,10 @@ def make_memory_tools(store_root: Path, *, entry_dirs: tuple[str, ...] = ()) -> 
         being true and no rewrite makes sense -- if it merely CHANGED, prefer
         memory_edit or memory_write so the note keeps its history in one place.
         The entry stays recoverable from git history after deletion."""
+        async with _store_lock(root):
+            return await _delete(path, message)
+
+    async def _delete(path: str, message: str) -> str:
         try:
             target = jail_entry(root, path, entry_dirs=entry_dirs)
         except Jailbreak as e:
@@ -266,11 +306,11 @@ def make_memory_tools(store_root: Path, *, entry_dirs: tuple[str, ...] = ()) -> 
 
         await asyncio.to_thread(_unlink)
         # Commit through the same scoped path as a write: `git add` stages the
-        # deletion, and _commit_path's pathspec commit records it. A hook that
+        # deletion, and the scoped commit records it. A hook that
         # rejects the removal leaves the file deleted on disk but uncommitted,
-        # which _commit_path unstages -- so the entry is restorable with git
+        # which _commit_entry unstages -- so the entry is restorable with git
         # checkout and the store is never left half-changed in the index.
-        if err := await _commit_path(target, message, deleting=True):
+        if err := await _commit_entry(root, target, message, deleting=True):
             return err
         return f"deleted {rel}"
 

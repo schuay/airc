@@ -14,6 +14,8 @@ implementation with different memories.
 Public surface:
 - make_memory_tools(root) -- the jailed search/read/write/edit/delete tools
   (auto-commit).
+- update_memory_entry(root, path, update, message) -- a programmatic entry update
+  serialized with other memory writers, with the same jail and commit checks.
 - memory_index(root) -- the derived one-line index for per-turn injection.
 - MemoryIndexMiddleware -- places that index in a persona's conversation when
   it is missing, stale, or has drifted too far back, so an unchanged table of
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 from .index import memory_index
 from .middleware import MemoryIndexMiddleware
-from .tools import make_memory_tools
+from .tools import make_memory_tools, update_memory_entry
 
 # The tool_group name that grants the memory tools. Reserved by core when
 # [airc.memory] is enabled; a persona lists it in agent.toml tool_groups exactly
@@ -76,4 +78,5 @@ __all__ = [
     "MemoryIndexMiddleware",
     "make_memory_tools",
     "memory_index",
+    "update_memory_entry",
 ]
