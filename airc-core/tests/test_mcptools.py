@@ -146,10 +146,10 @@ async def test_tool_timeout_surfaces_as_error_tool_message(monkeypatch):
         await asyncio.sleep(30)
         return "never"
 
+    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.01)
     tool = _fix_tool(
         StructuredTool.from_function(coroutine=hang, name="hang", description="hangs")
     )
-    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.01)
     msg = await tool.ainvoke(
         {"type": "tool_call", "name": "hang", "args": {}, "id": "tc1"}
     )
@@ -224,9 +224,9 @@ async def test_local_errors_do_not_reach_the_adapter_handler(monkeypatch):
         coroutine=hang, name="hang2", description="hangs"
     )
     tool.handle_tool_error = strict_adapter_handler
+    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.01)
     _fix_tool(tool)
 
-    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.01)
     msg = await tool.ainvoke(
         {"type": "tool_call", "name": "hang2", "args": {}, "id": "tc1"}
     )

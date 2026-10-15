@@ -30,8 +30,15 @@ import logging
 from collections.abc import Iterable
 from fnmatch import fnmatch
 
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import BaseTool
 from typing_extensions import Self
+
+from airc_core.toolguard import (
+    DEFAULT_TOOL_TIMEOUT_S,
+    MAX_TOOL_RESULT_CHARS,
+    LocalToolError,
+    guard_tool,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,39 +54,6 @@ log = logging.getLogger(__name__)
 # below, where the distinction is visible.
 _STRIP_KEYS = {"additionalProperties", "$schema", "title"}
 
-# Ceiling on a single tool result, applied at ingest. Stops one pathological
-# output (a full log dump, a giant diff) from blowing the context window, and
-# bounds what that output costs for the rest of the run: a result is re-sent on
-# every later call in the thread, so its real price is size x turns remaining.
-# The truncation is explicit in the returned text so the agent can re-query.
-#
-# This is the only size lever that does not fight prefix caching, because it
-# acts before the result enters the cacheable prefix. compact_for_budget in
-# airc_core.agent refuses to shed until the request would overflow
-# (90% of a 1M window), since stripping a message rebuilds the cache -- so
-# nothing downstream bounds the cost of a large result once it is in.
-#
-# 50k chars is ~12k tokens. Measured over 1687 review and verify tool results:
-# p50 2.8k, p90 15k, p95 33k, p99 133k. A normal read, diff or grep passes
-# intact; clipping hits ~4% of results and removes ~20% of all re-read volume.
-# Lower starts to clip routinely, and a re-query costs a turn, which is the
-# more expensive unit.
-# TODO(jgruber): make this a configurable knob if a workload needs a tighter cap.
-#
-# Public because a consumer that is not a model has to size its REQUESTS against
-# it: the cap cuts by characters, which turns a structured reply into a parse
-# error rather than a shorter one, so airc-watchers' perf detector asks pd for a
-# page it knows will fit. Anything reading this name is coupled to the cap on
-# purpose -- do not privatise it again without giving those callers a way to ask.
-MAX_TOOL_RESULT_CHARS = 50_000
-
-# Per-call ceiling on one tool execution. Legit calls are seconds (a
-# repo_git_grep that takes 2 minutes is wedged, not thorough); this reaps a hung
-# server/transport so a single dead call cannot stall an agent turn forever. On
-# expiry the agent sees a clean error tool result and continues -- see the
-# ToolException conversion in capped().
-_TOOL_CALL_TIMEOUT_S = 120
-
 # Per-server startup budget: spawn, initialize, and list tools. A stdio server is
 # an arbitrary external binary, so it can hang instead of failing -- waiting on a
 # credential prompt, or wedged mid-handshake -- and without a bound here every
@@ -89,12 +63,12 @@ _TOOL_CALL_TIMEOUT_S = 120
 # on with the rest.
 _SERVER_START_TIMEOUT_S = 60
 
+# Per-call ceiling on one MCP tool execution, read when a tool is loaded. See
+# toolguard for the rationale.
+_TOOL_CALL_TIMEOUT_S = DEFAULT_TOOL_TIMEOUT_S
 
-class _LocalToolError(ToolException):
-    """An error raised by this wrapper (timeout, dead transport), as opposed to
-    one the MCP adapter raised for a server-reported isError result.
-    _install_error_handler answers for ours and delegates the adapter's back
-    to it."""
+# Re-exported: consumers that size their requests against the cap read it here.
+__all__ = ["MAX_TOOL_RESULT_CHARS", "MCPToolset"]
 
 
 def _transport_errors() -> tuple[type[BaseException], ...]:
@@ -123,47 +97,6 @@ def _transport_errors() -> tuple[type[BaseException], ...]:
 _TRANSPORT_ERRORS = _transport_errors()
 
 
-def _truncate_text(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
-    cut = len(text) - limit
-    return text[:limit] + (
-        f"\n[... output truncated ({cut} more chars);"
-        " narrow the query (limit/offset/filter) for the rest]"
-    )
-
-
-def _truncated(value):
-    """Cap a tool result's text payload at MAX_TOOL_RESULT_CHARS.
-
-    Two forms occur. A plain-function tool returns a string. The MCP adapter
-    returns content as a list of content blocks, with text in
-    {"type": "text", "text": ...} dicts; a bare isinstance(str) check passes
-    that whole list through uncapped, so one multi-megabyte result reaches the
-    model and, being un-sheddable past the keep-one floor, wedges every later
-    call in the thread. The cap applies to the combined text across the list,
-    truncating block by block so no single block slips past; non-text blocks
-    (image/file) are left intact.
-    """
-    if isinstance(value, str):
-        return _truncate_text(value) if len(value) > MAX_TOOL_RESULT_CHARS else value
-    if isinstance(value, list):
-        budget = MAX_TOOL_RESULT_CHARS
-        for block in value:
-            if not (isinstance(block, dict) and isinstance(block.get("text"), str)):
-                continue
-            text = block["text"]
-            if len(text) <= budget:
-                budget -= len(text)
-                continue
-            block["text"] = (
-                _truncate_text(text, budget)
-                if budget > 0
-                else "[tool result truncated to fit the context window]"
-            )
-            budget = 0
-        return value
-    return value
-
-
 def _clean_schema(schema: dict, top: bool = True) -> None:
     if not isinstance(schema, dict):
         return
@@ -183,104 +116,37 @@ def _clean_schema(schema: dict, top: bool = True) -> None:
                 _clean_schema(item, top=False)
 
 
-def _result_chars(value) -> int:
-    """Total characters of a tool result's text payload.
+def _convert_transport_errors(tool: BaseTool) -> None:
+    """Raise a dead MCP connection as a LocalToolError the guard renders.
 
-    Handles both forms: a plain string, and the content_and_artifact tuple
-    whose content is a list of content blocks (the MCP path -- text lives in
-    {"type": "text", "text": ...} dicts). Returns 0 for forms with no
-    measurable text, so the size/log signal is absent, not wrong.
+    The server process died (stdio child crashed, was OOM-killed, or lost its
+    credentials and exited). Sessions are opened once at startup and never
+    reopened, so every later call to this server fails the same way until the
+    daemon restarts -- but that must degrade to a visible per-call error, not
+    take down an unrelated agent turn with a traceback.
     """
-    if isinstance(value, tuple) and len(value) == 2:
-        value = value[0]
-    if isinstance(value, str):
-        return len(value)
-    if isinstance(value, list):
-        return sum(
-            len(b["text"])
-            for b in value
-            if isinstance(b, dict) and isinstance(b.get("text"), str)
-        )
-    return 0
+    if (orig := getattr(tool, "coroutine", None)) is None:
+        return
+    name = tool.name
 
+    async def converting(*args, **kwargs):
+        try:
+            return await orig(*args, **kwargs)
+        except _TRANSPORT_ERRORS as e:
+            log.warning("tool %s: transport failed: %s", name, e)
+            raise LocalToolError(
+                f"tool {name} failed: its MCP server is unreachable"
+                f" ({type(e).__name__}); it stays unavailable until restart"
+            ) from None
 
-def _install_error_handler(tool: BaseTool) -> None:
-    """Route _LocalToolError to text, leaving any existing handler intact.
-
-    The MCP adapter installs its own handle_tool_error callback whose job is to
-    preserve non-text content blocks (image/file) in an isError result; it
-    documents that as required and locks it with a test. Overwriting it with
-    a bare True -- which this used to do -- collapses those blocks to str().
-
-    It cannot be kept unchanged either: that callback re-raises every
-    ToolException that is not its own internal type, so the timeout and
-    transport errors raised below would escape again, which capped() exists to
-    prevent. So the handler is composed: ours answers for the errors we raise,
-    anything else falls through to the adapter's.
-    """
-    prev = getattr(tool, "handle_tool_error", None)
-
-    def handle(e: ToolException):
-        if isinstance(e, _LocalToolError):
-            return str(e)
-        if callable(prev):
-            return prev(e)
-        if prev:  # True/str: langchain's own default rendering
-            return str(e)
-        raise e
-
-    tool.handle_tool_error = handle
+    tool.coroutine = converting
 
 
 def _fix_tool(tool: BaseTool) -> BaseTool:
-    _install_error_handler(tool)
-    if (orig := getattr(tool, "coroutine", None)) is not None:
-        name = tool.name
-
-        async def capped(*args, **kwargs):
-            # A bare TimeoutError or transport failure would bypass
-            # handle_tool_error (only ToolException routes there), escape the
-            # tool boundary, and kill the whole agent turn -- in the review graph
-            # a timeout would even be misread as the review-level wall-clock.
-            # Convert both to the ToolException channel so the agent sees a clean
-            # error message and continues the turn.
-            try:
-                async with asyncio.timeout(_TOOL_CALL_TIMEOUT_S):
-                    out = await orig(*args, **kwargs)
-            except TimeoutError:
-                log.warning("tool %s: timed out after %ds", name, _TOOL_CALL_TIMEOUT_S)
-                raise _LocalToolError(
-                    f"tool {name} timed out after {_TOOL_CALL_TIMEOUT_S}s"
-                ) from None
-            except _TRANSPORT_ERRORS as e:
-                # The server process died (stdio child crashed, was OOM-killed,
-                # or lost its credentials and exited). Sessions are opened once
-                # at startup and never reopened, so every later call to this
-                # server fails the same way until the daemon restarts -- but that
-                # must degrade to a visible per-call error, not take down an
-                # unrelated agent turn with a traceback.
-                log.warning("tool %s: transport failed: %s", name, e)
-                raise _LocalToolError(
-                    f"tool {name} failed: its MCP server is unreachable"
-                    f" ({type(e).__name__}); it stays unavailable until restart"
-                ) from None
-            # Log the raw size and which tool produced it: this is the per-tool
-            # evidence for what inflates a turn's context, since every result
-            # below the cap is re-sent on subsequent model calls until pruned.
-            raw = _result_chars(out)
-            if raw:
-                log.info(
-                    "tool %s result: %d chars%s",
-                    name,
-                    raw,
-                    " (capped)" if raw > MAX_TOOL_RESULT_CHARS else "",
-                )
-            # content_and_artifact tools return (content, artifact).
-            if isinstance(out, tuple) and len(out) == 2:
-                return (_truncated(out[0]), out[1])
-            return _truncated(out)
-
-        tool.coroutine = capped
+    # Transport conversion sits inside the guard so its timeout bounds the
+    # whole call, including a transport that never answers.
+    _convert_transport_errors(tool)
+    guard_tool(tool, timeout_s=_TOOL_CALL_TIMEOUT_S)
     schema = getattr(tool, "args_schema", None)
     if isinstance(schema, dict):
         _clean_schema(schema)

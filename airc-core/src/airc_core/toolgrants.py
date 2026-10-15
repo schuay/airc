@@ -12,6 +12,8 @@ from enum import StrEnum
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+from airc_core.toolguard import guard_tool
+
 log = logging.getLogger(__name__)
 
 
@@ -182,7 +184,14 @@ class ResolvedToolGrant:
         return self.wrap(tools, source)
 
     def wrap(self, tools: Sequence[object], source: ToolSource) -> list:
-        wrapped = list(tools)
+        """Guard the tools, apply the grant's wrapper, and validate names.
+
+        The guard goes on first so a grant wrapper (icompleteu passes
+        pin_repo_reads here) is outer and the guard inner: the pin rewrites the
+        arguments, the guard caps the result. A tool that is already guarded
+        (MCP tools, guarded at load) is left as it is.
+        """
+        wrapped = [guard_tool(tool, timeout_s=None) for tool in tools]
         if self.wrapper is not None:
             wrapped = list(self.wrapper(wrapped))
         return select_tools(

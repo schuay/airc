@@ -14,11 +14,11 @@ from airc_core.agent import (
     prune_to_recent_tool_results,
     truncate_oversized_tool_results,
 )
-from airc_core.mcptools import (
+from airc_core.mcptools import _fix_tool
+from airc_core.toolguard import (
     MAX_TOOL_RESULT_CHARS,
-    _fix_tool,
-    _result_chars,
-    _truncated,
+    result_chars,
+    truncated,
 )
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -57,7 +57,7 @@ def test_tool_result_size_is_logged(caplog):
         coroutine=output, name="big_dump", description="d"
     )
     _fix_tool(tool)
-    with caplog.at_level(logging.INFO, logger="airc_core.mcptools"):
+    with caplog.at_level(logging.INFO, logger="airc_core.toolguard"):
         asyncio.run(tool.coroutine())
     assert "tool big_dump result: 1234 chars" in caplog.text
 
@@ -84,7 +84,7 @@ def test_mcp_list_content_result_is_capped():
     )
     _fix_tool(tool)
     content, artifact = asyncio.run(tool.coroutine())
-    assert _result_chars((content, artifact)) < MAX_TOOL_RESULT_CHARS + 200
+    assert result_chars((content, artifact)) < MAX_TOOL_RESULT_CHARS + 200
     assert "output truncated (10000 more chars)" in content[0]["text"]
     assert artifact == {"structured": True}  # artifact passes through untouched
 
@@ -100,7 +100,7 @@ def test_mcp_list_content_size_is_logged(caplog):
         response_format="content_and_artifact",
     )
     _fix_tool(tool)
-    with caplog.at_level(logging.INFO, logger="airc_core.mcptools"):
+    with caplog.at_level(logging.INFO, logger="airc_core.toolguard"):
         asyncio.run(tool.coroutine())
     assert "tool grep result: 1234 chars" in caplog.text
 
@@ -111,7 +111,7 @@ def test_truncated_caps_combined_text_across_blocks():
         {"type": "image", "url": "u"},  # non-text block left intact
         {"type": "text", "text": "b" * 1000},
     ]
-    out = _truncated(blocks)
+    out = truncated(blocks)
     total = sum(len(b["text"]) for b in out if "text" in b)
     assert total <= MAX_TOOL_RESULT_CHARS + 200
     assert out[1] == {"type": "image", "url": "u"}
