@@ -264,3 +264,29 @@ async def test_the_configured_effort_reaches_make_model(tmp_path, monkeypatch):
     h._graph_for("t1", tmp_path, Report)
     assert seen["model_id"] == "anthropic:claude-opus-5"
     assert seen["kwargs"] == {"effort": "xhigh"}
+
+
+async def test_worktree_shell_is_not_cut_by_the_guard(tmp_path):
+    # shell takes its timeout from the model and is told to raise it for a
+    # build; the guard's default would clip that, so the spec opts out.
+    from airc_core.toolgrants import ToolBuildContext, ToolGrant, ToolSource
+    from airc_core.toolguard import is_guarded
+    from deepagent.langgraph_harness import worktree_tool_catalog
+
+    catalog = worktree_tool_catalog()
+    spec = next(s for s in catalog.specs if s.name == "shell")
+    assert spec.timeout_s is None
+    grant = ToolGrant(catalog, required=("shell",))
+    (shell,) = grant.resolve(label="t").build(
+        ToolSource.WORKTREE, ToolBuildContext(workdir=tmp_path)
+    )
+    assert is_guarded(shell)
+    msg = await shell.ainvoke(
+        {
+            "type": "tool_call",
+            "name": "shell",
+            "args": {"command": "sleep 0.2; echo ok", "timeout": 400},
+            "id": "tc1",
+        }
+    )
+    assert "ok" in str(msg.content)

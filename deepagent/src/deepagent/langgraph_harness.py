@@ -291,7 +291,9 @@ def worktree_tool_catalog() -> ToolCatalog:
     """
     return ToolCatalog(
         (
-            ToolSpec("shell", _shell_tool, ToolSource.WORKTREE),
+            # shell bounds itself: the model passes `timeout` and is told to
+            # raise it for a build, so no guard timeout can be right.
+            ToolSpec("shell", _shell_tool, ToolSource.WORKTREE, timeout_s=None),
             ToolSpec("read_file", _read_file_tool, ToolSource.WORKTREE),
             ToolSpec("edit_file", _edit_file_tool, ToolSource.WORKTREE),
             ToolSpec("write_file", _write_file_tool, ToolSource.WORKTREE),

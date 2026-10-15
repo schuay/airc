@@ -12,7 +12,7 @@ from enum import StrEnum
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-from airc_core.toolguard import guard_tool
+from airc_core.toolguard import DEFAULT_TOOL_TIMEOUT_S, guard_tool
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +35,18 @@ class ToolBuildContext:
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """The name and deferred constructor for one non-MCP tool."""
+    """The name and deferred constructor for one non-MCP tool.
+
+    `timeout_s` is the guard's per-call bound (see toolguard). `None` opts out
+    for a tool that bounds its own wait: run_d8 waits on a build queue, the
+    worktree shell takes a timeout from the model. It is an opt-out, not a
+    tunable; a tool that is neither leaves the default.
+    """
 
     name: str
     factory: Callable[[ToolBuildContext], object]
     source: ToolSource = ToolSource.NATIVE
+    timeout_s: float | None = DEFAULT_TOOL_TIMEOUT_S
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -174,13 +181,17 @@ class ResolvedToolGrant:
         context = context or ToolBuildContext()
         if source is ToolSource.WORKTREE and context.workdir is None:
             raise ValueError(f"{self.label}: worktree tools need a workdir")
-        tools = [spec.factory(context) for spec in self.specs if spec.source is source]
-        expected = [spec.name for spec in self.specs if spec.source is source]
+        specs = [spec for spec in self.specs if spec.source is source]
+        tools = [spec.factory(context) for spec in specs]
+        expected = [spec.name for spec in specs]
         actual = [getattr(tool, "name", "") for tool in tools]
         if actual != expected:
             raise ValueError(
                 f"{self.label}: tool factories returned {actual!r}, expected {expected!r}"
             )
+        # Guard here with the spec's timeout; wrap() then sees them as guarded.
+        for spec, tool in zip(specs, tools, strict=True):
+            guard_tool(tool, timeout_s=spec.timeout_s)
         return self.wrap(tools, source)
 
     def wrap(self, tools: Sequence[object], source: ToolSource) -> list:
@@ -189,9 +200,11 @@ class ResolvedToolGrant:
         The guard goes on first so a grant wrapper (icompleteu passes
         pin_repo_reads here) is outer and the guard inner: the pin rewrites the
         arguments, the guard caps the result. A tool that is already guarded
-        (MCP tools, guarded at load) is left as it is.
+        (built by build() with its spec's timeout, or an MCP tool guarded at
+        load) is left as it is; a prebuilt tool handed in directly gets the
+        default timeout.
         """
-        wrapped = [guard_tool(tool, timeout_s=None) for tool in tools]
+        wrapped = [guard_tool(tool) for tool in tools]
         if self.wrapper is not None:
             wrapped = list(self.wrapper(wrapped))
         return select_tools(

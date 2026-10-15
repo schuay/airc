@@ -216,3 +216,36 @@ async def test_grant_wrapper_is_outside_the_guard():
     assert seen == [True]
     out = str((await tool.ainvoke(_call(tool, "big"))).content)
     assert len(out) < MAX_TOOL_RESULT_CHARS + 200
+
+
+async def test_build_applies_the_specs_timeout():
+    async def hang() -> str:
+        await asyncio.sleep(30)
+        return "never"
+
+    def tool(_):
+        return StructuredTool.from_function(
+            coroutine=hang, name="hang", description="d"
+        )
+
+    grant = ToolGrant(
+        ToolCatalog(
+            (
+                ToolSpec("hang", tool, timeout_s=0.01),
+                ToolSpec("free", lambda _: _slow_tool("free"), timeout_s=None),
+            )
+        ),
+        required=("hang", "free"),
+    )
+    cut, free = grant.resolve(label="t").build(ToolSource.NATIVE)
+    msg = await cut.ainvoke(_call(cut, "hang"))
+    assert msg.status == "error" and "timed out" in str(msg.content)
+    assert (await free.ainvoke(_call(free, "free"))).content == "done"
+
+
+def _slow_tool(name, delay=0.05):
+    async def slow() -> str:
+        await asyncio.sleep(delay)
+        return "done"
+
+    return StructuredTool.from_function(coroutine=slow, name=name, description="d")
