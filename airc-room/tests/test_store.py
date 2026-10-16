@@ -496,3 +496,41 @@ def test_plugin_state_appears_in_a_deployed_db_without_losing_rows(tmp_path):
     reopened = Store(path)
     assert reopened.get_plugin_state("ns", "k") == (1, "payload")
     assert reopened.get_thread(1).title == "old"
+
+
+def test_pending_bug_source_context_migration_and_reopen(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "queue.db"
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE pending_bugs (finding_id TEXT PRIMARY KEY, title TEXT,"
+        " body TEXT, repo TEXT, commit_hash TEXT, author_email TEXT, isolates INTEGER,"
+        " thread_id INTEGER, attempts INTEGER, created_ts REAL, last_ts REAL)"
+    )
+    db.execute(
+        "INSERT INTO pending_bugs VALUES"
+        " ('old', 'title', 'report', 'repo', 'revision', '', NULL, NULL, 2, 1, 1)"
+    )
+    db.commit()
+    db.close()
+    store = Store(path)
+    assert store.list_pending_bugs()[0]["source_context"] == "{}"
+    context = '{"finding_file":"src/a.cc","commit_fetch_ref":"refs/changes/1"}'
+    store.enqueue_pending_bug(
+        finding_id="new",
+        title="title",
+        body="report",
+        repo="repo",
+        commit_hash="revision",
+        author_email="",
+        isolates=None,
+        thread_id=None,
+        source_context=context,
+    )
+    store.close()
+    store = Store(path)
+    rows = {r["finding_id"]: r for r in store.list_pending_bugs()}
+    assert rows["new"]["source_context"] == context
+    assert rows["old"]["attempts"] == 2
+    store.close()

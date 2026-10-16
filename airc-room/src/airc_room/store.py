@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS pending_bugs (
     repo TEXT NOT NULL,
     commit_hash TEXT NOT NULL,
     author_email TEXT NOT NULL,
+    source_context TEXT NOT NULL DEFAULT '{}',
     isolates INTEGER,            -- 1 regression / 0 pre-existing / NULL unknown
     thread_id INTEGER,           -- where to post the "filed" follow-up
     attempts INTEGER NOT NULL,
@@ -303,6 +304,12 @@ class Store:
     def _migrate(self) -> None:
         # CREATE TABLE IF NOT EXISTS leaves pre-existing tables alone, so new
         # columns need an explicit additive migration. Keep these idempotent.
+        bcols = {r[1] for r in self._db.execute("PRAGMA table_info(pending_bugs)")}
+        if "source_context" not in bcols:
+            self._db.execute(
+                "ALTER TABLE pending_bugs ADD COLUMN source_context TEXT NOT NULL"
+                " DEFAULT '{}'"
+            )
         tcols = {r[1] for r in self._db.execute("PRAGMA table_info(threads)")}
         if "chat_key" not in tcols:
             self._db.execute(
@@ -947,6 +954,7 @@ class Store:
         author_email: str,
         isolates: bool | None,
         thread_id: int | None,
+        source_context: str = "{}",
     ) -> None:
         """Queue (or refresh) a bug to file. Idempotent on finding_id: a re-run
         overwrites the content but preserves the original created_ts and does not
@@ -955,12 +963,13 @@ class Store:
         self._db.execute(
             """INSERT INTO pending_bugs
                  (finding_id, title, body, repo, commit_hash, author_email,
-                  isolates, thread_id, attempts, created_ts, last_ts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                  isolates, thread_id, source_context, attempts, created_ts, last_ts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                ON CONFLICT(finding_id) DO UPDATE SET
                  title=excluded.title, body=excluded.body,
                  author_email=excluded.author_email, isolates=excluded.isolates,
-                 thread_id=excluded.thread_id, last_ts=excluded.last_ts""",
+                 thread_id=excluded.thread_id, source_context=excluded.source_context,
+                 last_ts=excluded.last_ts""",
             (
                 finding_id,
                 title,
@@ -970,6 +979,7 @@ class Store:
                 author_email,
                 None if isolates is None else int(isolates),
                 thread_id,
+                source_context,
                 now,
                 now,
             ),
@@ -987,7 +997,7 @@ class Store:
         bool|None). The drainer walks these each sweep."""
         cur = self._db.execute(
             """SELECT finding_id, title, body, repo, commit_hash, author_email,
-                      isolates, thread_id, attempts, created_ts, last_ts
+                      isolates, thread_id, attempts, created_ts, last_ts, source_context
                  FROM pending_bugs ORDER BY created_ts"""
         )
         cols = [c[0] for c in cur.description]
