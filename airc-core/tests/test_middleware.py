@@ -121,6 +121,71 @@ async def _noop_sleep(_):
     return None
 
 
+# ── _LoggedModelRetry: the agent-turn retry says what it did ─────────────────
+
+
+def _logged_retry(max_retries):
+    from airc_core import agent
+
+    return agent._LoggedModelRetry(
+        retry_on=agent._is_retryable,
+        on_failure="error",
+        max_retries=max_retries,
+        initial_delay=0,
+        backoff_factor=0,
+        max_delay=0,
+    )
+
+
+def _scripted_handler(errors):
+    box = list(errors)
+
+    async def handler(_req):
+        if box:
+            raise box.pop(0)
+        return type("R", (), {"result": [AIMessage("ok")]})()
+
+    return handler
+
+
+async def test_logged_retry_logs_one_line_per_resend(caplog):
+    retry = _logged_retry(3)
+    handler = _scripted_handler([RuntimeError("503 overloaded")] * 2)
+    with caplog.at_level(logging.INFO, logger="airc_core.agent"):
+        out = await retry.awrap_model_call(_Req(0, [HumanMessage("go")]), handler)
+    assert out.result[0].text == "ok"
+    lines = [r for r in caplog.records if "model retry" in r.message]
+    assert [r.levelno for r in lines] == [logging.INFO, logging.INFO]
+    assert lines[0].message.startswith("model retry 1/3 after transient (")
+    assert lines[1].message.startswith("model retry 2/3 after transient (")
+
+
+async def test_logged_retry_warns_once_when_the_budget_is_spent(caplog):
+    retry = _logged_retry(2)
+    handler = _scripted_handler([RuntimeError("503 overloaded")] * 9)
+    with (
+        caplog.at_level(logging.INFO, logger="airc_core.agent"),
+        pytest.raises(RuntimeError),
+    ):
+        await retry.awrap_model_call(_Req(0, [HumanMessage("go")]), handler)
+    lines = [r for r in caplog.records if "model retry" in r.message]
+    # Two resends logged, then the give-up; the final failed attempt is not
+    # logged as a retry because none follows it.
+    assert [r.levelno for r in lines] == [logging.INFO, logging.INFO, logging.WARNING]
+    assert lines[-1].message.startswith("model retry exhausted after 3 attempts (")
+
+
+async def test_logged_retry_is_silent_on_a_non_transient(caplog):
+    retry = _logged_retry(2)
+    handler = _scripted_handler([ValueError("malformed request")])
+    with (
+        caplog.at_level(logging.INFO, logger="airc_core.agent"),
+        pytest.raises(ValueError),
+    ):
+        await retry.awrap_model_call(_Req(0, [HumanMessage("go")]), handler)
+    assert not [r for r in caplog.records if "model retry" in r.message]
+
+
 def test_is_transient_decides_on_structured_code_when_present():
     from airc_core.agent import _is_transient
     from google.api_core import exceptions as gexc
@@ -277,7 +342,7 @@ def test_shared_stack_present_for_any_model():
         "_ContextBudget",
         "_ToolErrorBoundary",
         "_DropEmptyResponses",
-        "ModelRetryMiddleware",
+        "_LoggedModelRetry",
         "_EmptyCandidateRetry",
         "ClassifierStopMiddleware",  # inner to the retries: a stop is never resent
         "AnthropicPromptCachingMiddleware",

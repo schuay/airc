@@ -398,6 +398,53 @@ def retrying(model):
     return RunnableLambda(_call)
 
 
+class _LoggedModelRetry(ModelRetryMiddleware):
+    """ModelRetryMiddleware that says what it did.
+
+    Upstream retries silently and re-raises silently, so a turn that died to a
+    transient leaves no trace of whether this layer saw the error, retried it,
+    or let it through. Two lines, both bounded by _short_error: one INFO per
+    resend, one WARNING when the budget is spent. A non-retryable error is not
+    logged here; it propagates and whoever catches it reports it.
+    """
+
+    async def awrap_model_call(self, request, handler):
+        attempts = 0
+
+        async def counted(req):
+            nonlocal attempts
+            attempts += 1
+            try:
+                return await handler(req)
+            except GraphBubbleUp:
+                raise
+            except Exception as e:
+                # Upstream accepts a predicate or a tuple of types for retry_on.
+                retryable = (
+                    self.retry_on(e)
+                    if callable(self.retry_on)
+                    else isinstance(e, self.retry_on)
+                )
+                if attempts <= self.max_retries and retryable:
+                    log.info(
+                        "model retry %d/%d after transient (%s)",
+                        attempts,
+                        self.max_retries,
+                        _short_error(e),
+                    )
+                raise
+
+        return await super().awrap_model_call(request, counted)
+
+    def _handle_failure(self, exc, attempts_made):
+        log.warning(
+            "model retry exhausted after %d attempts (%s)",
+            attempts_made,
+            _short_error(exc),
+        )
+        return super()._handle_failure(exc, attempts_made)
+
+
 _ELIDED_TOOL_RESULT = "[tool result from an earlier turn elided to save context]"
 # Backstop ceiling on a single intact tool result's characters in a request.
 # The eliding pruners always keep the most recent result intact, so one result
@@ -2642,7 +2689,7 @@ def base_middleware(
         # transient provider errors; a zero-part empty candidate is owned by
         # _EmptyCandidateRetry (which mutates the request on its retry), not
         # retried here -- an identical resend reproduces the deterministic empty.
-        ModelRetryMiddleware(
+        _LoggedModelRetry(
             retry_on=_is_retryable,
             on_failure="error",
             max_retries=_RETRY_MAX,
