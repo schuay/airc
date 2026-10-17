@@ -34,6 +34,17 @@ def test_generic_is_the_fallback_and_says_so():
     assert GENERIC.generic and price_for("anthropic:claude-opus-5").generic is False
 
 
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash"])
+def test_deepseek_flash_uses_published_peak_rates(model):
+    p = price_for(f"deepseek:{model}")
+    assert not p.generic
+    assert (p.rate.input, p.rate.cache_read, p.rate.output) == (0.3, 0.006, 1.2)
+    assert p.cost(
+        prompt_tokens=1_000_000, cache_read=800_000, output=100_000
+    ).total == pytest.approx(0.1848)
+    assert "off-peak" in p.note and "https://api-docs.deepseek.com" in p.note
+
+
 def test_every_listing_has_a_date_and_the_generic_ratios_hold():
     for name in listed_models():
         p = price_for(name)

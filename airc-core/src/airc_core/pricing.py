@@ -110,9 +110,23 @@ class Price(BaseModel):
 
 _READ = date(2026, 9, 17)
 
+_DEEPSEEK_FLASH = Price(
+    model="deepseek-flash",
+    rate=Rate(input=0.3, cache_read=0.006, output=1.2),
+    as_of=date(2026, 10, 17),
+    note=(
+        "https://api-docs.deepseek.com/quick_start/pricing/; V4.1 Flash,"
+        " including the legacy deepseek-v4-flash name. Peak rates used for"
+        " all calls; off-peak rates are half. Peak: Mon-Fri 01:00-04:00 and"
+        " 06:00-10:00 UTC, excluding Chinese public holidays."
+    ),
+)
+
 _LISTED: dict[str, Price] = {
     p.model: p
     for p in (
+        _DEEPSEEK_FLASH,
+        _DEEPSEEK_FLASH.model_copy(update={"model": "deepseek-v4-flash"}),
         Price(
             model="gemini-3.1-pro-preview",
             rate=Rate(input=2.0, cache_read=0.2, output=12.0, cache_storage_hour=4.5),
