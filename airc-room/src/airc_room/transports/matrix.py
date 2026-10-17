@@ -357,21 +357,27 @@ class MatrixTransport:
         """Map an inbound event to a room thread id.
 
         Flat by default: everything from a room routes to one room thread keyed
-        by (room, ""). With threads on, an event carrying an m.thread relation
-        routes to the room thread keyed by (room, thread root event id), so a
-        reply in a Matrix thread continues the matching airc thread.
+        by (room, ""). With threads on, a root event keys the room thread by its
+        own event id and an m.thread child keys it by the referenced root id, so
+        the root and every reply continue one airc thread.
         """
-        root = ""
-        if self._cfg.use_threads:
-            relates = (event.source.get("content", {}) or {}).get("m.relates_to", {})
-            if relates.get("rel_type") == "m.thread":
-                root = relates.get("event_id", "") or ""
+        root = self._conversation_ref(event)
         existing = self._store.chat_thread_id(room.room_id, root)
         if existing is not None:
             return existing
         thread = self._room.create_thread(room.display_name or "matrix")
         self._store.link_chat_thread(room.room_id, root, thread.id)
         return thread.id
+
+    def _conversation_ref(self, event: RoomMessageText) -> str:
+        if not self._cfg.use_threads:
+            return ""
+        relates = (event.source.get("content", {}) or {}).get("m.relates_to", {})
+        if relates.get("rel_type") == "m.thread":
+            root = relates.get("event_id")
+            if isinstance(root, str) and root:
+                return root
+        return event.event_id
 
     async def aclose(self) -> None:
         # Stop every refresh loop and clear its indicator before the client

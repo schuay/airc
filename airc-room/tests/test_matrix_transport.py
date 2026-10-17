@@ -299,20 +299,67 @@ async def test_inbound_flat_routes_all_to_one_thread(tmp_path, monkeypatch):
     assert len(store.list_threads()) == 1
 
 
-async def test_inbound_threaded_routes_by_relation(tmp_path, monkeypatch):
+async def test_inbound_threaded_root_and_reply_share_context(tmp_path, monkeypatch):
     t, _room, store, _client = _make(tmp_path, monkeypatch, use_threads=True)
     fr = _FakeRoom("!fam:example.org")
-    # A root message (no relation) and a reply in its thread land in the SAME
-    # airc thread; an unrelated root opens a second.
     await t._on_message(fr, _FakeEvent("@bob:example.org", "root", "$root:example.org"))
     reply_rel = {"rel_type": "m.thread", "event_id": "$root:example.org"}
     await t._on_message(
         fr, _FakeEvent("@ann:example.org", "reply", "$r:example.org", reply_rel)
     )
-    # The reply's thread root ($root) maps to its own airc thread; the bare root
-    # message mapped to (room, "") -- so this is 2 threads, and the reply thread
-    # is keyed on the relation.
-    assert store.chat_thread_id("!fam:example.org", "$root:example.org") is not None
+    thread_id = store.chat_thread_id("!fam:example.org", "$root:example.org")
+    assert thread_id is not None
+    assert len(store.list_threads()) == 1
+    assert [message.text for message in store.thread_messages(thread_id)] == [
+        "root",
+        "reply",
+    ]
+
+
+async def test_inbound_threaded_top_level_messages_are_separate(tmp_path, monkeypatch):
+    t, _room, store, _client = _make(tmp_path, monkeypatch, use_threads=True)
+    fr = _FakeRoom("!fam:example.org")
+    await t._on_message(fr, _FakeEvent("@bob:example.org", "one", "$a:example.org"))
+    await t._on_message(fr, _FakeEvent("@ann:example.org", "two", "$b:example.org"))
+    first = store.chat_thread_id("!fam:example.org", "$a:example.org")
+    second = store.chat_thread_id("!fam:example.org", "$b:example.org")
+    assert first is not None and second is not None and first != second
+
+
+async def test_inbound_threaded_first_reply_targets_human_root(tmp_path, monkeypatch):
+    t, _room, store, client = _make(tmp_path, monkeypatch, use_threads=True)
+    fr = _FakeRoom("!fam:example.org")
+    await t._on_message(fr, _FakeEvent("@bob:example.org", "root", "$root:example.org"))
+    thread_id = store.chat_thread_id("!fam:example.org", "$root:example.org")
+    await t.deliver(_msg(thread_id, "gc", MessageKind.AGENT, "answer"))
+    relation = client.sent[0][1]["m.relates_to"]
+    assert relation["event_id"] == "$root:example.org"
+    assert relation["m.in_reply_to"]["event_id"] == "$root:example.org"
+
+
+async def test_inbound_threaded_ignores_existing_flat_mapping(tmp_path, monkeypatch):
+    t, room, store, _client = _make(tmp_path, monkeypatch, use_threads=True)
+    flat_thread = room.create_thread("flat")
+    store.link_chat_thread("!fam:example.org", "", flat_thread.id)
+    fr = _FakeRoom("!fam:example.org")
+    await t._on_message(fr, _FakeEvent("@bob:example.org", "root", "$root:example.org"))
+    threaded = store.chat_thread_id("!fam:example.org", "$root:example.org")
+    assert threaded is not None and threaded != flat_thread.id
+
+
+async def test_inbound_malformed_thread_relation_is_isolated(tmp_path, monkeypatch):
+    t, _room, store, _client = _make(tmp_path, monkeypatch, use_threads=True)
+    fr = _FakeRoom("!fam:example.org")
+    malformed = {"rel_type": "m.thread"}
+    await t._on_message(
+        fr, _FakeEvent("@bob:example.org", "one", "$a:example.org", malformed)
+    )
+    await t._on_message(
+        fr, _FakeEvent("@ann:example.org", "two", "$b:example.org", malformed)
+    )
+    first = store.chat_thread_id("!fam:example.org", "$a:example.org")
+    second = store.chat_thread_id("!fam:example.org", "$b:example.org")
+    assert first is not None and second is not None and first != second
 
 
 # -- typing / lifecycle -------------------------------------------------------
