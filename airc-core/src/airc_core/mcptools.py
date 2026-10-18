@@ -220,7 +220,6 @@ class _HTTPSession:
         self.name = name
         self.lock = asyncio.Lock()
         self.task = None
-        self.stop = None
         self.current = None
         self.contract = None
         self.instructions = ""
@@ -228,7 +227,7 @@ class _HTTPSession:
         self.retry_at = 0.0
         self.backoff = 1.0
 
-    async def _own(self, ready, stop):
+    async def _own(self, ready):
         from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
 
         try:
@@ -274,7 +273,7 @@ class _HTTPSession:
                         self.contract = contract
                         self.instructions = init.instructions
                         ready.set_result({t.name: t for t in tools})
-                        await stop.wait()
+                        await asyncio.Future()
                     finally:
                         cleanup_limit.reschedule(
                             asyncio.get_running_loop().time() + _SERVER_CLOSE_TIMEOUT_S
@@ -309,10 +308,7 @@ class _HTTPSession:
                 )
             await self._close_generation()
             ready = asyncio.get_running_loop().create_future()
-            self.stop = asyncio.Event()
-            self.task = asyncio.create_task(
-                self._own(ready, self.stop), name=f"mcp:{self.name}"
-            )
+            self.task = asyncio.create_task(self._own(ready), name=f"mcp:{self.name}")
             try:
                 async with asyncio.timeout(_SERVER_START_TIMEOUT_S):
                     tools = await asyncio.shield(ready)
@@ -347,17 +343,22 @@ class _HTTPSession:
 
         @wraps(original)
         async def dispatch(*args, **kwargs):
-            try:
-                generation = await self.get()
-            except Exception as e:
-                log.warning("mcp: %s: reconnect failed: %s", self.name, e)
-                raise LocalToolError(
-                    f"MCP server {self.name} unavailable; call was not sent ({e})"
-                ) from None
+            generation = None
             try:
                 async with asyncio.timeout(_TOOL_CALL_TIMEOUT_S):
+                    try:
+                        generation = await self.get()
+                    except Exception as e:
+                        log.warning("mcp: %s: reconnect failed: %s", self.name, e)
+                        raise LocalToolError(
+                            f"MCP server {self.name} unavailable; call was not sent ({e})"
+                        ) from None
                     return await generation.call(name, args, kwargs)
             except TimeoutError:
+                if generation is None:
+                    raise LocalToolError(
+                        f"MCP server {self.name} reconnect timed out; call was not sent"
+                    ) from None
                 raise LocalToolError(
                     f"tool {self.name}__{name} timed out; outcome unknown;"
                     " call was not replayed. Inspect state before retrying"
@@ -379,7 +380,7 @@ class _HTTPSession:
 
         tool = tool.model_copy(deep=True, update={"coroutine": dispatch})
         tool.name = f"{self.name}__{name}"
-        return _fix_tool(tool, persistent_http=True)
+        return tool
 
     async def close(self):
         async with self.lock:
@@ -510,7 +511,10 @@ class MCPToolset:
                     )
                     self.tools = [t for t in self.tools if t.name != tool.name]
                 seen[tool.name] = srv
-                self.tools.append(_fix_tool(tool))
+                if connection.get("transport") in _HTTP_TRANSPORTS:
+                    self.tools.append(_fix_tool(tool, persistent_http=True))
+                else:
+                    self.tools.append(_fix_tool(tool))
         self.instructions = "\n\n".join(instructions)
         loaded = [s for s in self._mcp_servers if s not in failed]
         log.info("loaded %d MCP tools from %s", len(self.tools), ", ".join(loaded))

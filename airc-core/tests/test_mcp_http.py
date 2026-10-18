@@ -39,6 +39,7 @@ class HTTPServer:
         self.deleting = asyncio.Event()
         self.hang_list = False
         self.output_schema = None
+        self.initialize_delay = 0
         self.hang_initialize = False
         self.initializing = asyncio.Event()
         self.port = 0
@@ -89,6 +90,7 @@ class HTTPServer:
         self.posts.append((sid, message.method))
         if message.method == "initialize":
             self.initializing.set()
+            await asyncio.sleep(self.initialize_delay)
             if self.hang_initialize:
                 await self.release.wait()
             self.initializations += 1
@@ -499,3 +501,46 @@ async def test_changed_output_schema_is_rejected_before_tool_call(server):
         assert failed.status == "error"
         assert "changed tools or instructions" in str(failed.content)
         assert server.calls == []
+
+
+async def test_reconnect_wait_uses_tool_call_budget(server, monkeypatch):
+    from time import monotonic
+
+    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(mcptools, "_SERVER_START_TIMEOUT_S", 0.5)
+    async with MCPToolset({"test": server.config()}, {}) as ts:
+        server.sessions.clear()
+        assert (await invoke(ts)).status == "error"
+        server.hang_initialize = True
+        started = monotonic()
+        failed = await invoke(ts)
+        assert monotonic() - started < 0.25
+        assert failed.status == "error"
+        assert "call was not sent" in str(failed.content)
+        assert server.calls == []
+
+
+async def test_reconnect_and_execution_share_one_call_budget(server, monkeypatch):
+    monkeypatch.setattr(mcptools, "_TOOL_CALL_TIMEOUT_S", 0.2)
+    async with MCPToolset({"test": server.config()}, {}) as ts:
+        server.sessions.clear()
+        assert (await invoke(ts)).status == "error"
+        server.initialize_delay = 0.13
+
+        async def release_later():
+            await server.side_effect.wait()
+            await asyncio.sleep(0.13)
+            server.release.set()
+
+        release = asyncio.create_task(release_later())
+        try:
+            failed = await invoke(ts, "slow")
+            assert failed.status == "error"
+            assert "outcome unknown" in str(failed.content)
+            assert server.side_effect.is_set()
+            assert server.calls == [("2", "slow")]
+        finally:
+            release.cancel()
+            await asyncio.gather(release, return_exceptions=True)
+            server.release.set()
+        assert value(await invoke(ts)) == "1"
