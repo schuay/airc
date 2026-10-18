@@ -3,17 +3,10 @@
 
 """MCP tool loading and pattern-based filtering.
 
-Sessions are opened once at daemon startup and stay alive for the daemon's
-lifetime (the room is a long-running process; stateful servers like v8-utils
-benefit from a persistent subprocess). Nothing reopens one: a server that dies
-mid-life, or never started, stays gone until the daemon restarts. The cost is
-bounded: every failure mode (server-reported error, timeout, dead transport)
-is converted to tool-result text via
-handle_tool_error, so an unusable server degrades to per-call errors the agent
-can read and work around, never a traceback out of the turn.
-
-Tool names are exposed unprefixed; if two servers ever export the same name
-the second one wins and a warning is logged.
+HTTP sessions persist across calls. After transport/session loss, the failed call
+returns an unknown-outcome error without replay. A subsequent call reconnects;
+server session-local state may be lost. Reconnect requires unchanged tool schemas,
+metadata, descriptions and server instructions. Changed contracts require restart.
 
 This is suite-shared substrate: it takes the mcp-servers dict and tool_groups
 mapping directly (not a Config) and filters by tool-name patterns (not a
@@ -62,6 +55,7 @@ _STRIP_KEYS = {"additionalProperties", "$schema", "title"}
 # Expiry is treated like any other startup failure: log, drop the server, carry
 # on with the rest.
 _SERVER_START_TIMEOUT_S = 60
+_SERVER_CLOSE_TIMEOUT_S = 5
 
 # Per-call ceiling on one MCP tool execution, read when a tool is loaded. See
 # toolguard for the rationale.
@@ -72,10 +66,7 @@ __all__ = ["MAX_TOOL_RESULT_CHARS", "MCPToolset"]
 
 
 def _transport_errors() -> tuple[type[BaseException], ...]:
-    """Exception types signalling the server connection is gone, not that the
-    tool rejected the call. anyio raises these when the stdio child's streams
-    close; McpError covers the CONNECTION_CLOSED the session synthesises for
-    requests already in flight when that happens."""
+    """Exceptions rendered at the tool boundary; only _session_lost reconnects."""
     types: list[type[BaseException]] = []
     try:
         import anyio
@@ -89,6 +80,9 @@ def _transport_errors() -> tuple[type[BaseException], ...]:
         types.append(McpError)
     except ImportError:  # pragma: no cover -- no mcp: no transport to lose
         pass
+    import httpx
+
+    types.append(httpx.TransportError)
     return tuple(types)
 
 
@@ -117,14 +111,7 @@ def _clean_schema(schema: dict, top: bool = True) -> None:
 
 
 def _convert_transport_errors(tool: BaseTool) -> None:
-    """Raise a dead MCP connection as a LocalToolError the guard renders.
-
-    The server process died (stdio child crashed, was OOM-killed, or lost its
-    credentials and exited). Sessions are opened once at startup and never
-    reopened, so every later call to this server fails the same way until the
-    daemon restarts -- but that must degrade to a visible per-call error, not
-    take down an unrelated agent turn with a traceback.
-    """
+    """Render MCP failures through the guard's tool-error handler."""
     if (orig := getattr(tool, "coroutine", None)) is None:
         return
     name = tool.name
@@ -133,6 +120,8 @@ def _convert_transport_errors(tool: BaseTool) -> None:
         try:
             return await orig(*args, **kwargs)
         except _TRANSPORT_ERRORS as e:
+            if not _session_lost(e):
+                raise LocalToolError(f"MCP request failed: {e}") from None
             log.warning("tool %s: transport failed: %s", name, e)
             raise LocalToolError(
                 f"tool {name} failed: its MCP server is unreachable"
@@ -142,11 +131,11 @@ def _convert_transport_errors(tool: BaseTool) -> None:
     tool.coroutine = converting
 
 
-def _fix_tool(tool: BaseTool) -> BaseTool:
+def _fix_tool(tool: BaseTool, *, persistent_http: bool = False) -> BaseTool:
     # Transport conversion sits inside the guard so its timeout bounds the
     # whole call, including a transport that never answers.
     _convert_transport_errors(tool)
-    guard_tool(tool, timeout_s=_TOOL_CALL_TIMEOUT_S)
+    guard_tool(tool, timeout_s=None if persistent_http else _TOOL_CALL_TIMEOUT_S)
     schema = getattr(tool, "args_schema", None)
     if isinstance(schema, dict):
         _clean_schema(schema)
@@ -160,6 +149,269 @@ def _fix_tool(tool: BaseTool) -> BaseTool:
 
         schema.model_json_schema = classmethod(patched)
     return tool
+
+
+_HTTP_TRANSPORTS = {"http", "streamable_http", "streamable-http"}
+
+
+def _keep_idle_get_open(connection):
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    if "sse_read_timeout" in connection:
+        return
+    factory = connection.get("httpx_client_factory") or create_mcp_http_client
+
+    def create_client(**kwargs):
+        client = factory(**kwargs)
+
+        async def configure_get(request):
+            # SDK 1.28 stops GET retries after two idle read timeouts. An idle
+            # notification stream is healthy; retain POST and connection limits.
+            if request.method == "GET":
+                request.extensions["timeout"] = {
+                    **request.extensions.get("timeout", {}),
+                    "read": None,
+                }
+
+        client.event_hooks["request"].append(configure_get)
+        return client
+
+    connection["httpx_client_factory"] = create_client
+
+
+async def _finish_closing(awaitables):
+    closing = asyncio.gather(*awaitables, return_exceptions=True)
+    cancelled = None
+    while not closing.done():
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError as e:
+            cancelled = e
+    if cancelled is not None:
+        raise cancelled
+
+
+class _HTTPGeneration:
+    def __init__(self, tools, owner):
+        self.tools = tools
+        self.owner = owner
+
+    async def call(self, name, args, kwargs):
+        import anyio
+
+        call = asyncio.create_task(self.tools[name].coroutine(*args, **kwargs))
+        try:
+            done, _ = await asyncio.wait(
+                (call, self.owner), return_when=asyncio.FIRST_COMPLETED
+            )
+            if call in done:
+                return await call
+            raise anyio.ClosedResourceError
+        finally:
+            call.cancel()
+            await asyncio.gather(call, return_exceptions=True)
+
+
+class _HTTPSession:
+    """Own each generation's AnyIO scopes in one task, including shutdown."""
+
+    def __init__(self, client, name):
+        self.client = client
+        self.name = name
+        self.lock = asyncio.Lock()
+        self.task = None
+        self.stop = None
+        self.current = None
+        self.contract = None
+        self.instructions = ""
+        self.closed = False
+        self.retry_at = 0.0
+        self.backoff = 1.0
+
+    async def _own(self, ready, stop):
+        from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+
+        try:
+            async with asyncio.timeout(None) as cleanup_limit:
+                async with self.client.session(
+                    self.name, auto_initialize=False
+                ) as session:
+                    try:
+                        init = await session.initialize()
+                        raw_tools = []
+                        cursor = None
+                        for _ in range(1000):
+                            page = await session.list_tools(cursor=cursor)
+                            raw_tools.extend(page.tools)
+                            if not page.nextCursor:
+                                break
+                            cursor = page.nextCursor
+                        else:
+                            raise LocalToolError("MCP tools/list exceeded 1000 pages")
+                        contract = {
+                            t.name: t.model_dump(
+                                mode="json", by_alias=True, exclude_none=True
+                            )
+                            for t in raw_tools
+                        }
+                        tools = [
+                            convert_mcp_tool_to_langchain_tool(
+                                session, t, server_name=self.name
+                            )
+                            for t in raw_tools
+                        ]
+                        if self.contract is not None and (
+                            contract != self.contract
+                            or init.instructions != self.instructions
+                        ):
+                            ready.set_exception(
+                                LocalToolError(
+                                    f"MCP server {self.name} changed tools or instructions;"
+                                    " restart required to review the new contract"
+                                )
+                            )
+                            return
+                        self.contract = contract
+                        self.instructions = init.instructions
+                        ready.set_result({t.name: t for t in tools})
+                        await stop.wait()
+                    finally:
+                        cleanup_limit.reschedule(
+                            asyncio.get_running_loop().time() + _SERVER_CLOSE_TIMEOUT_S
+                        )
+        except BaseException as e:
+            if not ready.done():
+                ready.set_exception(e)
+            elif not isinstance(e, asyncio.CancelledError):
+                log.warning("mcp: %s: session ended: %s", self.name, e)
+
+    async def _close_generation(self):
+        if self.task is not None:
+            # Cancellation is delivered to the owner, never to an exit stack
+            # entered by another task.
+            self.task.cancel()
+            try:
+                await _finish_closing([self.task])
+            finally:
+                self.task = None
+                self.current = None
+        self.current = None
+
+    async def get(self):
+        async with self.lock:
+            if self.closed:
+                raise LocalToolError(f"MCP server {self.name} is closed")
+            if self.current is not None and not self.task.done():
+                return self.current
+            if asyncio.get_running_loop().time() < self.retry_at:
+                raise LocalToolError(
+                    f"MCP server {self.name} is unavailable; reconnect backoff active"
+                )
+            await self._close_generation()
+            ready = asyncio.get_running_loop().create_future()
+            self.stop = asyncio.Event()
+            self.task = asyncio.create_task(
+                self._own(ready, self.stop), name=f"mcp:{self.name}"
+            )
+            try:
+                async with asyncio.timeout(_SERVER_START_TIMEOUT_S):
+                    tools = await asyncio.shield(ready)
+                    self.current = _HTTPGeneration(tools, self.task)
+            except BaseException:
+                await self._close_generation()
+                if ready.done() and not ready.cancelled():
+                    ready.exception()
+                else:
+                    ready.cancel()
+                self.retry_at = asyncio.get_running_loop().time() + self.backoff
+                self.backoff = min(self.backoff * 2, 30)
+                raise
+            self.backoff = 1.0
+            log.info("mcp: %s: session ready", self.name)
+            return self.current
+
+    def invalidate(self, generation):
+        if self.current is generation:
+            self.current = None
+            log.warning(
+                "mcp: %s: session lost; next call reconnects; session-local state"
+                " may be lost",
+                self.name,
+            )
+
+    def wrap(self, tool):
+        from functools import wraps
+
+        name = tool.name
+        original = tool.coroutine
+
+        @wraps(original)
+        async def dispatch(*args, **kwargs):
+            try:
+                generation = await self.get()
+            except Exception as e:
+                log.warning("mcp: %s: reconnect failed: %s", self.name, e)
+                raise LocalToolError(
+                    f"MCP server {self.name} unavailable; call was not sent ({e})"
+                ) from None
+            try:
+                async with asyncio.timeout(_TOOL_CALL_TIMEOUT_S):
+                    return await generation.call(name, args, kwargs)
+            except TimeoutError:
+                raise LocalToolError(
+                    f"tool {self.name}__{name} timed out; outcome unknown;"
+                    " call was not replayed. Inspect state before retrying"
+                ) from None
+            except _TRANSPORT_ERRORS as e:
+                if _request_timed_out(e):
+                    raise LocalToolError(
+                        f"tool {self.name}__{name} timed out; outcome unknown;"
+                        " call was not replayed. Inspect state before retrying"
+                    ) from None
+                if _session_lost(e):
+                    self.invalidate(generation)
+                    raise LocalToolError(
+                        f"MCP server {self.name} session lost; outcome unknown;"
+                        " call was not replayed. A subsequent call reconnects;"
+                        " session-local state may be lost"
+                    ) from None
+                raise LocalToolError(f"MCP request failed: {e}") from None
+
+        tool = tool.model_copy(deep=True, update={"coroutine": dispatch})
+        tool.name = f"{self.name}__{name}"
+        return _fix_tool(tool, persistent_http=True)
+
+    async def close(self):
+        async with self.lock:
+            self.closed = True
+            await self._close_generation()
+
+
+def _request_timed_out(error):
+    from mcp.shared.exceptions import McpError
+
+    return (
+        isinstance(error, McpError)
+        and error.error.code == 408
+        and error.error.message.startswith("Timed out while waiting for response to ")
+    )
+
+
+def _session_lost(error):
+    import anyio
+    import httpx
+    from mcp.shared.exceptions import McpError
+    from mcp.types import CONNECTION_CLOSED
+
+    if isinstance(error, McpError):
+        return (
+            error.error.code == CONNECTION_CLOSED
+            and error.error.message == "Connection closed"
+        ) or (error.error.code == 32600 and error.error.message == "Session terminated")
+    return isinstance(
+        error,
+        (anyio.ClosedResourceError, anyio.BrokenResourceError, httpx.TransportError),
+    )
 
 
 class MCPToolset:
@@ -178,10 +430,18 @@ class MCPToolset:
         self._mcp_servers = mcp_servers
         self._tool_groups = tool_groups
         self._stack = contextlib.AsyncExitStack()
+        self._http_sessions: list[_HTTPSession] = []
         self.tools: list[BaseTool] = []
         self.instructions: str = ""
 
     async def __aenter__(self) -> Self:
+        try:
+            return await self._start()
+        except BaseException:
+            await self.__aexit__(None, None, None)
+            raise
+
+    async def _start(self) -> Self:
         if not self._mcp_servers:
             log.warning("no MCP servers configured; agents run without tools")
             return self
@@ -189,7 +449,11 @@ class MCPToolset:
         from langchain_mcp_adapters.client import MultiServerMCPClient
         from langchain_mcp_adapters.tools import load_mcp_tools
 
-        client = MultiServerMCPClient(self._mcp_servers)
+        connections = {name: dict(c) for name, c in self._mcp_servers.items()}
+        for connection in connections.values():
+            if connection.get("transport") in _HTTP_TRANSPORTS:
+                _keep_idle_get_open(connection)
+        client = MultiServerMCPClient(connections)
         instructions: list[str] = []
         seen: dict[str, str] = {}
         failed: list[str] = []
@@ -203,12 +467,21 @@ class MCPToolset:
             # already handles its absence (it resolves tools by pattern and
             # self-disables when the pattern matches nothing).
             try:
-                async with asyncio.timeout(_SERVER_START_TIMEOUT_S):
-                    sess = await self._stack.enter_async_context(
-                        client.session(srv, auto_initialize=False)
-                    )
-                    init_result = await sess.initialize()
-                    srv_tools = await load_mcp_tools(sess, server_name=srv)
+                connection = self._mcp_servers[srv]
+                if connection.get("transport") in _HTTP_TRANSPORTS:
+                    owner = _HTTPSession(client, srv)
+                    self._http_sessions.append(owner)
+                    generation = await owner.get()
+                    srv_tools = [owner.wrap(t) for t in generation.tools.values()]
+                    server_instructions = owner.instructions
+                else:
+                    async with asyncio.timeout(_SERVER_START_TIMEOUT_S):
+                        sess = await self._stack.enter_async_context(
+                            client.session(srv, auto_initialize=False)
+                        )
+                        init_result = await sess.initialize()
+                        srv_tools = await load_mcp_tools(sess, server_name=srv)
+                    server_instructions = init_result.instructions
             except TimeoutError:
                 log.error(
                     "mcp: %s: no response within %ds; continuing without it",
@@ -221,12 +494,13 @@ class MCPToolset:
                 log.exception("mcp: %s: failed to start; continuing without it", srv)
                 failed.append(srv)
                 continue
-            if init_result.instructions:
-                instructions.append(f"### {srv}\n{init_result.instructions}")
+            if server_instructions:
+                instructions.append(f"### {srv}\n{server_instructions}")
             for tool in srv_tools:
                 # Prefix tool name with server name to avoid collisions across servers.
                 # e.g., v8-utils__run_d8, gdb-mcp__backtrace
-                tool.name = f"{srv}__{tool.name}"
+                if connection.get("transport") not in _HTTP_TRANSPORTS:
+                    tool.name = f"{srv}__{tool.name}"
                 if tool.name in seen:
                     log.warning(
                         "tool %s from %s shadows the one from %s",
@@ -248,7 +522,10 @@ class MCPToolset:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        await self._stack.aclose()
+        try:
+            await _finish_closing([owner.close() for owner in self._http_sessions])
+        finally:
+            await self._stack.aclose()
 
     def has_group(self, name: str) -> bool:
         """Whether the MCP configuration defines `name`, including empty groups."""
