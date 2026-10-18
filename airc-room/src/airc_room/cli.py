@@ -67,11 +67,8 @@ def _configured_model_ids(cfg, personas) -> dict[str, str]:
     ids.setdefault("models.default", cfg.default_model)
     ids.setdefault("models.filter", cfg.filter_model)
     for p in personas.values():
-        # Resolve the "default"/"filter" role aliases to the concrete id so the
-        # format check below sees a real provider:model, not the alias word (and
-        # an aliased persona validates via the [models] entry it points at).
-        if p.model_id and p.model_id not in ("default", "filter"):
-            ids[f"agent {p.name} model"] = p.model_id
+        if p.model_id:
+            ids[f"agent {p.name} model"] = cfg.resolve_model(p.model_id)
     return ids
 
 

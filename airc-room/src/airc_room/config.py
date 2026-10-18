@@ -540,40 +540,26 @@ class Config:
     room_topic: str = "the room's topics"
 
     def resolve_profile(self, persona_model_id: str | None) -> ModelProfile:
-        """The [models] entry behind a persona's declared `model`.
+        """Resolve a [models] alias with its knobs, or a literal provider:model id.
 
-        A persona may name a real id (`provider:model`, always with a colon) or a
-        ROLE alias -- "default" or "filter" -- so a cheap generalist can ride the
-        same fast/cheap model the coordinator uses without hardcoding its id in
-        two places (change [models] filter and the persona follows). An empty
-        value (no `model` in agent.toml) is the default role. A real id passes
-        through untouched; the colon makes the alias set unambiguous.
-
-        The whole entry, not its id, because the depth a role was given is
-        part of what it names: the same Opus at `low` and at `xhigh` differ by
-        more in cost and behaviour than two sibling checkpoints do. A literal id
-        carries no knobs -- there is no entry to take them from, which is why the
-        way to set a persona's effort is to name the role and put the effort on
-        the [models] entry."""
+        Empty values select default. An unset filter inherits the default id
+        without its effort. Literal ids carry no profile knobs.
+        """
         role = persona_model_id or "default"
-        if role not in ("default", "filter"):
-            return ModelProfile(key="", id=persona_model_id)
+        if ":" in role:
+            return ModelProfile(key="", id=role)
         if profile := self.model_profiles.get(role):
             return profile
-        # No entry to read: [models] may be absent entirely, or filter may be
-        # falling back to the default id. The id field stays the one of
-        # record and the knobs stay empty -- a role does not inherit another
-        # role's depth, because the reason to name two roles is that they differ.
-        return ModelProfile(
-            key=role, id=self.default_model if role == "default" else self.filter_model
-        )
+        if role in ("default", "filter"):
+            return ModelProfile(
+                key=role,
+                id=self.default_model if role == "default" else self.filter_model,
+            )
+        # Preserve unknown names for startup's model-id validation to diagnose.
+        return ModelProfile(key="", id=role)
 
     def resolve_model(self, persona_model_id: str | None) -> str:
-        """The concrete model id for a persona's declared `model`.
-
-        The checkpoint alone, for the call sites that report or key on it (the
-        token ledger, the provider-key check). Building a model wants
-        resolve_profile, which also carries the effort."""
+        """Resolve the id used by provider checks, model construction and usage."""
         return self.resolve_profile(persona_model_id).id
 
 

@@ -29,6 +29,67 @@ def test_resolve_model_aliases_and_passthrough():
     assert cfg.resolve_model("openrouter:x/y") == "openrouter:x/y"
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_profile_with_arbitrary_alias(tmp_path, reverse):
+    entries = [
+        'v4-flash = "deepseek:deepseek-chat"',
+        'deepseek = "deepseek:deepseek-v3"',
+    ]
+    if reverse:
+        entries.reverse()
+    cfg = load_config(_write(tmp_path, "[models]\n" + "\n".join(entries)))
+    assert cfg.resolve_model("v4-flash") == "deepseek:deepseek-chat"
+    assert cfg.resolve_model("deepseek") == "deepseek:deepseek-v3"
+    assert cfg.resolve_model(None) == DEFAULT_MODEL
+    assert cfg.resolve_model("deepseek:literal") == "deepseek:literal"
+
+
+def test_custom_alias_carries_its_own_profile_and_passes_startup(tmp_path):
+    from types import SimpleNamespace
+
+    from airc_room.cli import _configured_model_ids, _validate_models
+
+    cfg = load_config(
+        _write(
+            tmp_path,
+            """
+        [models]
+        default = "google_vertexai:gemini-3.6-flash"
+        [models.review]
+        id = "google_anthropic_vertex:claude-opus-5"
+        effort = "xhigh"
+        [models.verify]
+        id = "google_anthropic_vertex:claude-opus-5"
+        effort = "low"
+    """,
+        )
+    )
+    assert cfg.resolve_profile("review") == cfg.model_profiles["review"]
+    assert cfg.resolve_profile("verify") == cfg.model_profiles["verify"]
+    persona = SimpleNamespace(name="reviewer", model_id="verify")
+    assert _configured_model_ids(cfg, {"reviewer": persona})[
+        "agent reviewer model"
+    ] == ("google_anthropic_vertex:claude-opus-5")
+    _validate_models(cfg, {"reviewer": persona})
+    assert (
+        cfg.resolve_profile("google_anthropic_vertex:claude-opus-5").call_kwargs == {}
+    )
+
+
+def test_unknown_alias_is_rejected_instead_of_selecting_another_profile(tmp_path):
+    from types import SimpleNamespace
+
+    from airc_room.cli import _validate_models
+
+    cfg = load_config(
+        _write(tmp_path, '[models]\ndefault = "deepseek:deepseek-chat"\n')
+    )
+    persona = SimpleNamespace(name="reviewer", model_id="typo")
+    with pytest.raises(SystemExit, match="agent reviewer model: typo"):
+        _validate_models(cfg, {"reviewer": persona})
+    assert cfg.resolve_model("typo") == "typo"
+
+
 def test_orchestrator_defaults(tmp_path):
     cfg = load_config(_write(tmp_path, ""))
     assert cfg.orchestrator.soft_turn_budget == 8

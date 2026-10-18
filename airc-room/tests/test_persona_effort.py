@@ -80,3 +80,22 @@ def test_an_entry_without_an_effort_sends_no_knob(tmp_path, built):
     cfg = Config(default_model="google_vertexai:gemini-3.6-flash")
     _build(tmp_path, cfg)
     assert built == [("google_vertexai:gemini-3.6-flash", {})]
+
+
+def test_custom_alias_effort_reaches_constructed_model(tmp_path, built):
+    cfg = Config(
+        default_model="google_vertexai:gemini-3.6-flash",
+        model_profiles={
+            "default": ModelProfile(
+                key="default", id="google_vertexai:gemini-3.6-flash"
+            ),
+            "review": ModelProfile(
+                key="review", id="google_anthropic_vertex:claude-opus-5", effort="xhigh"
+            ),
+            "verify": ModelProfile(
+                key="verify", id="google_anthropic_vertex:claude-opus-5", effort="low"
+            ),
+        },
+    )
+    _build(tmp_path, cfg, persona_model_id="verify")
+    assert built == [("google_anthropic_vertex:claude-opus-5", {"effort": "low"})]
