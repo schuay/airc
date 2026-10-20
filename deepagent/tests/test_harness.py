@@ -1,6 +1,12 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
+from deepagent import Disposition, Report
+
+
+class _CheckpointReport(Report):
+    accepted: bool = False
+
 
 def _common(tmp_path):
     from airc_core.config import CommonConfig
@@ -9,6 +15,32 @@ def _common(tmp_path):
     c.models = {"default": "google_genai:test"}
     c.token_db_path = tmp_path / "tokens.db"
     return c
+
+
+async def test_checkpoint_serializer_reads_legacy_application_reports_in_strict_mode(
+    tmp_path, monkeypatch
+):
+    from langgraph.checkpoint.serde import _msgpack
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    from deepagent import LangGraphHarness
+
+    report = _CheckpointReport(disposition=Disposition.COMPLETE, accepted=True)
+    legacy = JsonPlusSerializer(allowed_msgpack_modules=True).dumps_typed(report)
+
+    # Simulate LangGraph's announced default. The old saver used its implicit
+    # serializer, which no longer reconstructs application-owned report types.
+    monkeypatch.setattr(_msgpack, "STRICT_MSGPACK_ENABLED", True)
+    h = LangGraphHarness(
+        _common(tmp_path),
+        schemas={"stage": _CheckpointReport},
+        checkpoint_db=tmp_path / "cp.db",
+    )
+
+    restored = h._saver().serde.loads_typed(legacy)
+
+    assert restored == report
+    assert isinstance(restored, _CheckpointReport)
 
 
 async def test_checkpoint_db_gives_a_durable_saver(tmp_path):

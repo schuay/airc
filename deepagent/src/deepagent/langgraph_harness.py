@@ -61,7 +61,14 @@ from airc_tools.shell import run_shell as _run_shell
 from langchain_core.callbacks import BaseCallbackHandler
 from pydantic import BaseModel, Field
 
-from .harness import REPORT_TOOL_NAME, AgentResult, HarnessRun, Report, to_result
+from .harness import (
+    REPORT_TOOL_NAME,
+    AgentResult,
+    Disposition,
+    HarnessRun,
+    Report,
+    to_result,
+)
 from .journal import EventKind, Journal
 
 log = logging.getLogger(__name__)
@@ -632,11 +639,16 @@ class LangGraphHarness:
                 return self._saver_obj
             try:
                 import aiosqlite
+                from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
                 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
                 conn = aiosqlite.connect(str(self._checkpoint_db))
                 self._saver_conn = conn
-                self._saver_obj = AsyncSqliteSaver(conn)
+                checkpoint_types = [Report, Disposition, *self._schemas.values()]
+                serde = JsonPlusSerializer(
+                    allowed_msgpack_modules=list(dict.fromkeys(checkpoint_types))
+                )
+                self._saver_obj = AsyncSqliteSaver(conn, serde=serde)
             except Exception as e:
                 log.warning(
                     "checkpoint db %s unusable (%s); conversations stay in memory",
