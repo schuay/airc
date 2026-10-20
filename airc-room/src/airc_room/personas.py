@@ -24,10 +24,9 @@ The folder name is the agent's handle: lowercase, used to address it (a leading
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-
-import tomllib
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 

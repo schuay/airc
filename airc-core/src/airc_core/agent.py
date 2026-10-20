@@ -26,7 +26,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any, NotRequired
+from typing import Any, NotRequired
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -44,7 +44,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.utils import get_buffer_string
-from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.errors import GraphBubbleUp
 
@@ -1155,10 +1154,7 @@ _CALL_BUDGET_SRC = "call-budget"
 
 
 class _CallBudgetState(AgentState):
-    # UntrackedValue: per-turn (per graph invocation), never checkpointed, so on
-    # a checkpointed persona graph the count resets each turn instead of
-    # accumulating across the conversation's lifetime.
-    model_calls: NotRequired[Annotated[int, UntrackedValue]]
+    model_calls: NotRequired[int]
 
 
 class CallBudgetMiddleware(AgentMiddleware):
@@ -1210,6 +1206,12 @@ class CallBudgetMiddleware(AgentMiddleware):
         self._stages = dict(stages)
         self._persist = persist
         self._progress = progress
+
+    def before_agent(self, state, runtime) -> dict[str, int]:
+        return {"model_calls": 0}
+
+    async def abefore_agent(self, state, runtime) -> dict[str, int]:
+        return self.before_agent(state, runtime)
 
     def after_model(self, state, runtime) -> dict[str, Any]:
         return {"model_calls": state.get("model_calls", 0) + 1}
@@ -1275,8 +1277,7 @@ class CallBudgetMiddleware(AgentMiddleware):
 
 
 class _FinalAnswerState(AgentState):
-    # Per turn, never checkpointed, for the same reason as model_calls above.
-    answer_calls: NotRequired[Annotated[int, UntrackedValue]]
+    answer_calls: NotRequired[int]
 
 
 class FinalAnswerMiddleware(AgentMiddleware):
@@ -1335,6 +1336,12 @@ class FinalAnswerMiddleware(AgentMiddleware):
         self._refusal = refusal
         self._window = window
         self._close_after_reasks = close_after_reasks
+
+    def before_agent(self, state, runtime) -> dict[str, int]:
+        return {"answer_calls": 0}
+
+    async def abefore_agent(self, state, runtime) -> dict[str, int]:
+        return self.before_agent(state, runtime)
 
     def _closed(self, completed: int, state=None) -> bool:
         """Whether the model call made after `completed` calls has its tools shut.
@@ -1400,8 +1407,7 @@ class FinalAnswerMiddleware(AgentMiddleware):
 
 
 # Per-turn spend, accumulated by BudgetMiddleware and read by its own governors.
-# UntrackedValue for the same reason model_calls is: a budget is per graph
-# invocation, never carried across the turns of a checkpointed conversation.
+# before_agent resets it on every graph invocation.
 BUDGET_KEY = "budget"
 # Calls left in the turn as the two cache brakes read it: remaining dollars over
 # what the last call cost. A key of its own instead of a field of _Spend: a
@@ -1468,8 +1474,8 @@ class _Spend:
 
 
 class _BudgetState(AgentState):
-    budget: NotRequired[Annotated[_Spend, UntrackedValue]]
-    calls_left: NotRequired[Annotated[float, UntrackedValue]]
+    budget: NotRequired[_Spend]
+    calls_left: NotRequired[float]
 
 
 def _last_ai(messages: list):
@@ -1566,6 +1572,12 @@ class BudgetMiddleware(AgentMiddleware):
         self._window = window
         self._zero_cache_floor = zero_cache_floor
         self._zero_cache_trips = zero_cache_trips
+
+    def before_agent(self, state, runtime) -> dict[str, Any]:
+        return {BUDGET_KEY: _Spend(), CALLS_LEFT_KEY: math.inf}
+
+    async def abefore_agent(self, state, runtime) -> dict[str, Any]:
+        return self.before_agent(state, runtime)
 
     def _spend(self, state) -> _Spend:
         return state.get(BUDGET_KEY) or _Spend()
@@ -1677,8 +1689,8 @@ class BudgetMiddleware(AgentMiddleware):
         return self._refuse(request) or await handler(request)
 
 
-# Tag on the re-ask reminders this middleware injects. No longer needed
-# for the bound (the re-ask count is an UntrackedValue counter, below) -- kept
+# Tag on the re-ask reminders this middleware injects. Not needed for the bound
+# (the re-ask count is explicit state, below) -- kept
 # so a reminder is identifiable in logs/checkpoints and a test can assert it was
 # injected, the same self-tagging scheme GroundingReminderMiddleware uses.
 _REQUIRE_RESULT_SRC = "require_result_reask"
@@ -1692,15 +1704,14 @@ REASKS_KEY = "reasks"
 
 
 class _RequireResultState(AgentState):
-    # UntrackedValue: per-turn (per graph invocation), never checkpointed, so the
-    # re-ask count resets each turn instead of accumulating across a stage-loop's
-    # resumed turns on a shared thread. Verified to persist across a jump_to's
-    # supersteps within one ainvoke, which is the property the re-ask cap needs.
+    # Reset by before_agent for every graph invocation. These must use normal
+    # channels: UntrackedValue stopped carrying updates across jump_to supersteps
+    # in LangGraph 1.2.16, which made the re-ask bound ineffective.
     # The counter never touches the messages channel, so it cannot interact with
     # caching; counting marker messages would, since deleting a marker from the
     # cached prefix leaves no length change for the shrink guard to see.
-    reasks: NotRequired[Annotated[int, UntrackedValue]]
-    unparsable_reasks: NotRequired[Annotated[int, UntrackedValue]]
+    reasks: NotRequired[int]
+    unparsable_reasks: NotRequired[int]
 
 
 assert REASKS_KEY in _RequireResultState.__annotations__, (
@@ -1725,9 +1736,9 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
     On such a terminal, this re-asks: it appends a corrective message (a tail
     append via the messages reducer, cache-friendly like the grounding reminder)
     and jumps back to the model via the framework's jump_to mechanism. The bound
-    is a per-turn UntrackedValue counter (reasks) -- resets each turn (ainvoke),
-    survives the jump's supersteps within the turn, and never touches the messages
-    channel, so it cannot interact with prefix caching. It composes with the hard
+    is reset by before_agent on each turn, survives the jump's supersteps within
+    the turn, and never touches the messages channel, so it cannot interact with
+    prefix caching. It composes with the hard
     call cap without competing: ModelCallLimitMiddleware enforces in before_model,
     so a jump back to the model re-enters that check and an exhausted turn still
     ends there -- this only recovers turns that stopped early with budget to spare.
@@ -1744,8 +1755,18 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
         self._max = max_reasks
 
     @staticmethod
+    def _reset_counts() -> dict[str, int]:
+        return {REASKS_KEY: 0, "unparsable_reasks": 0}
+
+    def before_agent(self, state, runtime) -> dict[str, int]:
+        return self._reset_counts()
+
+    async def abefore_agent(self, state, runtime) -> dict[str, int]:
+        return self._reset_counts()
+
+    @staticmethod
     def _is_reask(m) -> bool:
-        # Not the bound (the UntrackedValue counter is); kept for observability so
+        # Not the bound (the state counter is); kept for observability so
         # a reminder is identifiable in the message list and a test can assert it.
         return (
             isinstance(m, HumanMessage)
@@ -1845,10 +1866,7 @@ class RequireStructuredResultMiddleware(AgentMiddleware):
 
 
 class _TimeBudgetState(AgentState):
-    # UntrackedValue: per-turn (per graph invocation), never checkpointed, so the
-    # turn-start stamp resets each turn instead of pinning the first turn's clock
-    # for the whole conversation's lifetime.
-    turn_start: NotRequired[Annotated[float, UntrackedValue]]
+    turn_start: NotRequired[float]
 
 
 class TimeBudgetMiddleware(AgentMiddleware):
@@ -1877,6 +1895,12 @@ class TimeBudgetMiddleware(AgentMiddleware):
         super().__init__()
         # (elapsed_seconds, nudge) ascending; the most-advanced crossed stage wins.
         self._stages = sorted(stages)
+
+    def before_agent(self, state, runtime) -> dict[str, float]:
+        return {"turn_start": time.monotonic()}
+
+    async def abefore_agent(self, state, runtime) -> dict[str, float]:
+        return self.before_agent(state, runtime)
 
     def before_model(self, state, runtime) -> dict[str, Any] | None:
         # Stamp the turn clock on the first call of this invocation only.
@@ -3314,11 +3338,10 @@ class _GrowingPrefixCache(AgentMiddleware):
 
         CallBudgetMiddleware keeps the per-turn count in graph state, and this
         middleware is installed outside it, so the key is visible here. Both are
-        UntrackedValues (never checkpointed), so a resumed thread starts a turn
-        with them unset -- which lands on the same branch as a graph built
-        without either middleware. All of those mean "no count to go on", and the
-        safe reading is the full cap: assuming zero calls left would permanently
-        suppress re-caching instead of merely mistiming it.
+        reset at the start of each turn. A graph built without either middleware
+        has neither key; that means "no count to go on", and the safe reading is
+        the full cap. Assuming zero calls left would permanently suppress
+        re-caching instead of merely mistiming it.
         """
         if (left := request.state.get(CALLS_LEFT_KEY)) is not None:
             return left

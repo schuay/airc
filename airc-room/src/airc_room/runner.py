@@ -20,7 +20,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TypeVar
+from typing import Self, TypeVar
 
 from airc_core import (
     MCPToolset,
@@ -45,7 +45,6 @@ from langchain_core.messages import (
     AIMessageChunk,
 )
 from pydantic import BaseModel
-from typing_extensions import Self
 
 from .config import Config
 from .personas import Persona

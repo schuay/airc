@@ -22,9 +22,9 @@ import copy
 import logging
 from collections.abc import Iterable
 from fnmatch import fnmatch
+from typing import Self
 
 from langchain_core.tools import BaseTool
-from typing_extensions import Self
 
 from airc_core.toolguard import (
     DEFAULT_TOOL_TIMEOUT_S,

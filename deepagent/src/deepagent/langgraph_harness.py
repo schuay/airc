@@ -133,10 +133,9 @@ _REQUIRE_RESULT_REMINDER = (
 )
 # Bound on re-asks per turn: enough to recover a chatty model that forgot the
 # tool more than once before complying, low enough that one which will not comply
-# cannot spin. The hard call cap is the outer backstop. (Per-turn, not per job:
-# the bound is an UntrackedValue counter, never checkpointed, so it resets on
-# each ainvoke instead of accumulating across a stage-loop's turns on a shared
-# thread. Nothing to clear on resume.)
+# cannot spin. The hard call cap is the outer backstop. The middleware resets the
+# counter on each ainvoke instead of accumulating across a stage-loop's turns on
+# a shared thread.
 _MAX_REASKS = 5
 # Graph nodes per model call (middleware hooks), so keep the recursion limit well
 # above _MAX_MODEL_CALLS * nodes/call: the call cap should govern, not a
@@ -908,9 +907,8 @@ class LangGraphHarness:
         # falls into the loop's dead-turn guard. Can't clear via ainvoke input --
         # structured_response is OmitFromInput -- so update the checkpoint directly.
         #
-        # No analogous clear for RequireStructuredResultMiddleware: its re-ask
-        # bound is an UntrackedValue counter (per-turn, resets each ainvoke), so
-        # the budget is already fresh on resume -- nothing to clear here.
+        # No analogous clear for RequireStructuredResultMiddleware: its
+        # before_agent hook resets the re-ask bound on each ainvoke.
         if resume and thread_live:
             # Order matters: the tool-call repair writes as the tools node and
             # must land before the channel clear, which leaves as_node to be

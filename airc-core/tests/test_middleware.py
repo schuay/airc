@@ -1761,7 +1761,7 @@ def test_require_result_fires_only_on_a_plain_text_ending():
     (msg,) = out["messages"]
     assert msg.content == "remind"
     assert mw._is_reask(msg)
-    # The per-turn UntrackedValue counter increments from 0 -> 1 (the bound).
+    # The per-turn counter increments from 0 -> 1 (the bound).
     assert out["reasks"] == 1
 
 
@@ -1778,8 +1778,8 @@ def test_require_result_ignores_a_delivered_or_in_progress_verdict():
 
 
 def test_require_result_is_bounded_by_the_per_turn_counter():
-    # The bound is a per-turn UntrackedValue counter (reasks): resets each ainvoke,
-    # survives the jump's supersteps within the turn. At or above the cap the
+    # The bound is a per-turn counter: it resets each ainvoke and survives the
+    # jump's supersteps within the turn. At or above the cap the
     # middleware gives up; below it re-asks and increments the counter.
     mw = RequireStructuredResultMiddleware("remind", max_reasks=2)
     at_cap = {"messages": [AIMessage("still prose")], "reasks": 2}
@@ -1814,7 +1814,7 @@ class _ScriptedToolModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(**spec))])
 
 
-def _verdict_agent(scripted, max_reasks=3, with_governors=False):
+def _verdict_agent(scripted, max_reasks=3, with_governors=False, checkpointer=None):
     from langchain.agents import create_agent
     from langchain.agents.middleware import ModelCallLimitMiddleware
     from langchain.agents.structured_output import ToolStrategy
@@ -1850,6 +1850,7 @@ def _verdict_agent(scripted, max_reasks=3, with_governors=False):
         system_prompt="sys",
         middleware=middleware,
         response_format=ToolStrategy(schema=Verdict, handle_errors=True),
+        checkpointer=checkpointer,
     )
     return model, agent
 
@@ -1882,6 +1883,26 @@ async def test_require_result_gives_up_bounded_when_never_complies():
     state = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
     assert state.get("structured_response") is None
     assert _reminders(state) == 3
+
+
+async def test_require_result_bound_survives_checkpointed_supersteps_and_resets():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    _model, agent = _verdict_agent(
+        [{"content": "always prose"}],
+        max_reasks=3,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "bounded"}}
+    state = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "go"}]}, config
+    )
+    assert _reminders(state) == 3
+
+    state = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": "again"}]}, config
+    )
+    assert _reminders(state) == 6
 
 
 async def test_require_result_is_inert_when_the_tool_is_called():

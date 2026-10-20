@@ -21,6 +21,7 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
 
 from deepagent import REPORT_TOOL_NAME, LangGraphHarness, Report
 
@@ -63,8 +64,14 @@ def _graph(model, saver):
     strat = ToolStrategy(schema=Report, handle_errors=True)
     strat.schema_specs[0].name = REPORT_TOOL_NAME
     return create_agent(
-        model, tools=[], response_format=strat, checkpointer=saver
+        model, tools=[_read], response_format=strat, checkpointer=saver
     ).with_config({"recursion_limit": 100})
+
+
+@tool
+def _read(value: str) -> str:
+    """Return a value."""
+    return value
 
 
 def _harness(tmp_path: Path, model, saver) -> LangGraphHarness:

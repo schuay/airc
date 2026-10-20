@@ -26,9 +26,8 @@ stuck one.
 import argparse
 import sqlite3
 import time
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 # The suite file every daemon is pointed at (see packaging/*.service), then the
 # older name, so a deploy that still uses it keeps resolving. This used to name

@@ -18,9 +18,8 @@ edge could appear in any of the five and this is the one that used to own the co
 from __future__ import annotations
 
 import ast
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
