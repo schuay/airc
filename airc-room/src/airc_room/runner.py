@@ -653,13 +653,18 @@ class AgentRunner:
 
             payload["memory_index"] = await memory_index(self._cfg.memory.path)
 
-        config = {"configurable": turn_config(thread_id, skey, gen, trigger_id)}
+        model_id = self._cfg.resolve_model(entry.persona.model_id)
+        config = {
+            "configurable": turn_config(
+                thread_id, skey, gen, trigger_id, model=model_id
+            )
+        }
         text, usage = await self._stream(
             entry.graph,
             agent_name,
             payload,
             config,
-            self._cfg.resolve_model(entry.persona.model_id),
+            model_id,
         )
         self._book(usage, thread_id, agent_name, "turn")
         log.info("agent %s thread %d: %s", agent_name, thread_id, usage.total.line())

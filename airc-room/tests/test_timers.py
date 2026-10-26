@@ -47,6 +47,15 @@ def test_turn_context_survives_a_bumped_context_generation():
     assert turn_context(_cfg(7, "perf", generation=3)) == (7, "perf")
 
 
+def test_turn_config_keys_checkpoint_by_model_without_effort():
+    c_opus = turn_config(7, "perf", 0, model="google_anthropic_vertex:claude-opus-5-5")
+    c_low = turn_config(7, "perf", 0, model="google_vertexai:gemini-4-argon@low")
+    c_high = turn_config(7, "perf", 0, model="google_vertexai:gemini-4-argon@high")
+    assert c_opus["thread_id"] != c_low["thread_id"]
+    assert c_low["thread_id"] == c_high["thread_id"]
+    assert turn_context({"configurable": c_low}) == (7, "perf")
+
+
 def test_turn_context_refuses_a_turn_with_no_identity():
     # The forced-JSON structured turn sets a bare thread_id and holds no local
     # tools. Reparsing it would invent a thread; refusing is the honest answer.

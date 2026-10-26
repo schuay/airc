@@ -35,15 +35,22 @@ TRIGGER_KEY = "airc_trigger"
 
 
 def turn_config(
-    thread_id: int, agent_key: str, generation: int, trigger_id: int | None = None
+    thread_id: int,
+    agent_key: str,
+    generation: int,
+    trigger_id: int | None = None,
+    *,
+    model: str = "",
 ) -> dict:
     """The `configurable` a persona's turn runs under.
 
     `thread_id` is the composite LangGraph checkpoints on: the room thread, the
     persona's stable key (not its addressable name, so a nickname toggle does not
-    orphan a checkpoint), and the context generation, which is what a memory
-    compaction bumps to start the persona from a fresh checkpoint. The same two
-    identity parts ride alongside under their own keys for tools to read.
+    orphan a checkpoint), the context generation (which a memory compaction
+    bumps to start the persona from a fresh checkpoint), and the model (stripped
+    of `@effort`, so switching models drops model-specific checkpoint state like
+    thinking signatures while changing effort keeps it). The two identity parts
+    ride alongside under their own keys for tools to read.
 
     `trigger_id` is the message that caused this turn, when one did. A tool whose
     job is "did a human ask for this" would otherwise scan the thread backwards
@@ -51,8 +58,12 @@ def turn_config(
     thread to whichever was newest. Optional because not every turn has a
     trigger: a timer wake is driven by a note, not a message.
     """
+    model_key = model.split("@", 1)[0]
+    ckpt_id = f"{thread_id}:{agent_key}:g{generation}"
+    if model_key:
+        ckpt_id = f"{ckpt_id}:{model_key}"
     cfg = {
-        "thread_id": f"{thread_id}:{agent_key}:g{generation}",
+        "thread_id": ckpt_id,
         THREAD_KEY: thread_id,
         AGENT_KEY: agent_key,
     }
