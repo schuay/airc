@@ -260,9 +260,8 @@ def test_models_still_maps_key_to_id_for_the_egress_allowlists():
     }
 
 
-def test_a_gemini_entry_carries_an_effort_level(monkeypatch):
+def test_a_gemini_entry_carries_an_effort_level():
     # Gemini's thinking_level uses the same low/medium/high names.
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     cfg = load_common(
         {
             "models": {
@@ -273,9 +272,8 @@ def test_a_gemini_entry_carries_an_effort_level(monkeypatch):
     assert cfg.model_profiles["review"].call_kwargs == {"effort": "high"}
 
 
-def test_an_effort_gemini_does_not_accept_is_refused_by_name(monkeypatch):
+def test_an_effort_gemini_does_not_accept_is_refused_by_name():
     # The API accepts EXTRA_HIGH/MAX without serving them; refused at load.
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     with pytest.raises(SystemExit) as e:
         load_common(
             {

@@ -780,13 +780,11 @@ class LangGraphHarness:
         # passing it here too would bind it twice.
         #
         # Why it has to be cached: a Vertex request that carries cached_content
-        # drops tools and tool_config entirely (langchain_google_vertexai
-        # _request_from_cached_content lists both as not_allowed_parameters and
-        # logs "will be ignored"). Whatever bind_tools attached is therefore
-        # invisible on any cache-served call, and the cache is built on the first
-        # call of every turn -- so a report tool that lives only in the binding is
-        # a tool the model is told to call and never shown. The tools the model
-        # sees are exactly the ones handed to the cache.
+        # may not also carry tools or tool_config (the API returns 400; the
+        # cache is where they live). The cache is built on the first call of
+        # every turn, so a report tool that lives only in the binding is a tool
+        # the model is told to call and never shown. The tools the model sees
+        # are the ones handed to the cache.
         cached_tools = [
             *tools,
             OutputToolBinding.from_schema_spec(strategy.schema_specs[0]).tool,

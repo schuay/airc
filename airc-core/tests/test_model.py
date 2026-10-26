@@ -1,58 +1,9 @@
 # Copyright 2026 The airc developers
 # SPDX-License-Identifier: MIT
 
-import logging
 
 import pytest
 from airc_core import SUPPORTED_PROVIDERS, check_model_id, list_models, make_model
-from airc_core.model import _silence_vertex_noise
-
-
-def test_vertex_noise_filter_drops_benign_warnings(caplog):
-    _silence_vertex_noise()
-    cm = logging.getLogger("langchain_google_vertexai.chat_models")
-    fu = logging.getLogger("langchain_google_vertexai.functions_utils")
-    # Filters run only when the logger actually handles a record; force it.
-    cm.setLevel(logging.WARNING)
-    fu.setLevel(logging.WARNING)
-    with caplog.at_level(logging.WARNING):
-        cm.warning("Using cached content, parameter system_instruction will be ignored")
-        fu.warning("Key 'additionalProperties' is not supported in schema, ignoring")
-        fu.warning("a real warning worth seeing")
-    assert "Using cached content" not in caplog.text
-    assert "is not supported in schema" not in caplog.text
-    assert "a real warning worth seeing" in caplog.text
-
-
-def test_silence_vertex_noise_is_idempotent():
-    cm = logging.getLogger("langchain_google_vertexai.chat_models")
-    before = len(cm.filters)
-    _silence_vertex_noise()
-    _silence_vertex_noise()
-    # The shared filter is added at most once (addFilter dedups by identity).
-    assert len(cm.filters) <= before + 1
-
-
-def test_retry_noise_filter_condenses_prefill_dump():
-    from airc_core.model import _RetryNoiseFilter
-
-    f = _RetryNoiseFilter()
-    # A realistic tenacity before_sleep_log line with the multi-kilobyte dump.
-    huge = "x" * 26000
-    rec = logging.LogRecord(
-        "langchain_google_vertexai._retry",
-        logging.WARNING,
-        __file__,
-        1,
-        "Retrying ... in 8 seconds as it raised ResourceExhausted: 429 "
-        "PREFILL_QUEUE_OVERLOADED " + huge,
-        (),
-        None,
-    )
-    assert f.filter(rec) is True  # surfaced, not dropped
-    out = rec.getMessage()
-    assert out == "vertex retry in 8s (PREFILL_QUEUE_OVERLOADED)"
-    assert len(out) < 60  # the dump is gone
 
 
 def test_tool_first_index_matches_only_a_leading_tool_response():
@@ -83,61 +34,10 @@ def test_tool_first_index_matches_only_a_leading_tool_response():
     assert at([sys, human, AIMessage("yo")]) is None
 
 
-def test_tool_first_guard_converts_a_tool_opening_history():
-    # The growing cache's tail opens on the tool response(s) answering a cached
-    # function call; without the guard the converter raises IndexError on that
-    # history (langchain-google issue #392).
-    from airc_core.model import _install_vertex_tool_first_guard
-    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-    from langchain_google_vertexai import chat_models as cm
-    from langchain_google_vertexai._image_utils import ImageBytesLoader
-
-    _install_vertex_tool_first_guard()
-    guarded = cm._parse_chat_history_gemini
-    _install_vertex_tool_first_guard()
-    assert cm._parse_chat_history_gemini is guarded  # no double wrap
-
-    tail = [
-        ToolMessage("int main()", tool_call_id="c1", name="look"),
-        ToolMessage("42", tool_call_id="c2", name="count"),
-        AIMessage("both read"),
-    ]
-    # Bare, and with the system turn langchain prepends after middleware runs --
-    # the latter is the form a real request has, and matching only history[0]
-    # missed it while passing this test on the former.
-    for history in (tail, [SystemMessage("you are a reviewer"), *tail]):
-        system, contents = cm._parse_chat_history_gemini(
-            list(history), ImageBytesLoader()
-        )
-        assert (system is not None) == isinstance(history[0], SystemMessage)
-        assert [c.role for c in contents] == ["user", "model"]
-        # Parallel responses merge into one user content; the sentinel is stripped.
-        assert [p.function_response.name for p in contents[0].parts] == [
-            "look",
-            "count",
-        ]
-        assert all(not p.text for p in contents[0].parts)
-
-
-def test_tool_first_guard_leaves_normal_histories_alone():
-    from airc_core.model import _install_vertex_tool_first_guard
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-    from langchain_google_vertexai import chat_models as cm
-    from langchain_google_vertexai._image_utils import ImageBytesLoader
-
-    _install_vertex_tool_first_guard()
-    turns = [HumanMessage("hi"), AIMessage("yo")]
-    # With the leading system turn too: skipping it must not make an ordinary
-    # history look tool-first and pick up a sentinel.
-    for history in (turns, [SystemMessage("sys"), *turns]):
-        _, contents = cm._parse_chat_history_gemini(list(history), ImageBytesLoader())
-        assert [c.role for c in contents] == ["user", "model"]
-        assert contents[0].parts[0].text == "hi"
-
-
 def test_genai_tool_first_guard_converts_a_tool_opening_history():
-    # Same tail as the vertexai guard test; the genai converter's failure
-    # mode is silent dropping of orphan tool responses, not a crash.
+    # The growing cache's tail opens on the tool response(s) answering a
+    # cached function call; without the guard the converter silently drops
+    # orphan tool responses.
     from airc_core.model import _install_genai_tool_first_guard
     from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_genai import chat_models as cm
@@ -181,17 +81,16 @@ def test_genai_tool_first_guard_leaves_normal_histories_alone():
         assert contents[0].parts[0].text == "hi"
 
 
-def test_google_sdk_flag_routes_vertex_ids_to_genai(monkeypatch):
+def test_vertex_ids_are_served_by_the_genai_adapter(monkeypatch):
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_google_genai import chat_models as cm
 
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     m = make_model("google_vertexai:gemini-3.8-flash")
     assert isinstance(m, ChatGoogleGenerativeAI)
-    # Vertex backend via the project kwarg, same call-time defaults as the
-    # vertexai path, and the orphan-tool guard installed at construction.
+    # Vertex backend via the project kwarg, the call-time defaults, and the
+    # orphan-tool guard installed at construction.
     assert (m.project, m.location) == ("test-project", "global")
     assert (m.include_thoughts, m.max_retries, m.timeout) == (False, 1, 600.0)
     assert getattr(cm._parse_chat_history, "_airc_tool_first_guard", False)
@@ -218,7 +117,6 @@ def test_proxy_placeholder_credentials_never_refresh():
 def test_genai_proxy_env_routes_base_url_and_credentials(monkeypatch):
     from airc_core.model import _VERTEX_PROXY_ENV
 
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:1")
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     m = make_model("google_vertexai:gemini-3.8-flash")
@@ -364,38 +262,11 @@ def test_other_providers_keep_their_sampling(monkeypatch):
     """The strip applies to Claude on Vertex only. Gemini accepts both, so
     review's ensemble still varies its passes there."""
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
-    monkeypatch.delenv("AIRC_GOOGLE_SDK", raising=False)
     kwargs = {"temperature": 0.7, "seed": 3}
     m = make_model("google_vertexai:gemini-3.1-pro-preview", **kwargs)
     assert m.temperature == 0.7
     # The caller's dict is not modified either.
     assert kwargs == {"temperature": 0.7, "seed": 3}
-
-
-def test_google_sdk_defaults_to_genai(monkeypatch):
-    # The vertexai stack remains reachable as the revert path ([gcp] sdk /
-    # AIRC_GOOGLE_SDK=vertexai) until it is deleted.
-    from airc_core.model import _google_sdk
-
-    monkeypatch.delenv("AIRC_GOOGLE_SDK", raising=False)
-    assert _google_sdk() == "genai"
-
-
-def test_retry_noise_filter_passes_unrelated_records():
-    from airc_core.model import _RetryNoiseFilter
-
-    f = _RetryNoiseFilter()
-    rec = logging.LogRecord(
-        "langchain_google_vertexai._retry",
-        logging.WARNING,
-        __file__,
-        1,
-        "some other warning",
-        (),
-        None,
-    )
-    assert f.filter(rec) is True
-    assert rec.getMessage() == "some other warning"  # untouched
 
 
 def test_valid_ids_pass():
@@ -576,28 +447,6 @@ def test_make_model_shallows_vertex_sdk_retries(monkeypatch):
     assert "max_retries" not in captured  # non-vertex untouched
 
 
-def test_vertex_proxy_env_configures_the_client_for_the_loopback_seam(monkeypatch):
-    """The sandbox proxy hook: no credential, async REST transport, our endpoint.
-
-    Both settings are forced, not chosen. With a custom endpoint langchain
-    skips its "rest" -> "grpc_asyncio" upgrade and plain "rest" resolves to a
-    SYNC transport whose methods return non-awaitables -- and airc drives models
-    via astream, so that path fails at runtime, not at construction. The aio
-    credential is required by type and carries no authority; the proxy supplies
-    the real one.
-    """
-    from airc_core.model import _VERTEX_PROXY_ENV, _proxy_kwargs
-
-    monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:9999")
-    kw = _proxy_kwargs("http://127.0.0.1:9999")
-    assert kw["api_endpoint"] == "http://127.0.0.1:9999"
-    assert kw["api_transport"] == "rest_asyncio"
-    # An aio credential, not a sync one: rest_asyncio validates the TYPE.
-    from google.auth.aio.credentials import Credentials as AioCredentials
-
-    assert isinstance(kw["credentials"], AioCredentials)
-
-
 def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
     """A sandboxed client authenticates as nobody, whatever else is in the env.
 
@@ -611,7 +460,6 @@ def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
     env/metadata, so anonymity has to be positive.
     """
     from airc_core.model import _VERTEX_PROXY_ENV
-    from google.auth.aio.credentials import AnonymousCredentials
 
     monkeypatch.setenv(_VERTEX_PROXY_ENV, "http://127.0.0.1:9999")
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json")
@@ -625,19 +473,10 @@ def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
     monkeypatch.setattr("airc_core.model.init_chat_model", fake_init)
     from airc_core.model import make_model
 
-    # The genai stack (the default): loopback base_url and a placeholder
-    # bearer that authenticates nothing.
+    # Loopback base_url and a placeholder bearer that authenticates nothing.
     make_model("google_vertexai:gemini-3.1-pro-preview")
     assert captured["base_url"] == "http://127.0.0.1:9999"
     assert captured["credentials"].token == "sandbox-proxy-placeholder"
-
-    # The vertexai revert path keeps its own arrangement.
-    captured.clear()
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "vertexai")
-    make_model("google_vertexai:gemini-3.1-pro-preview")
-    assert captured["api_endpoint"] == "http://127.0.0.1:9999"
-    assert captured["api_transport"] == "rest_asyncio"
-    assert isinstance(captured["credentials"], AnonymousCredentials)
 
 
 # ── external model providers ────────────────────────────────────────────────
@@ -859,7 +698,6 @@ def test_effort_on_gemini_genai_becomes_thinking_level(monkeypatch):
     names match, so the value passes through unchanged."""
     pytest.importorskip("langchain_google_genai")
 
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
     m = make_model("google_vertexai:gemini-4-argon", effort="medium")
     assert m.thinking_level == "medium"
@@ -874,33 +712,18 @@ def test_no_effort_on_gemini_genai_sends_no_thinking_level(monkeypatch):
     path."""
     pytest.importorskip("langchain_google_genai")
 
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
     m = make_model("google_vertexai:gemini-4-argon")
     assert m.thinking_level is None
 
 
-def test_an_effort_gemini_does_not_accept_raises(monkeypatch):
+def test_an_effort_gemini_does_not_accept_raises():
     """Gemini accepts low/medium/high. The API also accepts EXTRA_HIGH and MAX
     without serving them, so xhigh is refused rather than sent."""
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
     with pytest.raises(ValueError) as e:
         make_model("google_vertexai:gemini-4-argon", effort="xhigh")
     assert "does not accept effort 'xhigh'" in str(e.value)
     assert "low, medium, high" in str(e.value)
-
-
-def test_effort_on_the_legacy_vertexai_adapter_raises_rather_than_dropping(
-    monkeypatch,
-):
-    """Every other unsupported kwarg degrades to a warning, because the request
-    still means what it meant. A dropped level does not: it leaves the model at
-    the API default of `high`, two levels above the `low` the file asked for.
-    ChatVertexAI has only thinking_budget, so there is nothing to translate to."""
-    monkeypatch.setenv("AIRC_GOOGLE_SDK", "vertexai")
-    with pytest.raises(ValueError) as e:
-        make_model("google_vertexai:gemini-3.6-flash", effort="low")
-    assert "no effort level" in str(e.value)
 
 
 def test_effort_on_a_provider_without_levels_raises():

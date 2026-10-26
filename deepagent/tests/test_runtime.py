@@ -4,7 +4,6 @@
 """Pure-seam coverage that needs no live model: the worktree-bound tools, the
 Report -> AgentResult flattening, and the skill-index renderer."""
 
-import pytest
 from airc_core import ToolBuildContext, ToolGrant, ToolSource
 from deepagent.harness import REPORT_TOOL_NAME
 from deepagent.langgraph_harness import _abs, worktree_tool_catalog
@@ -104,47 +103,13 @@ def test_abs(tmp_path):
     assert _abs(tmp_path, "rel/f") == str(tmp_path / "rel" / "f")
 
 
-def test_vertex_drops_bound_tools_when_serving_from_cache():
-    """The constraint the report tool must be cached for.
-
-    A Vertex request carrying cached_content silently discards tools and
-    tool_config (_request_from_cached_content lists them as
-    not_allowed_parameters and only logs). So anything bind_tools attached --
-    including the structured-output report tool langchain appends at bind time --
-    is invisible on every cache-served call. Pinned here because it is an
-    upstream behaviour we depend on and cannot see from our own code: were it to
-    change, the workaround in _graph_for becomes dead weight, not a
-    silent bug.
-    """
-    pytest.importorskip("langchain_google_vertexai")
-    from langchain_core.messages import HumanMessage
-    from langchain_core.tools import tool
-    from langchain_google_vertexai import ChatVertexAI
-
-    @tool
-    def probe(x: str) -> str:
-        """A tool that must survive into the request."""
-        return x
-
-    kw = {"model": "gemini-2.0-flash", "project": "p", "location": "us-central1"}
-    plain = ChatVertexAI(**kw)._prepare_request_gemini(
-        [HumanMessage("hi")], tools=[probe]
-    )
-    assert plain.tools, "without a cache the bound tools reach the request"
-
-    cached = ChatVertexAI(cached_content="C1", **kw)._prepare_request_gemini(
-        [HumanMessage("hi")], tools=[probe]
-    )
-    assert not cached.tools, "cached_content drops bound tools; cache them instead"
-
-
 def test_report_tool_is_in_the_cached_tool_list(tmp_path, monkeypatch):
     """The report tool must reach the growing cache, or it reaches the model at all.
 
-    Vertex serves a cache-bound call without the tools bind_tools attached (see
-    the test above), and the cache is built on a turn's first call -- so a report
-    tool present only in the binding is one the prompts order the agent to call
-    and the model is never shown. That ends every turn in the re-ask path with
+    A request that carries cached_content may not also carry tools, and the
+    cache is built on a turn's first call -- so a report tool present only in
+    the binding is one the prompts order the agent to call and the model is
+    never shown. That ends every turn in the re-ask path with
     structured_response unset.
     """
     from airc_core import CommonConfig
@@ -187,8 +152,8 @@ def test_graph_for_compiles_with_application_reminders(tmp_path, monkeypatch):
 
     # Stub model CONSTRUCTION only, in both places it is resolved: the
     # harness's own make_model and the one base_middleware calls for the
-    # summarizer. ChatVertexAI validates project/credentials at __init__ (no
-    # ADC in tests), SummarizationMiddleware reads _llm_type at construction,
+    # summarizer. The Vertex client validates project/credentials at __init__
+    # (no ADC in tests), SummarizationMiddleware reads _llm_type at construction,
     # and the middleware STACK is what is under test here.
     fake = lambda *a, **k: GenericFakeChatModel(messages=iter([]))
     monkeypatch.setattr(lh, "make_model", fake)

@@ -15,7 +15,6 @@ table entry.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -58,15 +57,6 @@ class ProviderTraits:
     def supports_effort(self) -> bool:
         return bool(self.effort_levels)
 
-    # Whether the reported output_tokens already includes thinking. Every
-    # provider bills thinking at the output rate, but the langchain-google-vertexai
-    # adapter reports candidates and thoughts as two numbers and puts only the
-    # candidates in output_tokens; the langchain-google-genai adapter to the same
-    # models sums them, as Anthropic and OpenAI do. A reader that trusts
-    # output_tokens on the first under-counts every thinking call by the whole
-    # thought, and one that adds the thought on the second counts it twice.
-    reasoning_in_output: bool = True
-
 
 # temperature, top_p and top_k were removed from the Messages API in Claude
 # Opus 4.7: the server returns 400 and the SDK, whose signature is generated
@@ -84,12 +74,7 @@ _ANTHROPIC = ProviderTraits(
     effort_levels=EFFORT_LEVELS,
 )
 
-# A google_vertexai: id is served by one of two adapters (google_sdk), and the
-# traits that differ between them are the adapter's, not the endpoint's. Only
-# the genai adapter has a thinking_level field; the deprecated vertexai one has
-# thinking_budget alone, so it accepts no effort level.
-_GEMINI_VERTEX_LEGACY = ProviderTraits(id="google_vertexai", reasoning_in_output=False)
-_GEMINI_VERTEX_GENAI = ProviderTraits(
+_GEMINI_VERTEX = ProviderTraits(
     id="google_vertexai", effort_levels=_GEMINI_EFFORT_LEVELS
 )
 
@@ -98,18 +83,8 @@ _DEFAULT = ProviderTraits(id="")
 _TRAITS: dict[str, ProviderTraits] = {
     "anthropic": _ANTHROPIC,
     "google_anthropic_vertex": _ANTHROPIC,
+    "google_vertexai": _GEMINI_VERTEX,
 }
-
-
-def google_sdk() -> str:
-    """Which client stack backs google_vertexai: ids: "genai" (the default:
-    ChatGoogleGenerativeAI on the google-genai SDK) or "vertexai" (the
-    deprecated langchain-google-vertexai path). Same endpoints either way.
-    Env-shaped (seeded from [gcp] sdk) so one deployment can revert without a
-    code change while the old path still exists. Read here, without the
-    framework, because the usage reader has to know which adapter's numbers it
-    is looking at."""
-    return os.environ.get("AIRC_GOOGLE_SDK", "genai")
 
 
 def traits_for(model_id: str) -> ProviderTraits:
@@ -119,12 +94,7 @@ def traits_for(model_id: str) -> ProviderTraits:
     optimization over asking the provider, and a provider missing from it has to
     keep working.
     """
-    prefix = model_id.split(":", 1)[0]
-    if prefix == "google_vertexai":
-        return (
-            _GEMINI_VERTEX_GENAI if google_sdk() == "genai" else _GEMINI_VERTEX_LEGACY
-        )
-    return _TRAITS.get(prefix, _DEFAULT)
+    return _TRAITS.get(model_id.split(":", 1)[0], _DEFAULT)
 
 
 def effort_problem(model_id: str, effort: str) -> str | None:

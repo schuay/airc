@@ -30,18 +30,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
-from .providers import (
-    EFFORT_LEVELS,
-    effort_problem,
-    google_sdk,
-    model_traits_for,
-    traits_for,
-)
+from .providers import EFFORT_LEVELS, effort_problem, model_traits_for, traits_for
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +43,7 @@ log = logging.getLogger(__name__)
 # Set only by the sandbox profile, so every other caller is untouched.
 #
 # Read here and not at the call sites because make_model's callers pass no
-# kwargs, and the endpoint must reach the ChatVertexAI constructor.
+# kwargs, and the endpoint must reach the client constructor.
 _VERTEX_PROXY_ENV = "AISAN_VERTEX_PROXY_ENDPOINT"
 
 # The bearer a sandboxed client sends. Not a secret (S105): the proxy discards
@@ -59,37 +52,13 @@ _VERTEX_PROXY_ENV = "AISAN_VERTEX_PROXY_ENDPOINT"
 _PROXY_PLACEHOLDER_TOKEN = "sandbox-proxy-placeholder"  # noqa: S105
 
 
-def _proxy_kwargs(endpoint: str) -> dict:
-    """Client settings for talking to the sandbox's Vertex proxy.
-
-    Two settings are forced:
-
-    - `rest_asyncio`, not the default. With a custom endpoint langchain skips its
-      "rest" -> "grpc_asyncio" upgrade (_client_utils.py checks the hostname), and
-      plain "rest" resolves to a synchronous transport class whose methods return
-      non-awaitables. airc drives models via astream, so that path fails with
-      "object ResponseIterator can't be used in 'await' expression".
-    - an aio credential. rest_asyncio validates the credential type, so a
-      google.auth.credentials instance is rejected outright. It carries no
-      authority: the proxy replaces the header, and the box is meant to hold
-      only a credential that authenticates nothing.
-    """
-    from google.auth.aio.credentials import AnonymousCredentials
-
-    return {
-        "api_endpoint": endpoint,
-        "api_transport": "rest_asyncio",
-        "credentials": AnonymousCredentials(),
-    }
-
-
 # OpenRouter: an OpenAI-compatible endpoint. Served through the openai provider
 # (no langchain-openrouter package exists), so make_model rewrites an
 # "openrouter:<model>" id to the openai provider pointed at this base_url with
 # OPENROUTER_API_KEY. Same pattern deepseek uses for its own base_url.
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Per-attempt gRPC deadline (seconds) on a Vertex generate_content call. The only
+# Per-attempt deadline (seconds) on a Vertex generate_content call. The only
 # job of a wall-clock at this layer is reaping a stream that never returns; the
 # review-level wall-clock is off by default because it drained on backoff
 # sleep, not hangs. Legit calls finish in single-digit minutes and never
@@ -337,10 +306,10 @@ def _google_models(vertex: bool) -> list[str]:
 
 
 def _provider_kwargs(model_id: str) -> dict:
-    # Both Vertex clients take project/location by the same names. Without
-    # them the Anthropic client uses whatever project ADC infers, which need
-    # not be the configured [gcp] one.
-    if model_id.startswith(("google_vertexai:", "google_anthropic_vertex:")):
+    # Without project/location the Anthropic client uses whatever project ADC
+    # infers, which need not be the configured [gcp] one. The Gemini path sets
+    # its own in _make_genai_vertex.
+    if model_id.startswith("google_anthropic_vertex:"):
         kw: dict = {}
         if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
             kw["project"] = proj
@@ -390,133 +359,23 @@ def _drop_unsupported_kwargs(kwargs: dict, model_id: str) -> None:
     )
 
 
-class _VertexNoiseFilter(logging.Filter):
-    """Drop ChatVertexAI's benign, constant per-call log warnings.
-
-    Neither is API misuse, both fire on every call, and both would otherwise
-    flood the journal:
-    - "Using cached content, parameter ... will be ignored" -- expected with a
-      context cache attached (system/tools live in the cache; re-sending them is
-      the point).
-    - "Key '...' is not supported in schema, ignoring" -- Vertex drops schema
-      keys it does not accept (e.g. additionalProperties from a pydantic
-      extra=forbid model used for structured output); harmless.
-    """
-
-    _NOISE = ("Using cached content", "is not supported in schema")
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        return not any(s in msg for s in self._NOISE)
-
-
-class _RetryNoiseFilter(logging.Filter):
-    """Condense langchain_google_vertexai._retry's before-sleep WARNING.
-
-    Its tenacity before_sleep_log dumps the whole exception -- a multi-kilobyte
-    RPC error with nested original error, stack, and source-location trace -- on
-    every retry, so a prefill-overload storm fills the journal with repeated 26k
-    blocks. The retry itself is worth surfacing (an ongoing overload), the dump
-    is not: rewrite the record to the status code and the retry delay, keeping
-    one readable line. Mutates and passes the record instead of dropping it."""
-
-    # "... Retrying ... in N seconds as it raised <Error>: <huge text>".
-    _RETRY_RE = re.compile(r"in ([\d.]+) seconds as it raised (\w+)")
-    _STATUS_RE = re.compile(
-        r"RESOURCE_EXHAUSTED|PREFILL_QUEUE_OVERLOADED|PREFILL_QUEUE_PREEMPTED"
-        r"|UNAVAILABLE|DEADLINE_EXCEEDED|INTERNAL"
-    )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        if "as it raised" not in msg:
-            return True
-        m = self._RETRY_RE.search(msg)
-        status = self._STATUS_RE.search(msg)
-        if m:
-            reason = status.group(0) if status else m.group(2)
-            record.msg = f"vertex retry in {m.group(1)}s ({reason})"
-            record.args = ()
-        return True
-
-
-# Shared instances: addFilter dedups by identity, so installing them from every
-# make_model call is idempotent -- each lands on its logger once.
-_VERTEX_NOISE = _VertexNoiseFilter()
-_RETRY_NOISE = _RetryNoiseFilter()
-
-# The two langchain_google_vertexai loggers that emit the benign per-call noise.
-_VERTEX_NOISY_LOGGERS = (
-    "langchain_google_vertexai.chat_models",
-    "langchain_google_vertexai.functions_utils",
-)
-
-
-def _silence_vertex_noise() -> None:
-    for name in _VERTEX_NOISY_LOGGERS:
-        logging.getLogger(name).addFilter(_VERTEX_NOISE)
-    logging.getLogger("langchain_google_vertexai._retry").addFilter(_RETRY_NOISE)
-
-
 def _tool_first_index(history, system_cls, tool_cls) -> int | None:
     """Index of the leading tool response in a history the growing cache's tail
     produced, or None when the history is not of that form.
 
     The tail handed to a middleware opens on the ToolMessage answering the
     cached function call, but langchain prepends the system message AFTER every
-    middleware has run (agents/factory.py), so what reaches a provider's history
-    converter is [system, tool, ...]. Matching only on history[0] therefore
-    never fires in a real request -- the history both converters mishandle passes
-    straight through. Leading system turns are skipped, not counted: neither
-    converter emits content for them (they become the separate
-    system_instruction), so the sentinel a caller splices in at this index still
-    lands at contents[0].
+    middleware has run (agents/factory.py), so what reaches the provider's
+    history converter is [system, tool, ...]. Matching only on history[0]
+    therefore never fires in a real request. Leading system turns are skipped,
+    not counted: the converter emits no content for them (they become the
+    separate system_instruction), so the sentinel a caller splices in at this
+    index still lands at contents[0].
     """
     at = 0
     while at < len(history) and isinstance(history[at], system_cls):
         at += 1
     return at if at < len(history) and isinstance(history[at], tool_cls) else None
-
-
-def _install_vertex_tool_first_guard() -> None:
-    """Make a request that opens on a tool response convertible.
-
-    The growing prefix cache cuts the cached prefix after the model's function
-    call (gemini-3.8-flash rejects a prefix ending on the function response),
-    so the uncached tail begins with a ToolMessage. langchain's history
-    converter crashes on exactly that history -- an unguarded vertex_messages[-1]
-    in its ToolMessage branch -- although the API accepts it. Known upstream
-    since 2024 with the one-line fix spelled out, never landed:
-    https://github.com/langchain-ai/langchain-google/issues/392
-
-    Prepending a sentinel user turn routes the tool response through the
-    converter's existing merge-into-previous-user-content path; stripping the
-    sentinel part afterwards leaves exactly what the upstream fix would
-    produce.
-
-    TODO: retire by migrating off langchain-google-vertexai (ChatVertexAI is
-    deprecated upstream) to google-genai -- after verifying its converter
-    against this history: today it silently DROPS a ToolMessage whose calling
-    AIMessage is absent from the history.
-    """
-    from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-    from langchain_google_vertexai import chat_models as cm
-
-    orig = cm._parse_chat_history_gemini
-    if getattr(orig, "_airc_tool_first_guard", False):
-        return
-
-    def guarded(history, *args, **kwargs):
-        if (at := _tool_first_index(history, SystemMessage, ToolMessage)) is None:
-            return orig(history, *args, **kwargs)
-        patched = [*history[:at], HumanMessage("-"), *history[at:]]
-        system, contents = orig(patched, *args, **kwargs)
-        first = contents[0]
-        rebuilt = cm.Content(role=first.role, parts=list(first.parts)[1:])
-        return system, [rebuilt, *contents[1:]]
-
-    guarded._airc_tool_first_guard = True
-    cm._parse_chat_history_gemini = guarded
 
 
 def proxy_placeholder_credentials():
@@ -545,26 +404,21 @@ def proxy_placeholder_credentials():
     return _PlaceholderCredentials()
 
 
-# The switch lives in providers.py, next to the adapter trait it selects; kept
-# under this name here for the callers that read it as the model module's.
-_google_sdk = google_sdk
-
-
 def _install_genai_tool_first_guard() -> None:
-    """Make a request that opens on a tool response convertible (genai stack).
+    """Make a request that opens on a tool response convertible.
 
-    Same growing-cache history as _install_vertex_tool_first_guard, worse
-    failure: langchain-google-genai's converter re-emits ToolMessages only
-    paired to the AIMessage whose tool_calls ids match, so a history opening
-    on tool responses (their calling AIMessage lives inside the cached
-    prefix) produces a request with the tool results silently missing -- no
-    crash, wrong request. A sentinel AIMessage claiming the leading
-    tool_call_ids routes them through that pairing path; dropping the
-    sentinel's own model Content from the result leaves the request opening
-    on the function responses.
+    The growing prefix cache cuts the cached prefix after the model's function
+    call (gemini-3.8-flash rejects a prefix ending on the function response),
+    so the uncached tail begins with a ToolMessage. langchain-google-genai's
+    converter re-emits ToolMessages only paired to the AIMessage whose
+    tool_calls ids match, so a history opening on tool responses (their
+    calling AIMessage lives inside the cached prefix) produces a request with
+    the tool results silently missing: no crash, wrong request. A sentinel
+    AIMessage claiming the leading tool_call_ids routes them through that
+    pairing path; dropping the sentinel's own model Content from the result
+    leaves the request opening on the function responses.
 
-    TODO: upstream the fix (this package is maintained, unlike vertexai --
-    its twin is langchain-google issue #392) and retire the guard.
+    TODO: upstream the fix and retire the guard.
     """
     from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
     from langchain_google_genai import chat_models as cm
@@ -600,40 +454,51 @@ def _install_genai_tool_first_guard() -> None:
 
 
 def _make_genai_vertex(model_id: str, kwargs: dict):
-    """A google_vertexai: id served by ChatGoogleGenerativeAI (google-genai
-    SDK) when AIRC_GOOGLE_SDK=genai.
+    """A google_vertexai: id served by ChatGoogleGenerativeAI (google-genai SDK).
 
     Backend selection is delegated to the class's own detection instead of
     forcing vertexai=True: a project kwarg (present whenever
-    GOOGLE_CLOUD_PROJECT is set, i.e. prod) selects Vertex over ADC -- the
-    same endpoints the vertexai stack hits -- while a box with only
-    GOOGLE_API_KEY reaches the Developer API, which runs the identical client
-    code. That fallback makes the stack verifiable on a machine
-    without Vertex access.
-
-    The sandbox proxy seam is wired but unverified on this stack (the genai
-    client is httpx with a configurable base_url, so the rest_asyncio and
-    anonymous-credential contortions of the vertexai path should be
-    unnecessary); until it is proven, sandboxed deployments stay on
-    AIRC_GOOGLE_SDK=vertexai.
+    GOOGLE_CLOUD_PROJECT is set, i.e. prod) selects Vertex over ADC, while a
+    box with only GOOGLE_API_KEY reaches the Developer API, which runs the
+    identical client code. That fallback makes the stack verifiable on a
+    machine without Vertex access.
     """
     _install_genai_tool_first_guard()
     name = model_id.split(":", 1)[1]
+    # In the sandbox the box holds no credential at all: point the client at
+    # the loopback proxy, which attaches the real one host-side. Gated on the
+    # env var (only the sandbox profile sets it), so every other caller keeps
+    # normal ADC. An explicit caller-passed base_url still wins.
     if (proxy := os.environ.get(_VERTEX_PROXY_ENV)) and "base_url" not in kwargs:
         kwargs["base_url"] = proxy
-        # The box holds no credential; the proxy attaches the real one (see
-        # proxy_placeholder_credentials). Passing one here also tells the
-        # class's backend detection this is Vertex.
+        # The proxy discards whatever the box sends (see
+        # proxy_placeholder_credentials). Passing a credential here also tells
+        # the class's backend detection this is Vertex.
         kwargs.setdefault("credentials", proxy_placeholder_credentials())
     if proj := os.environ.get("GOOGLE_CLOUD_PROJECT"):
         kwargs.setdefault("project", proj)
         kwargs.setdefault(
             "location", os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
         )
-    # Same three call-time defaults as the vertexai path, same rationale (see
-    # make_model below); the kwarg names match across the two classes.
+    # Never surface the model's thought summaries. We consume only text
+    # blocks, so thoughts are pure liability: on a degraded turn (prefill
+    # overload, thrashed context) a thinking model can emit its reasoning as
+    # ordinary answer text, which then posts verbatim. This suppresses the
+    # summary channel only; thought signatures (which Gemini 3 needs for
+    # multi-turn tool continuity) are independent and still flow. It does not
+    # disable thinking. An explicit caller value wins.
     kwargs.setdefault("include_thoughts", False)
+    # Keep the SDK's own retry loop shallow: under a prefill overload its
+    # default retries each call hard and fast, and stacked under airc's
+    # ModelRetryMiddleware (which re-attempts the whole call) one logical
+    # call can fire dozens of prefills -- the server rejects with
+    # TOO_MANY_RETRIES_PER_REQUEST and the overload feeds itself. Let the
+    # middleware be the retry authority: it backs off far wider (5/15/45/60s,
+    # sized to outlast a per-minute quota window). One shallow SDK retry
+    # still absorbs a lone blip without a middleware round-trip.
     kwargs.setdefault("max_retries", 1)
+    # A per-call deadline reaps a hung stream (see _VERTEX_CALL_TIMEOUT_S);
+    # an explicit caller value wins.
     kwargs.setdefault("timeout", _VERTEX_CALL_TIMEOUT_S)
     return init_chat_model(f"google_genai:{name}", **kwargs)
 
@@ -774,8 +639,8 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
             init_chat_model(f"openai:{name}", **kwargs), model_id
         )
     if model_id.startswith("google_anthropic_vertex:"):
-        # The call-time defaults the google_vertexai: branch sets, for the same
-        # reasons; ChatAnthropicVertex's own defaults are worse on each:
+        # The call-time defaults _make_genai_vertex sets, for the same reasons;
+        # ChatAnthropicVertex's own defaults are worse on each:
         #
         # * max_tokens: see _ANTHROPIC_MAX_OUTPUT_TOKENS.
         # * max_retries: this client counts attempts (tenacity stop_after_attempt
@@ -797,7 +662,7 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
             "location", os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
         )
         # Do not surface the model's reasoning, for the reason given for
-        # include_thoughts=False on the Gemini branch below. Claude controls
+        # include_thoughts=False in _make_genai_vertex. Claude controls
         # this with a display mode instead of a flag: "omitted" redacts the
         # thinking text but still returns the signature that multi-turn tool
         # continuity needs, so thinking stays enabled and only the channel is
@@ -822,41 +687,7 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
         if os.environ.get(_VERTEX_PROXY_ENV) and not kwargs.get("credentials"):
             kwargs.setdefault("access_token", _PROXY_PLACEHOLDER_TOKEN)
     if model_id.startswith("google_vertexai:"):
-        if _google_sdk() == "genai":
-            return _guard_forced_tool_choice(
-                _make_genai_vertex(model_id, kwargs), model_id
-            )
-        # Construction is the universal Vertex chokepoint (every agent/review
-        # graph builds its model here), so silence the benign call-time warnings
-        # and install the tool-first converter guard once, for every component.
-        _silence_vertex_noise()
-        _install_vertex_tool_first_guard()
-        # In the sandbox the box holds no credential at all: point the client at
-        # the loopback proxy, which attaches the real one host-side. Gated on the
-        # env var (only the sandbox profile sets it), so every other caller keeps
-        # normal ADC. An explicit caller-passed credentials still wins.
-        if (proxy := os.environ.get(_VERTEX_PROXY_ENV)) and "credentials" not in kwargs:
-            kwargs = {**_proxy_kwargs(proxy), **kwargs}
-        # Never surface the model's thought summaries. We consume only text
-        # blocks, so thoughts are pure liability: on a degraded turn (prefill
-        # overload, thrashed context) a thinking model can emit its reasoning as
-        # ordinary answer text, which then posts verbatim. This suppresses the
-        # summary channel only; thought signatures (which Gemini 3 needs for
-        # multi-turn tool continuity) are independent and still flow. It does not
-        # disable thinking. An explicit caller value wins.
-        kwargs.setdefault("include_thoughts", False)
-        # Keep the SDK's own retry loop shallow: under a prefill overload its
-        # default (6) retries each call hard and fast, and stacked under airc's
-        # ModelRetryMiddleware (which re-attempts the whole call) one logical
-        # call can fire dozens of prefills -- the server rejects with
-        # TOO_MANY_RETRIES_PER_REQUEST and the overload feeds itself. Let the
-        # middleware be the retry authority: it backs off far wider (5/15/45/60s,
-        # sized to outlast a per-minute quota window). One shallow SDK retry
-        # still absorbs a lone blip without a middleware round-trip.
-        kwargs.setdefault("max_retries", 1)
-        # A per-call deadline reaps a hung stream (see _VERTEX_CALL_TIMEOUT_S);
-        # an explicit caller value wins.
-        kwargs.setdefault("timeout", _VERTEX_CALL_TIMEOUT_S)
+        return _guard_forced_tool_choice(_make_genai_vertex(model_id, kwargs), model_id)
     return _guard_forced_tool_choice(
         init_chat_model(model_id, **(_provider_kwargs(model_id) | kwargs)), model_id
     )

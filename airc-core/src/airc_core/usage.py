@@ -26,7 +26,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from .pricing import price_for
-from .providers import traits_for
 
 # Metadata keys a call is tagged with so the collector can book it apart.
 # lc_source marks the ceiling summarization the agent middleware runs inside a
@@ -76,8 +75,7 @@ class Usage(BaseModel):
         Anthropic reports cache writes under ephemeral_5m/1h keys when the API
         returns the TTL breakdown and zeroes the generic cache_creation key
         when it does; older responses carry only the generic key, which is a
-        5m write. Vertex Gemini reports thoughts apart from output_tokens
-        (providers.py reasoning_in_output).
+        5m write. Every adapter counts thinking inside output_tokens.
         """
         # The detail dicts and their keys are optional per adapter, and a key
         # that is present may hold None: Anthropic attaches no output details
@@ -95,8 +93,6 @@ class Usage(BaseModel):
             write_5m = _count(details, "cache_creation")
         reasoning = _count(out_details, "reasoning")
         output = _count(u, "output_tokens")
-        if not traits_for(model_id).reasoning_in_output:
-            output += reasoning
         price = price_for(model_id)
         cost = price.cost(
             prompt_tokens=prompt,

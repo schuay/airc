@@ -25,7 +25,6 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, NotRequired
 
 from langchain.agents.middleware import (
@@ -48,7 +47,7 @@ from langgraph.constants import TAG_NOSTREAM
 from langgraph.errors import GraphBubbleUp
 
 from .collector import book_aside
-from .model import _VERTEX_PROXY_ENV, _google_sdk, make_model
+from .model import _VERTEX_PROXY_ENV, make_model
 from .providers import (
     STOP_REASON_KEYS,
     normalize_classifier_stop_reason,
@@ -2023,36 +2022,6 @@ class GroundingReminderMiddleware(AgentMiddleware):
         return self.before_model(state, runtime)
 
 
-def _seed_vertex_cache_globals() -> str:
-    """Seed `aiplatform.initializer.global_config` with location, project, and
-    credentials before calling `CachedContent.create` or `.delete`.
-
-    `langchain_google_vertexai.create_context_cache` is incomplete: it takes a
-    ChatVertexAI model instance but never passes the model's location, project,
-    or credentials to `caching.CachedContent.create`, which instead reads from
-    the SDK initializer (`global_config`). `caching.CachedContent(name).delete`
-    similarly relies on global initializer state.
-
-    We seed `global_config` directly:
-      - `_location`: must match the model's serving region (default us-central1).
-      - `_project`: avoids lazy normalization that triggers an otherwise-needless
-        Cloud Resource Manager `projects.get` call.
-    Credentials are not seeded. Under the sandbox proxy
-    (`AISAN_VERTEX_PROXY_ENDPOINT`) the box holds none: the cached-content client
-    is a different stack from the chat client and insists on TLS, so it cannot
-    use the plaintext loopback seam at all. The caller drives that path over REST
-    instead; seeding here would only point a client we do not use at a credential
-    we do not have. Everywhere else ADC applies as normal.
-    """
-    from google.cloud.aiplatform import initializer
-
-    location = os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
-    initializer.global_config._location = location
-    if project := os.environ.get("GOOGLE_CLOUD_PROJECT"):
-        initializer.global_config._project = project
-    return location
-
-
 # Summarization fires here, below the shed's _HARD_FRACTION, and keeps
 # the recent tail verbatim while compacting the rest. The two ceilings count on
 # different bases -- the shed on the provider-exact input (system + tool schemas +
@@ -2197,8 +2166,7 @@ class _GeminiVertexSession(AgentMiddleware):
     langchain-google-genai exposes: it pops that bind kwarg and merges it into
     the request's own HttpOptions, whose headers the google-genai client merges
     into the wire request. Gated on the Vertex backend, since the Developer API
-    has no such routing key; and the legacy ChatVertexAI stack is not covered --
-    it fixes its metadata at construction and takes no per-call header.
+    has no such routing key.
     """
 
     def __init__(self) -> None:
@@ -3012,72 +2980,6 @@ def _last_step_boundary(messages: list) -> int:
 
 # The cached-content API version the proxy allowlists. Measured against real
 # Vertex: v1beta1 serves cachedContents, v1 does not.
-_CACHE_API_VERSION = "v1beta1"
-
-
-def _cache_base(endpoint: str) -> str:
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-    location = os.environ.get("GOOGLE_CLOUD_LOCATION") or "global"
-    return f"{endpoint}/{_CACHE_API_VERSION}/projects/{project}/locations/{location}"
-
-
-async def _cache_create_rest(endpoint, model_id, prefix, oai_tools, ttl_minutes) -> str:
-    """Create cached content over REST, through the sandbox proxy.
-
-    The SDK client cannot be used here: it forces TLS (and, on a corp box, mTLS
-    via a device-cert provider), so it cannot reach the plaintext loopback seam
-    the chat client uses. The API itself is ordinary REST on the same host, so
-    the blocker is the client, not the endpoint -- we build the request
-    proto locally (no network) and post it ourselves.
-
-    Returns the bare id, not the resource path. ChatVertexAI wraps whatever it is
-    given as projects/<p>/locations/<l>/cachedContents/<value>, and the create
-    response names the project by number while the model is built with the
-    project name, so returning the full path yields a doubled name with both
-    identities and a 400. The SDK hides this by exposing name.split("/")[-1];
-    this must do the same.
-    """
-    import aiohttp
-    from google.protobuf.json_format import MessageToDict
-    from langchain_google_vertexai.functions_utils import _format_to_gapic_tool
-    from vertexai.caching._caching import _prepare_create_request
-    from vertexai.generative_models import Content, Part
-
-    # _prepare_create_request builds the proto locally but still reads project
-    # and location off the initializer, so they must be seeded even though
-    # nothing here touches the network.
-    location = _seed_vertex_cache_globals()
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-    model = model_id.split(":", 1)[1]
-    system, contents = "", []
-    for m in prefix:
-        if isinstance(m, SystemMessage):
-            system = str(m.content)
-        else:
-            role = "model" if isinstance(m, AIMessage) else "user"
-            contents.append(Content(role=role, parts=[Part.from_text(str(m.content))]))
-    req = _prepare_create_request(
-        f"projects/{project}/locations/{location}/publishers/google/models/{model}",
-        system_instruction=system or None,
-        contents=contents or None,
-        tools=[_format_to_gapic_tool(oai_tools)] if oai_tools else None,
-        ttl=timedelta(minutes=ttl_minutes),
-    )
-    body = MessageToDict(req._pb.cached_content)
-    url = f"{_cache_base(endpoint)}/cachedContents"
-    async with aiohttp.ClientSession() as s, s.post(url, json=body) as r:
-        r.raise_for_status()
-        return (await r.json())["name"].rsplit("/", 1)[-1]
-
-
-async def _cache_delete_rest(endpoint: str, name: str) -> None:
-    import aiohttp
-
-    url = f"{_cache_base(endpoint)}/cachedContents/{name.rsplit('/', 1)[-1]}"
-    async with aiohttp.ClientSession() as s, s.delete(url) as r:
-        r.raise_for_status()
-
-
 def _genai_client():
     """google-genai client mirroring ChatGoogleGenerativeAI's backend choice:
     a set GOOGLE_CLOUD_PROJECT selects Vertex over ADC (prod), else the
@@ -3118,12 +3020,10 @@ def _genai_client():
 async def _genai_cache_create(model_id, prefix, tools, ttl_minutes) -> str:
     """Create cached content through the google-genai SDK.
 
-    Much less machinery than the vertexai path: the langchain-google-genai
-    converter emits google.genai types directly (no proto hand-assembly, no
-    aiplatform initializer globals to seed) and the client is natively async.
-    Returns the full resource name: ChatGoogleGenerativeAI passes
-    cached_content through verbatim, so the bare-id handling _cache_create_rest
-    documents does not apply here.
+    The langchain-google-genai converter emits google.genai types directly
+    and the client is natively async.
+    Returns the full resource name; ChatGoogleGenerativeAI passes
+    cached_content through verbatim.
     """
     from google.genai import types
     from langchain_google_genai import chat_models as cm
@@ -3157,8 +3057,7 @@ async def _genai_cache_delete(name: str) -> None:
     # By bare id, letting the client rebuild the path under its project name:
     # create returns a name carrying the project number, and the sandbox
     # proxy's allowlist is anchored to the configured name, so a number-path
-    # delete would be refused in the box. The same name/number mismatch
-    # _cache_create_rest documents, at the other end of the lifecycle.
+    # delete would be refused in the box.
     client = _genai_client()  # a local for the await; see _genai_cache_create
     await client.aio.caches.delete(name=name.rsplit("/", 1)[-1])
 
@@ -3171,7 +3070,7 @@ def _growing_cache_fns(model_id, tools, ttl_minutes):
     delete(name) removes a superseded cache; model_for(name) yields a model bound
     to it; tools_tokens is a rough token estimate of the tool schemas, which live
     in the cache (not in the messages) and the floor/size math otherwise cannot
-    see. Vertex-only (create_context_cache).
+    see. Vertex-only.
     """
     import json
 
@@ -3183,34 +3082,10 @@ def _growing_cache_fns(model_id, tools, ttl_minutes):
     tools_tokens = sum(len(json.dumps(t)) for t in oai_tools) // _CHARS_PER_TOKEN
 
     async def create(prefix: list) -> str:
-        if _google_sdk() == "genai":
-            return await _genai_cache_create(model_id, prefix, tools, ttl_minutes)
-        from langchain_google_vertexai import create_context_cache
-
-        if endpoint := os.environ.get(_VERTEX_PROXY_ENV):
-            return await _cache_create_rest(
-                endpoint, model_id, prefix, oai_tools, ttl_minutes
-            )
-        _seed_vertex_cache_globals()
-        return await asyncio.to_thread(
-            create_context_cache,
-            make_model(model_id),
-            prefix,
-            tools=oai_tools,
-            time_to_live=timedelta(minutes=ttl_minutes),
-        )
+        return await _genai_cache_create(model_id, prefix, tools, ttl_minutes)
 
     async def delete(name: str) -> None:
-        if _google_sdk() == "genai":
-            await _genai_cache_delete(name)
-            return
-        from vertexai.preview import caching
-
-        if endpoint := os.environ.get(_VERTEX_PROXY_ENV):
-            await _cache_delete_rest(endpoint, name)
-            return
-        _seed_vertex_cache_globals()
-        await asyncio.to_thread(caching.CachedContent(name).delete)
+        await _genai_cache_delete(name)
 
     def model_for(name: str):
         return make_model(model_id, cached_content=name)
@@ -3473,6 +3348,14 @@ class _GrowingPrefixCache(AgentMiddleware):
             tail_chars = sum(len(str(m.content)) for m in tail) // _CHARS_PER_TOKEN
             total = max(st.prefix_tokens + tail_chars, _prev_input_tokens(tail))
             if total <= _GROWING_MAX_TOTAL:
+                # TODO: request.tools still reaches the cache-served call.
+                # ChatGoogleGenerativeAI sends them alongside cached_content and
+                # the API rejects that with 400 (the tools live in the cache).
+                # The serve-time rejection path below then drops the cache, so
+                # every tool-bound turn would run uncached. Before enabling the
+                # explicit cache again on a model that supports it, override
+                # tools=[] here and check that langchain's bind-time
+                # structured-output tool is not re-added.
                 try:
                     resp = await handler(
                         request.override(model=st.model, messages=tail)
