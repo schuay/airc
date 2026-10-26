@@ -27,7 +27,7 @@ from pathlib import Path
 from platformdirs import user_data_path
 
 from .pricing import price_for, register_alias
-from .providers import EFFORT_LEVELS, register_traits_alias, traits_for
+from .providers import EFFORT_LEVELS, effort_problem, register_traits_alias
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +170,8 @@ class ModelProfile:
     `call_kwargs` is make_model's keyword surface, not the provider's: the
     translation from a level to whatever the provider calls it lives there,
     behind one name, so config never learns that one Claude route has an
-    `effort` field and the other reaches the API through model_kwargs.
+    `effort` field, the other reaches the API through model_kwargs, and
+    Gemini calls it `thinking_level`.
     """
 
     key: str
@@ -183,7 +184,8 @@ class ModelProfile:
 
 
 # Knobs a [models] entry may carry besides the id. One name per provider-native
-# parameter; Gemini's thinking_budget is the obvious next one and is absent
+# parameter; `effort` is Claude's output_config.effort and Gemini's
+# thinking_level, which use the same names. Gemini's thinking_budget is absent
 # until something runs it, since an accepted-but-unused knob reads like an
 # honoured one.
 _PROFILE_KEYS = frozenset({"id", "effort"})
@@ -216,12 +218,8 @@ def _parse_model_profile(key: str, value: object) -> ModelProfile:
         # Checked here as well as in make_model because this is the failure the
         # operator can act on: it names the section to edit, at startup, instead
         # of at the first call the daemon happens to make.
-        if not traits_for(str(model_id)).supports_effort:
-            raise SystemExit(
-                f"[models.{key}] effort is a Claude parameter and {model_id}"
-                " is not a Claude model. Gemini's thinking depth is a token"
-                " budget, not a level, and the two are not interconvertible."
-            )
+        if problem := effort_problem(str(model_id), effort):
+            raise SystemExit(f"[models.{key}] {problem}")
     return ModelProfile(key=key, id=str(model_id), effort=effort)
 
 

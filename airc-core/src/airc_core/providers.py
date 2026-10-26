@@ -19,6 +19,21 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 
+# Every effort level any provider accepts, in increasing depth. Claude's
+# output_config.effort vocabulary. The SDK exposes it as a Literal, and config
+# validation runs before any langchain import, so the tuple is repeated here.
+#
+# Which levels a provider accepts is ProviderTraits.effort_levels. Whether a
+# given model behind that provider accepts them is not tracked; the provider
+# rejects the call.
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+# Gemini's generation_config.thinking_config.thinking_level. The enum also has
+# MINIMAL, which gemini-4-argon rejects, and EXTRA_HIGH/MAX, which the proto
+# marks as not served by any Gemini model (gemini-4-argon accepts them and
+# thinks no more than at HIGH). None of the three is offered.
+_GEMINI_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+
 
 @dataclass(frozen=True)
 class ProviderTraits:
@@ -34,13 +49,15 @@ class ProviderTraits:
     # response_metadata keys holding the model's stop reason. Providers pass
     # their own field names straight through, so the reader has to know them.
     stop_reason_keys: tuple[str, ...] = ("finish_reason",)
-    # Whether the provider takes a reasoning-depth level (EFFORT_LEVELS). False
-    # is not "this provider cannot think" -- Gemini thinks too, but it is
-    # configured by a token budget (thinking_budget), which is a different knob
-    # with a different unit. A level is refused on such a provider instead of
-    # converted into a budget: an invented equivalence would change the request
-    # into something nobody asked for, on the most expensive parameter there is.
-    supports_effort: bool = False
+    # The effort levels the provider accepts, a subset of EFFORT_LEVELS; empty
+    # when it accepts none. A level outside this set is refused, not mapped to
+    # the nearest one: that would change the request without saying so.
+    effort_levels: tuple[str, ...] = ()
+
+    @property
+    def supports_effort(self) -> bool:
+        return bool(self.effort_levels)
+
     # Whether the reported output_tokens already includes thinking. Every
     # provider bills thinking at the output rate, but the langchain-google-vertexai
     # adapter reports candidates and thoughts as two numbers and puts only the
@@ -64,13 +81,17 @@ _ANTHROPIC = ProviderTraits(
         " passes that relied on it for variance get none from this provider."
     ),
     stop_reason_keys=("stop_reason",),
-    supports_effort=True,
+    effort_levels=EFFORT_LEVELS,
 )
 
 # A google_vertexai: id is served by one of two adapters (google_sdk), and the
-# trait that differs between them is the adapter's, not the endpoint's.
+# traits that differ between them are the adapter's, not the endpoint's. Only
+# the genai adapter has a thinking_level field; the deprecated vertexai one has
+# thinking_budget alone, so it accepts no effort level.
 _GEMINI_VERTEX_LEGACY = ProviderTraits(id="google_vertexai", reasoning_in_output=False)
-_GEMINI_VERTEX_GENAI = ProviderTraits(id="google_vertexai")
+_GEMINI_VERTEX_GENAI = ProviderTraits(
+    id="google_vertexai", effort_levels=_GEMINI_EFFORT_LEVELS
+)
 
 _DEFAULT = ProviderTraits(id="")
 
@@ -104,6 +125,23 @@ def traits_for(model_id: str) -> ProviderTraits:
             _GEMINI_VERTEX_GENAI if google_sdk() == "genai" else _GEMINI_VERTEX_LEGACY
         )
     return _TRAITS.get(prefix, _DEFAULT)
+
+
+def effort_problem(model_id: str, effort: str) -> str | None:
+    """Why `model_id`'s provider cannot take `effort`, or None when it can.
+
+    Shared by config (SystemExit at load) and make_model (ValueError) so the
+    two messages stay the same. `effort` must already be in EFFORT_LEVELS.
+    """
+    traits = traits_for(model_id)
+    if not traits.effort_levels:
+        return f"{model_id} takes no effort level: its provider has no such parameter"
+    if effort not in traits.effort_levels:
+        return (
+            f"{model_id} does not accept effort {effort!r}: its provider accepts"
+            f" {', '.join(traits.effort_levels)}"
+        )
+    return None
 
 
 # Every name a provider might use for the stop reason, in table order. Readers
@@ -178,18 +216,6 @@ def normalize_prompt_block_reason(metadata: dict | None) -> str:
     if not reason or reason == "blocked_reason_unspecified":
         return ""
     return PROMPT_BLOCK_PREFIX + reason
-
-
-# output_config.effort, in increasing depth. The Messages API's own vocabulary,
-# so it is repeated here instead of derived: the SDK exposes it as a Literal
-# that cannot be iterated, and config validation needs the set before any
-# langchain import has happened.
-#
-# A provider taking a level is not the same as every model behind it taking one
-# -- the older Claudes accept a shorter ladder or none at all, and that is a
-# per-model fact no table here tracks. Config checks the vocabulary; the
-# provider rejects a model that cannot serve the level asked for.
-EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 
 def bare_model_name(model_id: str) -> str:

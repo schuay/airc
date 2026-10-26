@@ -854,12 +854,58 @@ def test_effort_on_direct_anthropic_uses_the_first_class_field():
     assert m.effort == "medium"
 
 
-def test_effort_on_a_non_claude_model_raises_rather_than_dropping():
+def test_effort_on_gemini_genai_becomes_thinking_level(monkeypatch):
+    """ChatGoogleGenerativeAI calls the parameter thinking_level; the level
+    names match, so the value passes through unchanged."""
+    pytest.importorskip("langchain_google_genai")
+
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model("google_vertexai:gemini-4-argon", effort="medium")
+    assert m.thinking_level == "medium"
+    # And it has to be in the config the client actually sends.
+    assert m._build_thinking_config().thinking_level == "MEDIUM"
+    # The branch's include_thoughts default is kept.
+    assert m.include_thoughts is False
+
+
+def test_no_effort_on_gemini_genai_sends_no_thinking_level(monkeypatch):
+    """Omitting the level leaves the model at its default, as on the Anthropic
+    path."""
+    pytest.importorskip("langchain_google_genai")
+
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
+    m = make_model("google_vertexai:gemini-4-argon")
+    assert m.thinking_level is None
+
+
+def test_an_effort_gemini_does_not_accept_raises(monkeypatch):
+    """Gemini accepts low/medium/high. The API also accepts EXTRA_HIGH and MAX
+    without serving them, so xhigh is refused rather than sent."""
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    with pytest.raises(ValueError) as e:
+        make_model("google_vertexai:gemini-4-argon", effort="xhigh")
+    assert "does not accept effort 'xhigh'" in str(e.value)
+    assert "low, medium, high" in str(e.value)
+
+
+def test_effort_on_the_legacy_vertexai_adapter_raises_rather_than_dropping(
+    monkeypatch,
+):
     """Every other unsupported kwarg degrades to a warning, because the request
     still means what it meant. A dropped level does not: it leaves the model at
-    the API default of `high`, two rungs above the `low` the file asked for."""
+    the API default of `high`, two levels above the `low` the file asked for.
+    ChatVertexAI has only thinking_budget, so there is nothing to translate to."""
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "vertexai")
     with pytest.raises(ValueError) as e:
         make_model("google_vertexai:gemini-3.6-flash", effort="low")
+    assert "no effort level" in str(e.value)
+
+
+def test_effort_on_a_provider_without_levels_raises():
+    with pytest.raises(ValueError) as e:
+        make_model("openai:gpt-5", api_key="k", effort="low")
     assert "no effort level" in str(e.value)
 
 

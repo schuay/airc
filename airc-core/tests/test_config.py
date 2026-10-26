@@ -260,21 +260,48 @@ def test_models_still_maps_key_to_id_for_the_egress_allowlists():
     }
 
 
-def test_effort_on_a_non_claude_model_is_refused_by_name():
-    # Gemini's depth is a token budget; converting a level into one would be
-    # inventing an equivalence on the most expensive parameter there is.
+def test_a_gemini_entry_carries_an_effort_level(monkeypatch):
+    # Gemini's thinking_level uses the same low/medium/high names.
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    cfg = load_common(
+        {
+            "models": {
+                "review": {"id": "google_vertexai:gemini-4-argon", "effort": "high"}
+            }
+        }
+    )
+    assert cfg.model_profiles["review"].call_kwargs == {"effort": "high"}
+
+
+def test_an_effort_gemini_does_not_accept_is_refused_by_name(monkeypatch):
+    # The API accepts EXTRA_HIGH/MAX without serving them; refused at load.
+    monkeypatch.setenv("AIRC_GOOGLE_SDK", "genai")
+    with pytest.raises(SystemExit) as e:
+        load_common(
+            {
+                "models": {
+                    "review": {"id": "google_vertexai:gemini-4-argon", "effort": "max"}
+                }
+            }
+        )
+    assert "[models.review]" in str(e.value)
+    assert "does not accept effort 'max'" in str(e.value)
+
+
+def test_effort_on_a_provider_without_levels_is_refused_by_name():
     with pytest.raises(SystemExit) as e:
         load_common(
             {
                 "models": {
                     "filter": {
-                        "id": "google_vertexai:gemini-3.6-flash",
+                        "id": "openai:gpt-5",
                         "effort": "low",
                     }
                 }
             }
         )
-    assert "not a Claude model" in str(e.value)
+    assert "[models.filter]" in str(e.value)
+    assert "no effort level" in str(e.value)
 
 
 def test_an_effort_outside_the_ladder_is_refused():

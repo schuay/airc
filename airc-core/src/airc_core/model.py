@@ -35,7 +35,13 @@ from dataclasses import dataclass
 
 from langchain.chat_models import init_chat_model
 
-from .providers import EFFORT_LEVELS, google_sdk, model_traits_for, traits_for
+from .providers import (
+    EFFORT_LEVELS,
+    effort_problem,
+    google_sdk,
+    model_traits_for,
+    traits_for,
+)
 
 log = logging.getLogger(__name__)
 
@@ -644,22 +650,19 @@ def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
     the same fact earlier, so this is reached by direct callers (tests, scripts)
     and not by a running daemon.
 
-    The two Claude routes name the parameter differently, which is why this is
-    here and not in the traits table: langchain-anthropic has a first-class
-    `effort` field, while ChatAnthropicVertex has no field for it at all and
-    reaches the API through model_kwargs, whose contents are splatted into
-    messages.create(). The caller's own output_config (a response format, say)
-    is merged, not replaced.
+    The routes name the parameter differently, which is why this is here and
+    not in the traits table: langchain-anthropic has an `effort` field;
+    ChatAnthropicVertex has no field for it and reaches the API through
+    model_kwargs, whose contents are splatted into messages.create();
+    ChatGoogleGenerativeAI calls it `thinking_level`. The caller's own
+    output_config (a response format, say) is merged, not replaced.
     """
     if effort not in EFFORT_LEVELS:
         raise ValueError(
             f"unknown effort {effort!r}: expected one of {', '.join(EFFORT_LEVELS)}"
         )
-    if not traits_for(model_id).supports_effort:
-        raise ValueError(
-            f"{model_id} takes no effort level: it is not a Claude model, and a"
-            " level is not converted into another provider's thinking budget"
-        )
+    if problem := effort_problem(model_id, effort):
+        raise ValueError(problem)
     if model_id.startswith("google_anthropic_vertex:"):
         model_kwargs = dict(kwargs.get("model_kwargs") or {})
         model_kwargs["output_config"] = {
@@ -667,6 +670,11 @@ def _apply_effort(kwargs: dict, model_id: str, effort: str) -> None:
             "effort": effort,
         }
         kwargs["model_kwargs"] = model_kwargs
+        return
+    if model_id.startswith("google_vertexai:"):
+        # Reached only on the genai adapter; effort_problem refused the legacy
+        # one. The level names match, so no translation.
+        kwargs["thinking_level"] = effort
         return
     kwargs["effort"] = effort
 
