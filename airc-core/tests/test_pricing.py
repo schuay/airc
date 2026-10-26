@@ -66,15 +66,17 @@ def test_gemini_pro_tier_switches_on_the_calls_own_prompt():
     assert p.cost(prompt_tokens=300_000).total == pytest.approx(300_000 * 4.0 / 1e6)
 
 
-def test_gemini_4_pro_is_listed_with_opus_ratio_cache_rates():
-    p = price_for("google_vertexai:gemini-4-pro")
+def test_gemini_4_argon_is_listed_at_the_standard_rate_with_no_cache_fees():
+    p = price_for("google_vertexai:gemini-4-argon")
     assert not p.generic and p.long_context is None
     r = p.rate
-    assert (r.input, r.output) == (4.0, 20.0)
-    # TODO: update with the published cache rates; these are Opus's ratios.
-    assert r.cache_read == pytest.approx(0.1 * r.input)
-    assert r.cache_write_5m == pytest.approx(1.25 * r.input)
-    assert r.cache_write_1h == pytest.approx(2.0 * r.input)
+    assert (r.input, r.cache_read, r.output) == (4.0, 0.2, 20.0)
+    # Implicit caching only: nothing to write and nothing to store.
+    assert (r.cache_write_5m, r.cache_write_1h, r.cache_storage_hour) == (0, 0, 0)
+    # A 100k prompt with 80k served from cache: 20k * $4 + 80k * $0.2.
+    cost = p.cost(prompt_tokens=100_000, cache_read=80_000, output=1_000)
+    assert cost.input == pytest.approx((20_000 * 4.0 + 80_000 * 0.2) / 1e6)
+    assert cost.output == pytest.approx(1_000 * 20.0 / 1e6)
 
 
 def test_cost_bills_each_part_at_its_own_rate():

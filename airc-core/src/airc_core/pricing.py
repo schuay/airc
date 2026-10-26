@@ -147,26 +147,17 @@ _LISTED: dict[str, Price] = {
                 " standard rate is 1.50 / 0.15 / 7.50, storage 1.00"
             ),
         ),
-        # TODO: Replace the approximated parts below once Gemini 4 Pro's full
-        # listing is published. Only input and output are announced (the
-        # post-introductory rate; the introductory rate is not known here).
-        # Cache read and writes copy Opus's ratios to input (read 0.1x,
-        # 5m write 1.25x, 1h write 2x), storage is unpriced as on Opus, and
-        # there is no >200k long-context tier yet.
+        # The standard rate, which is what the invoice shows. Through
+        # 2026-11-30 Vertex credits 50% of net spend back the following month.
+        # Implicit caching only, so no write or storage rate; no long-context
+        # tier. Non-global endpoints are 1.1x; airc uses global.
         Price(
-            model="gemini-4-pro",
-            rate=Rate(
-                input=4.0,
-                cache_read=0.4,  # TODO: Opus ratio placeholder.
-                output=20.0,
-                cache_write_5m=5.0,  # TODO: Opus ratio placeholder.
-                cache_write_1h=8.0,  # TODO: Opus ratio placeholder.
-                # TODO: cache_storage_hour and long_context are unknown.
-            ),
-            as_of=date(2026, 10, 1),
+            model="gemini-4-argon",
+            rate=Rate(input=4.0, cache_read=0.2, output=20.0),
+            as_of=date(2026, 10, 26),
             note=(
-                "input/output are the announced post-introductory rate;"
-                " cache read/write approximated with Opus's ratios"
+                "standard rate; through 2026-11-30 Vertex credits 50% of net"
+                " spend back, an effective 2.0 / 0.1 / 10.0"
             ),
         ),
         Price(
