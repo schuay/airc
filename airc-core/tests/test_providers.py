@@ -135,6 +135,26 @@ def test_model_traits_key_by_bare_name_across_providers_and_version_pins():
     assert model_traits_for("some_new_provider:m").supports_forced_tool_choice is True
 
 
+@pytest.mark.parametrize(
+    ("name", "forced"),
+    [
+        ("claude-fable-5-1", False),
+        ("claude-opus-5-5", False),
+        ("claude-sonnet-5-5", False),
+        ("claude-fable-5", True),
+        ("claude-opus-5", True),
+        ("claude-sonnet-5", True),
+        ("claude-haiku-5-5", True),
+    ],
+)
+def test_forced_tool_choice_is_refused_by_the_current_top_checkpoints(name, forced):
+    """The checkpoints that 400 on tool_choice "any"/"tool" are marked; their
+    predecessors and Haiku, which still accept a forced choice, keep the
+    default so a salvage call can still pin the result tool."""
+    for mid in (f"anthropic:{name}", f"google_anthropic_vertex:{name}"):
+        assert model_traits_for(mid).supports_forced_tool_choice is forced, mid
+
+
 def test_slow_to_converge_marks_the_long_running_checkpoint():
     """gemini-3.1-pro-preview is flagged slow_to_converge across its routes and
     version pins; other checkpoints and unlisted models are not."""

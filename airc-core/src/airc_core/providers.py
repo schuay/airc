@@ -215,15 +215,25 @@ class ModelTraits:
 
 _DEFAULT_MODEL = ModelTraits(id="")
 
-# claude-opus-5-5 rejects tool_choice types "any" and "tool" with 400
-# ("tool_choice: type 'tool' and 'any' are not supported for this model"),
-# whether or not thinking is configured in the request.
+# claude-opus-5-5, claude-sonnet-5-5 and claude-fable-5-1 reject tool_choice
+# types "any" and "tool" with 400 ("tool_choice: type 'tool' and 'any' are not
+# supported for this model"), whether or not thinking is configured in the
+# request. Their predecessors (claude-opus-5, claude-sonnet-5, claude-fable-5)
+# and claude-haiku-5-5 still accept a forced choice.
 #
 # gemini-3.1-pro-preview runs long: it uses several times the tool calls a
 # Claude checkpoint spends on the same task before concluding.
 _MODEL_TRAITS: dict[str, ModelTraits] = {
+    "claude-fable-5-1": ModelTraits(
+        id="claude-fable-5-1",
+        supports_forced_tool_choice=False,
+    ),
     "claude-opus-5-5": ModelTraits(
         id="claude-opus-5-5",
+        supports_forced_tool_choice=False,
+    ),
+    "claude-sonnet-5-5": ModelTraits(
+        id="claude-sonnet-5-5",
         supports_forced_tool_choice=False,
     ),
     "gemini-3.1-pro-preview": ModelTraits(
