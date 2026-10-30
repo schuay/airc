@@ -122,6 +122,65 @@ _DEEPSEEK_FLASH = Price(
     ),
 )
 
+# Anthropic's first-party rates for the Claude checkpoints, keyed by the bare
+# name that every route (direct, Vertex, an aggregator) reduces to. Every
+# listing bills a 5-minute cache write at 1.25x and a 1-hour write at 2x the
+# input rate; the read rate is 0.1x of input unless the listing says otherwise,
+# so only the exceptions carry one. No storage fee. Vertex prices the same
+# checkpoints under its own partner schedule, which this table does not model.
+_CLAUDE_READ = date(2026, 10, 6)
+
+
+def _claude(
+    model: str,
+    *,
+    input: float,
+    output: float,
+    cache_read: float | None = None,
+    long_context: tuple[int, Rate] | None = None,
+    note: str = "",
+) -> Price:
+    return Price(
+        model=model,
+        rate=_claude_rate(input, output, cache_read),
+        long_context=long_context,
+        as_of=_CLAUDE_READ,
+        note=note,
+    )
+
+
+def _claude_rate(input: float, output: float, cache_read: float | None = None) -> Rate:
+    return Rate(
+        input=input,
+        cache_read=input / 10 if cache_read is None else cache_read,
+        output=output,
+        cache_write_5m=input * 1.25,
+        cache_write_1h=input * 2,
+    )
+
+
+_CLAUDE: tuple[Price, ...] = (
+    _claude("claude-fable-5-1", input=10.0, output=50.0, cache_read=0.25),
+    _claude("claude-fable-5", input=10.0, output=50.0),
+    _claude("claude-opus-5-5", input=4.0, output=20.0, cache_read=0.2),
+    _claude("claude-opus-5", input=5.0, output=25.0),
+    _claude("claude-opus-4-8", input=5.0, output=25.0),
+    _claude("claude-opus-4-7", input=5.0, output=25.0),
+    _claude("claude-opus-4-6", input=5.0, output=25.0),
+    _claude("claude-sonnet-5-5", input=2.0, output=10.0),
+    _claude("claude-sonnet-5", input=2.0, output=10.0),
+    _claude("claude-sonnet-4-6", input=3.0, output=15.0),
+    # Two rate cards, chosen by the prompt size of each call: the second
+    # applies once the prompt exceeds 100k tokens.
+    _claude(
+        "claude-haiku-5-5",
+        input=0.1,
+        output=0.5,
+        long_context=(100_000, _claude_rate(0.5, 2.5)),
+    ),
+    _claude("claude-haiku-4-5", input=1.0, output=5.0),
+)
+
 _LISTED: dict[str, Price] = {
     p.model: p
     for p in (
@@ -160,28 +219,7 @@ _LISTED: dict[str, Price] = {
                 " spend back, an effective 2.0 / 0.1 / 10.0"
             ),
         ),
-        Price(
-            model="claude-opus-5",
-            rate=Rate(
-                input=5.0,
-                cache_read=0.5,
-                output=25.0,
-                cache_write_5m=6.25,
-                cache_write_1h=10.0,
-            ),
-            as_of=_READ,
-        ),
-        Price(
-            model="claude-opus-5-5",
-            rate=Rate(
-                input=5.0,
-                cache_read=0.5,
-                output=25.0,
-                cache_write_5m=6.25,
-                cache_write_1h=10.0,
-            ),
-            as_of=_READ,
-        ),
+        *_CLAUDE,
     )
 }
 

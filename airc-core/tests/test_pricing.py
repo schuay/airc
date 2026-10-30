@@ -79,6 +79,62 @@ def test_gemini_4_argon_is_listed_at_the_standard_rate_with_no_cache_fees():
     assert cost.output == pytest.approx(1_000 * 20.0 / 1e6)
 
 
+@pytest.mark.parametrize(
+    ("model", "rates"),
+    [
+        ("claude-fable-5-1", (10.0, 0.25, 50.0)),
+        ("claude-fable-5", (10.0, 1.0, 50.0)),
+        ("claude-opus-5-5", (4.0, 0.2, 20.0)),
+        ("claude-opus-5", (5.0, 0.5, 25.0)),
+        ("claude-opus-4-8", (5.0, 0.5, 25.0)),
+        ("claude-opus-4-7", (5.0, 0.5, 25.0)),
+        ("claude-opus-4-6", (5.0, 0.5, 25.0)),
+        ("claude-sonnet-5-5", (2.0, 0.2, 10.0)),
+        ("claude-sonnet-5", (2.0, 0.2, 10.0)),
+        ("claude-sonnet-4-6", (3.0, 0.3, 15.0)),
+        ("claude-haiku-5-5", (0.1, 0.01, 0.5)),
+        ("claude-haiku-4-5", (1.0, 0.1, 5.0)),
+    ],
+)
+def test_claude_listings_match_the_published_first_party_rates(model, rates):
+    """Input, cache read and output per MTok as Anthropic lists them. The read
+    rate is the one that varies: 0.1x of input everywhere except claude-opus-5-5
+    (0.05x) and claude-fable-5-1 (0.025x)."""
+    p = price_for(f"anthropic:{model}")
+    assert not p.generic and p.model == model
+    assert (p.rate.input, p.rate.cache_read, p.rate.output) == pytest.approx(rates)
+    assert price_for(f"google_anthropic_vertex:{model}") is p
+
+
+def test_every_claude_listing_bills_cache_writes_at_the_messages_api_ratios():
+    """A 5-minute write is 1.25x input and a 1-hour write 2x on every Claude
+    checkpoint; a read never exceeds 0.1x. No Claude listing stores by the
+    token-hour."""
+    claude = [n for n in listed_models() if n.startswith("claude-")]
+    assert len(claude) >= 12
+    for name in claude:
+        r = price_for(name).rate
+        assert r.cache_write_5m == pytest.approx(1.25 * r.input), name
+        assert r.cache_write_1h == pytest.approx(2.0 * r.input), name
+        assert r.cache_read <= 0.1 * r.input + 1e-12, name
+        assert r.cache_storage_hour == 0, name
+
+
+def test_haiku_5_5_switches_rate_card_above_100k_prompt_tokens():
+    p = price_for("anthropic:claude-haiku-5-5")
+    assert p.rate_for(100_000) is p.rate
+    assert p.rate_for(100_001) is p.long_context[1]
+    high = p.long_context[1]
+    assert (high.input, high.cache_read, high.output) == pytest.approx((0.5, 0.05, 2.5))
+    assert high.cache_write_5m == pytest.approx(0.625)
+    assert high.cache_write_1h == pytest.approx(1.0)
+    # 150k prompt, 100k of it read from cache: the whole call is on the second
+    # card, reads included.
+    cost = p.cost(prompt_tokens=150_000, cache_read=100_000, output=1_000)
+    assert cost.input == pytest.approx((50_000 * 0.5 + 100_000 * 0.05) / 1e6)
+    assert cost.output == pytest.approx(1_000 * 2.5 / 1e6)
+
+
 def test_cost_bills_each_part_at_its_own_rate():
     p = price_for("anthropic:claude-opus-5")
     # 1000 uncached + 8000 read + 1000 written (5m) + 500 out.
