@@ -686,6 +686,23 @@ def make_model(model_id: str, *, effort: str | None = None, **kwargs):
         # ANTHROPIC_VERTEX_BASE_URL, which the sandbox profile sets.
         if os.environ.get(_VERTEX_PROXY_ENV) and not kwargs.get("credentials"):
             kwargs.setdefault("access_token", _PROXY_PLACEHOLDER_TOKEN)
+    if model_id.startswith("anthropic:"):
+        # The same call-time defaults as the Vertex route above, set on
+        # ChatAnthropic's own fields. Its defaults are wrong in the same ways:
+        # max_tokens comes from the model profile (128k on current checkpoints,
+        # which the deadline cannot deliver; see _ANTHROPIC_MAX_OUTPUT_TOKENS),
+        # max_retries is the SDK's 2 under a middleware that already retries,
+        # and the timeout is pinned so both Claude routes share one deadline.
+        # thinking is a first-class field on this client, so it needs no
+        # model_kwargs detour.
+        #
+        # A sandboxed caller needs nothing extra: the SDK reads
+        # ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY, which an egress relay sets
+        # to its loopback endpoint and a placeholder.
+        kwargs.setdefault("max_tokens", _ANTHROPIC_MAX_OUTPUT_TOKENS)
+        kwargs.setdefault("max_retries", 1)
+        kwargs.setdefault("timeout", _VERTEX_CALL_TIMEOUT_S)
+        kwargs.setdefault("thinking", {"type": "adaptive", "display": "omitted"})
     if model_id.startswith("google_vertexai:"):
         return _guard_forced_tool_choice(_make_genai_vertex(model_id, kwargs), model_id)
     return _guard_forced_tool_choice(

@@ -186,6 +186,66 @@ def test_an_explicit_caller_value_still_wins_over_the_anthropic_defaults(monkeyp
     assert m.location == "us-east5"
 
 
+def test_direct_anthropic_gets_the_same_call_time_guards_as_the_vertex_route(
+    monkeypatch,
+):
+    """ChatAnthropic's own defaults fail the same way ChatAnthropicVertex's do:
+    max_tokens from the model profile (128k, past what the deadline can
+    deliver), two SDK retries under a middleware that already retries, and a
+    timeout the branch pins so both Claude routes share one deadline."""
+    pytest.importorskip("langchain_anthropic")
+    from airc_core.model import _ANTHROPIC_MAX_OUTPUT_TOKENS, _VERTEX_CALL_TIMEOUT_S
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_URL", raising=False)
+    m = make_model("anthropic:claude-haiku-5-5")
+    assert m.max_tokens == _ANTHROPIC_MAX_OUTPUT_TOKENS
+    assert m.max_retries == 1
+    assert m.default_request_timeout == _VERTEX_CALL_TIMEOUT_S
+    assert m._client.timeout == _VERTEX_CALL_TIMEOUT_S
+    assert m._async_client.timeout == _VERTEX_CALL_TIMEOUT_S
+    # Adaptive thinking with the text channel suppressed, on the wire.
+    body = m._get_request_payload([HumanMessage("hi")])
+    assert body["thinking"] == {"type": "adaptive", "display": "omitted"}
+    assert body["max_tokens"] == _ANTHROPIC_MAX_OUTPUT_TOKENS
+    assert "temperature" not in body
+
+
+def test_an_explicit_caller_value_wins_over_the_direct_anthropic_defaults(
+    monkeypatch,
+):
+    pytest.importorskip("langchain_anthropic")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    m = make_model(
+        "anthropic:claude-haiku-5-5",
+        max_tokens=64,
+        timeout=5,
+        max_retries=3,
+        thinking={"type": "adaptive", "display": "summarized"},
+    )
+    assert m.max_tokens == 64
+    assert m._client.timeout == 5
+    assert m.max_retries == 3
+    assert m.thinking == {"type": "adaptive", "display": "summarized"}
+
+
+def test_direct_anthropic_follows_the_base_url_an_egress_relay_sets(monkeypatch):
+    """What a sandbox relies on: with no endpoint wiring in make_model, the
+    client picks up ANTHROPIC_BASE_URL and the placeholder key from the
+    environment, so a box reaches its loopback relay and nothing else."""
+    pytest.importorskip("langchain_anthropic")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "aisan-placeholder-not-a-credential")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8713")
+    monkeypatch.delenv("ANTHROPIC_API_URL", raising=False)
+    m = make_model("anthropic:claude-haiku-5-5")
+    assert str(m._client.base_url).rstrip("/") == "http://127.0.0.1:8713"
+    assert m._client.api_key == "aisan-placeholder-not-a-credential"
+
+
 def _anthropic_wire_body(model, **call_kwargs) -> dict:
     """The body ChatAnthropicVertex would splat into messages.create()."""
     from langchain_core.messages import HumanMessage
@@ -443,8 +503,8 @@ def test_make_model_shallows_vertex_sdk_retries(monkeypatch):
     m.make_model("google_vertexai:gemini-2.5-flash", max_retries=6)
     assert captured["max_retries"] == 6  # explicit caller value wins
 
-    m.make_model("anthropic:claude-fable-5")
-    assert "max_retries" not in captured  # non-vertex untouched
+    m.make_model("openai:gpt-5")
+    assert "max_retries" not in captured  # providers without a branch untouched
 
 
 def test_the_proxy_is_the_only_credential_path_into_a_box(monkeypatch):
