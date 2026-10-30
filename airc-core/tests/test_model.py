@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 
+import warnings
+
 import pytest
 from airc_core import SUPPORTED_PROVIDERS, check_model_id, list_models, make_model
 
@@ -808,6 +810,34 @@ def test_no_effort_sends_no_output_config(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "p")
     m = make_model("google_anthropic_vertex:claude-opus-5", access_token="x")
     assert "output_config" not in m.model_kwargs
+
+
+def test_direct_anthropic_drops_forced_tool_choice_while_thinking():
+    """The direct API refuses forced tool use with thinking on, for every
+    checkpoint. make_model enables adaptive thinking by default, so the guard
+    strips the choice before langchain-anthropic would, which also removes the
+    per-call UserWarning that adapter emits. With thinking off the trait alone
+    decides, and Haiku keeps a forced choice."""
+    pytest.importorskip("langchain_anthropic")
+
+    tool = {
+        "name": "ReviewResult",
+        "description": "report",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+    m = make_model("anthropic:claude-haiku-5-5", api_key="x")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for forced in ("any", "ReviewResult", {"type": "any"}):
+            assert "tool_choice" not in m.bind_tools([tool], tool_choice=forced).kwargs
+        assert m.bind_tools([tool], tool_choice="auto").kwargs["tool_choice"] == {
+            "type": "auto"
+        }
+
+    plain = make_model("anthropic:claude-haiku-5-5", api_key="x", thinking=None)
+    assert plain.bind_tools([tool], tool_choice="any").kwargs["tool_choice"] == {
+        "type": "any"
+    }
 
 
 def test_models_without_forced_tool_choice_drop_any_and_named_tool(monkeypatch):

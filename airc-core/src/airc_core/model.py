@@ -561,19 +561,38 @@ def _strip_forced_tool_choice(tool_choice):
     return None
 
 
+def _thinking_enabled(model) -> bool:
+    """Whether the client sends a thinking block. Only ChatAnthropic has the
+    field; the Vertex client carries thinking in model_kwargs and is not
+    covered here."""
+    thinking = getattr(model, "thinking", None)
+    return isinstance(thinking, dict) and thinking.get("type") in (
+        "enabled",
+        "adaptive",
+    )
+
+
 def _guard_forced_tool_choice(model, model_id: str):
-    """Drop forced tool_choice on checkpoints whose API refuses "any" and "tool".
+    """Drop forced tool_choice where the API would refuse "any" and "tool".
 
     ToolStrategy binds every agent call with tool_choice="any", and review's
-    salvage call binds tool_choice=<schema>. ChatAnthropicVertex passes both
-    straight through to messages.create(), where checkpoints like claude-opus-5-5
-    reject them with 400 ("tool_choice: type 'tool' and 'any' are not supported
-    for this model"). Dropping to None leaves the request in the provider's
-    default "auto" mode; RequireStructuredResultMiddleware and
-    FinalAnswerMiddleware handle a turn that answers in prose instead of calling
-    the result tool.
+    salvage call binds tool_choice=<schema>. Two cases refuse them:
+
+    * checkpoints whose API rejects forced choice outright, e.g.
+      claude-opus-5-5 on Vertex with 400 ("tool_choice: type 'tool' and 'any'
+      are not supported for this model"); the trait records these.
+    * the direct Anthropic API with thinking on, for every model ("Thinking
+      may not be enabled when tool_choice forces tool use"). langchain-anthropic
+      drops the choice itself in that case, with a UserWarning per call;
+      stripping it here is the same request without the noise.
+
+    Dropping to None leaves the request in the provider's default "auto" mode;
+    RequireStructuredResultMiddleware and FinalAnswerMiddleware handle a turn
+    that answers in prose instead of calling the result tool.
     """
-    if model_traits_for(model_id).supports_forced_tool_choice:
+    if model_traits_for(model_id).supports_forced_tool_choice and not (
+        _thinking_enabled(model)
+    ):
         return model
     orig = getattr(model, "bind_tools", None)
     if orig is None:
