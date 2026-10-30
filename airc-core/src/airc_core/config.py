@@ -241,9 +241,21 @@ def _parse_model_profile(key: str, value: object) -> ModelProfile:
 # parsed here so the whole picture is in one section, and refused for an
 # impersonated principal unless it is marked rbe_allowlisted: a bot token handed
 # to reclient fails every compile, and that should be a config error.
+#
+# `source_credentials` names where every impersonation starts from: the Google
+# credential of the host itself, which the IAM Credentials API exchanges for a
+# principal's token. Absent, it is the gcloud ADC login. A host whose identity
+# comes from somewhere else (an agent machine with no gcloud login) sets it to
+# an import string `module:callable`; load_common calls it once, with no
+# arguments, and the callable installs the credential wherever the host's
+# clients read it. Core only knows the import string; what the credential is
+# and how it is minted belongs to the package that provides it.
+#
+#   source_credentials = "some_package.identity:install_source_credentials"
 
 IDENTITY_USES = ("gerrit", "pinpoint", "cas", "rbe")
 OPERATOR = "operator"
+SOURCE_CREDENTIALS = "source_credentials"
 _PRINCIPAL_KEYS = {"impersonate", "luci_auth", "gerrit_account", "rbe_allowlisted"}
 
 
@@ -265,6 +277,9 @@ class Principal:
 class IdentityConfig:
     principals: Mapping[str, Principal]
     uses: Mapping[str, str]  # every IDENTITY_USES entry -> principal name
+    #: `module:callable` that installs the host's source credential at startup,
+    #: or None for the gcloud ADC login.
+    source_credentials: str | None = None
 
     def principal_for(self, use: str) -> Principal:
         return self.principals[self.uses[use]]
@@ -321,7 +336,17 @@ def load_identity(raw: Mapping) -> IdentityConfig:
         raise SystemExit("[identity] must be a table")
     principals: dict[str, Principal] = {}
     uses: dict[str, str] = {}
+    source = section.get(SOURCE_CREDENTIALS)
+    if source is not None:
+        module, sep, attr = str(source).partition(":")
+        if not (isinstance(source, str) and sep and module and attr):
+            raise SystemExit(
+                f"[identity] {SOURCE_CREDENTIALS} must be an import string"
+                " 'module:callable'"
+            )
     for key, value in section.items():
+        if key == SOURCE_CREDENTIALS:
+            continue
         if isinstance(value, Mapping):
             if key in IDENTITY_USES:
                 raise SystemExit(f"[identity] {key} is a use, not a principal name")
@@ -349,7 +374,34 @@ def load_identity(raw: Mapping) -> IdentityConfig:
             " instance, which fails every compile. Point rbe at a luci_auth"
             " principal, or mark the account rbe_allowlisted = true once it is."
         )
-    return IdentityConfig(principals=principals, uses=uses)
+    return IdentityConfig(principals=principals, uses=uses, source_credentials=source)
+
+
+def install_source_credentials(identity: IdentityConfig) -> None:
+    """Call the configured `source_credentials` installer, once per process.
+
+    Runs from load_common because every component (room, watchers, processors,
+    icompleteu) loads the shared sections through it and each needs the source
+    credential before its first credentialed call. A second load in the same
+    process (tests, --explain paths) is a no-op for the same import string.
+    """
+    spec = identity.source_credentials
+    if not spec or spec in _installed_source_credentials:
+        return
+    module, _, attr = spec.partition(":")
+    from importlib import import_module
+
+    try:
+        installer = getattr(import_module(module), attr)
+    except (ImportError, AttributeError) as e:
+        raise SystemExit(
+            f"[identity] {SOURCE_CREDENTIALS} = {spec!r} could not be loaded: {e}"
+        ) from e
+    installer()
+    _installed_source_credentials.add(spec)
+
+
+_installed_source_credentials: set[str] = set()
 
 
 @dataclass
@@ -645,6 +697,7 @@ def load_common(raw: Mapping) -> CommonConfig:
         reject_unknown(gcp, {"project", "location", "quota_project"}, "[gcp]")
     cfg.gcp = {k: str(v) for k, v in raw.get("gcp", {}).items()}
     cfg.identity = load_identity(raw)
+    install_source_credentials(cfg.identity)
     if v := raw.get("bus_root"):
         cfg.bus_root = Path(v).expanduser()
     if v := raw.get("token_db_path"):

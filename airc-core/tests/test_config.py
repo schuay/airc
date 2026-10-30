@@ -593,6 +593,34 @@ def test_identity_declares_principals_and_maps_uses():
     assert ident.principal_for("cas").kind == "luci_auth"
 
 
+def test_identity_source_credentials_installer_runs_once(monkeypatch):
+    """`source_credentials` is an import string called once at load; a second
+    load with the same string does not call it again, and a bad string fails
+    at startup naming the key."""
+    import sys
+    import types
+
+    from airc_core import config as config_mod
+
+    calls: list[str] = []
+    mod = types.ModuleType("fake_source_pkg")
+    mod.install = lambda: calls.append("installed")
+    monkeypatch.setitem(sys.modules, "fake_source_pkg", mod)
+    monkeypatch.setattr(config_mod, "_installed_source_credentials", set())
+
+    raw = {"identity": {"source_credentials": "fake_source_pkg:install"}}
+    ident = load_common(raw).identity
+    assert ident.source_credentials == "fake_source_pkg:install"
+    assert ident.principal_for("gerrit").kind == "luci_auth"
+    load_common(raw)
+    assert calls == ["installed"]
+
+    with pytest.raises(SystemExit, match="source_credentials must be an import"):
+        load_common({"identity": {"source_credentials": "no-colon"}})
+    with pytest.raises(SystemExit, match="could not be loaded"):
+        load_common({"identity": {"source_credentials": "fake_source_pkg:missing"}})
+
+
 @pytest.mark.parametrize(
     "section, match",
     [
