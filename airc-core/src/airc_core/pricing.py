@@ -128,7 +128,7 @@ _DEEPSEEK_FLASH = Price(
 # input rate; the read rate is 0.1x of input unless the listing says otherwise,
 # so only the exceptions carry one. No storage fee. Vertex prices the same
 # checkpoints under its own partner schedule, which this table does not model.
-_CLAUDE_READ = date(2026, 10, 6)
+_CLAUDE_READ = date(2026, 10, 30)
 
 
 def _claude(
@@ -167,7 +167,9 @@ _CLAUDE: tuple[Price, ...] = (
     _claude("claude-opus-4-8", input=5.0, output=25.0),
     _claude("claude-opus-4-7", input=5.0, output=25.0),
     _claude("claude-opus-4-6", input=5.0, output=25.0),
-    _claude("claude-sonnet-5-5", input=2.0, output=10.0),
+    # Cache reads cut from 0.2 to 0.1 on 2026-10-07 (platform release notes);
+    # writes and the other rates were unchanged.
+    _claude("claude-sonnet-5-5", input=2.0, output=10.0, cache_read=0.1),
     _claude("claude-sonnet-5", input=2.0, output=10.0),
     _claude("claude-sonnet-4-6", input=3.0, output=15.0),
     # Two rate cards, chosen by the prompt size of each call: the second

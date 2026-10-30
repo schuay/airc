@@ -89,7 +89,7 @@ def test_gemini_4_argon_is_listed_at_the_standard_rate_with_no_cache_fees():
         ("claude-opus-4-8", (5.0, 0.5, 25.0)),
         ("claude-opus-4-7", (5.0, 0.5, 25.0)),
         ("claude-opus-4-6", (5.0, 0.5, 25.0)),
-        ("claude-sonnet-5-5", (2.0, 0.2, 10.0)),
+        ("claude-sonnet-5-5", (2.0, 0.1, 10.0)),
         ("claude-sonnet-5", (2.0, 0.2, 10.0)),
         ("claude-sonnet-4-6", (3.0, 0.3, 15.0)),
         ("claude-haiku-5-5", (0.1, 0.01, 0.5)),
