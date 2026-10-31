@@ -8,6 +8,8 @@ git submodule) and register their subscribers, personas, payloads, and config.
 
 An app pulls this repo in at `vendor/core`. See `airc-room/PLUGINS.md` for the
 plugin contract.
+Architecture rules: `ARCHITECTURE.md`. Read before adding a subscriber,
+handler, tool, or seam.
 
 ## Quick start
 
