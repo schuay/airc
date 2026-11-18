@@ -32,6 +32,15 @@ def test_both_anthropic_routes_share_one_record():
     )
 
 
+def test_only_anthropic_reads_a_prefix_cache_after_the_response():
+    assert traits_for("anthropic:claude-sonnet-5-5").prefix_cache_after_response
+    assert (
+        traits_for("google_vertexai:gemini-3.8-flash").prefix_cache_after_response
+        is False
+    )
+    assert traits_for("some_new_provider:m").prefix_cache_after_response is False
+
+
 def test_an_unknown_provider_gets_a_neutral_record():
     """The table is an optimization over asking the provider. A provider missing
     from it keeps working, with nothing dropped and the common field name."""

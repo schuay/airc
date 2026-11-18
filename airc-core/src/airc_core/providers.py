@@ -52,6 +52,11 @@ class ProviderTraits:
     # when it accepts none. A level outside this set is refused, not mapped to
     # the nearest one: that would change the request without saying so.
     effort_levels: tuple[str, ...] = ()
+    # A request that repeats an earlier request's prompt prefix reads it from
+    # the cache that request wrote, but only once that request's response has
+    # started: identical requests sent together each write their own copy.
+    # Callers that fan out identical requests send one first when this is set.
+    prefix_cache_after_response: bool = False
 
     @property
     def supports_effort(self) -> bool:
@@ -65,6 +70,7 @@ class ProviderTraits:
 # it.
 _ANTHROPIC = ProviderTraits(
     id="anthropic",
+    prefix_cache_after_response=True,
     unsupported_kwargs=("temperature", "top_p", "top_k", "seed"),
     unsupported_note=(
         "Sampling was removed from the Messages API with no replacement --"
