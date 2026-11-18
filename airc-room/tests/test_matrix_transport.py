@@ -56,6 +56,7 @@ class _FakeClient:
 
     def __init__(self, *a, **k):
         self.sent = []
+        self.tx_ids = []
         self.typing = []
         self.callback = None
         self.joined = []
@@ -78,6 +79,7 @@ class _FakeClient:
         self._next_event_id += 1
         eid = f"$sent{self._next_event_id}:example.org"
         self.sent.append((room_id, content))
+        self.tx_ids.append(tx_id)
         return _Resp(eid)
 
     async def room_typing(self, room_id, state, timeout=None):
@@ -113,6 +115,26 @@ def _msg(thread_id, sender, kind, text):
 
 
 # -- outbound -----------------------------------------------------------------
+
+
+async def test_tx_id_is_stable_on_retry_and_unique_across_stores(tmp_path, monkeypatch):
+    # The homeserver answers a repeated transaction id with the original event
+    # and posts nothing, so a rebuilt store, whose message ids restart, must not
+    # reuse the ids an earlier store sent under the same token and room.
+    t, room, _store, client = _make(tmp_path, monkeypatch)
+    tid = room.default_thread().id
+    msg = _msg(tid, "gc", MessageKind.AGENT, "hi")
+    await t.deliver(msg)
+    await t.deliver(msg)
+    assert client.tx_ids[0] == client.tx_ids[1]
+
+    rebuilt = tmp_path / "rebuilt"
+    rebuilt.mkdir()
+    t2, room2, _store2, client2 = _make(rebuilt, monkeypatch)
+    tid2 = room2.default_thread().id
+    assert tid2 == tid
+    await t2.deliver(_msg(tid2, "gc", MessageKind.AGENT, "hi"))
+    assert client2.tx_ids[0] != client.tx_ids[0]
 
 
 async def test_deliver_renders_plain_and_html(tmp_path, monkeypatch):

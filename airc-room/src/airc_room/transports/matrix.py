@@ -226,11 +226,17 @@ class MatrixTransport:
                 content["formatted_body"] = html
             if self._cfg.use_threads and root:
                 content.update(self._thread_relation(root))
+            # The homeserver deduplicates by transaction id per device and
+            # answers a repeat with the original event, posting nothing. A
+            # message id alone repeats once the store is rebuilt (the sequence
+            # restarts), so the scope includes the thread's chat_key, a uuid
+            # assigned at thread creation. A retry of the same page keeps its id.
+            scope = f"matrix:{room_id}:{self._store.chat_key(msg.thread_id)}"
             resp = await self._client.room_send(
                 room_id,
                 message_type="m.room.message",
                 content=content,
-                tx_id=page_token(f"matrix:{room_id}", msg.id, part),
+                tx_id=page_token(scope, msg.id, part),
             )
             event_id = getattr(resp, "event_id", None)
             if not event_id:
