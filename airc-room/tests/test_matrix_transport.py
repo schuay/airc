@@ -281,6 +281,8 @@ async def test_inbound_posts_human_message(tmp_path, monkeypatch):
     msgs = store.thread_messages(store.list_threads()[0].id)
     assert len(msgs) == 1
     assert msgs[0].sender == "bob"
+    # The display name is shown; the Matrix user id is the identity.
+    assert msgs[0].sender_id == "@bob:example.org"
     assert msgs[0].kind == MessageKind.HUMAN
     assert msgs[0].text == "hello airc"
 

@@ -357,7 +357,16 @@ class MatrixTransport:
             self._store.set_chat_user(event.sender, sender)
         thread_id = self._resolve_thread(room, event)
         log.info("matrix: inbound from %s in %s", sender, room.room_id)
-        await self._room.post(thread_id, sender, MessageKind.HUMAN, event.body)
+        # The Matrix user id is the sender's identity. The display name above
+        # is what a person sets for themselves, so anything that decides who
+        # may do something compares the id.
+        await self._room.post(
+            thread_id,
+            sender,
+            MessageKind.HUMAN,
+            event.body,
+            sender_id=event.sender,
+        )
 
     def _resolve_thread(self, room: MatrixRoom, event: RoomMessageText) -> int:
         """Map an inbound event to a room thread id.
