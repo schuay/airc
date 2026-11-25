@@ -48,7 +48,7 @@ class Confinement(Protocol):
 # python/vpython launcher; `cat tools/dev/gm.py` stays clear because `cat` is
 # neither.
 _BUILD_TRAP = re.compile(
-    r"(?:^|[;&|]+)\s*"
+    r"(?:^|[;&|\n]+)\s*"
     r"(?:(?:\S*/)?(?:v?python3?)\s+)?"
     r"(?:\S*/)?"
     r"(?:ninja|siso\s+ninja|gn\s+clean|gm\.py|gclient)\b",
@@ -61,6 +61,23 @@ _BUILD_TRAP_MSG = (
     " build. The worktree is already build-ready: gm.py and gclient would"
     " re-sync deps against the shared read-only checkout, and `gn clean` forces"
     " a slow cold rebuild."
+)
+# `git clean` with -x or -X deletes gitignored files, including `out/` and
+# symlinked dependency directories. Match at a command boundary (including
+# after a newline in multi-line commands) and check for any short-flag cluster
+# containing x/X before the next separator.
+_GIT_CLEAN_TRAP = re.compile(
+    r"(?:^|[;&|\n]+)\s*"
+    r"(?:\S*/)?git\b"
+    r"(?:\s+(?:-[Cc]\s+\S+|-\S+))*"
+    r"\s+clean\b"
+    r"[^;&|\n]*?(?:\s-[a-zA-Z]*[xX][a-zA-Z]*\b)",
+)
+_GIT_CLEAN_TRAP_MSG = (
+    "error: `git clean` with `-x`/`-X` is disabled -- it deletes ignored"
+    " files including `out/` and symlinked dependencies, leaving the worktree"
+    " unbuildable. Remove specific scratch files with `rm` or use"
+    " `git clean -fd` (without `-x`) instead."
 )
 
 
@@ -134,6 +151,8 @@ async def run_shell(
 ) -> str:
     if _BUILD_TRAP.search(command):
         return _BUILD_TRAP_MSG
+    if _GIT_CLEAN_TRAP.search(command):
+        return _GIT_CLEAN_TRAP_MSG
     root = cwd or os.environ.get("AIRC_TOOLS_ROOT") or None
     env = {**os.environ, **DEFANG_ENV}
     # Under a sandbox the wrapper owns cwd (--chdir) and environment

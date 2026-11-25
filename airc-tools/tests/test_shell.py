@@ -6,7 +6,7 @@ import time
 
 import pytest
 from airc_tools.limits import MAX_SHELL_CAPTURE
-from airc_tools.shell import _BUILD_TRAP_MSG, run_shell
+from airc_tools.shell import _BUILD_TRAP_MSG, _GIT_CLEAN_TRAP_MSG, run_shell
 
 
 async def test_basic_exit_zero():
@@ -23,8 +23,33 @@ async def test_build_trap_blocks_raw_ninja_and_gn_clean():
         "gn clean out/x64.optdebug",
         "cd out && ninja",
         "rm -rf x; gn clean out",
+        "echo ok\nninja -C out/x64.optdebug d8",
     ):
         assert await run_shell(cmd) == _BUILD_TRAP_MSG, cmd
+
+
+async def test_git_clean_trap_blocks_ignored_wipes_and_allows_untracked_clean():
+    # `git clean` with -x/-X deletes gitignored build dirs and symlinked deps.
+    for cmd in (
+        "git clean -fdx",
+        "git clean -xdf",
+        "git clean -Xdf",
+        "git clean -fx",
+        "git clean -X -f",
+        "git -C /wt clean -dfx",
+        "git commit -m 'msg'\ngit clean -fdx",
+        "git status && git clean -f -d -x",
+    ):
+        assert await run_shell(cmd) == _GIT_CLEAN_TRAP_MSG, cmd
+
+    # Without -x/-X (or when merely mentioned as text), commands run normally.
+    for cmd in (
+        "echo git clean -fdx",
+        "echo git clean -fd",
+    ):
+        out = await run_shell(cmd)
+        assert out != _GIT_CLEAN_TRAP_MSG and "exit 0" in out, cmd
+    assert await run_shell("git clean -nd") != _GIT_CLEAN_TRAP_MSG
 
 
 async def test_build_trap_blocks_gm_and_gclient_however_they_are_spelled():
